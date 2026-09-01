@@ -698,3 +698,19 @@ if they no longer fit. Verified by measuring the title bar of a maximised applic
 framebuffer across three live re-modes: it spans 0-1279 at 1280x698, 0-799 after shrinking to
 800x500, and 0-1095 after growing to 1096x600. Without this, a window maximised at the old size
 kept it, and windows could be left entirely off-screen after a shrink.
+
+**2026-09-01 (night) — delivery budget measured, and it changes a Phase 4 assumption.**
+Resource timings for a cold load through to Program Manager, plus several live re-modes:
+
+| | MB |
+|---|---|
+| Disk image (of a 245 MB image, fetched lazily by Range) | 14.0 |
+| `v86.wasm` | 2.0 |
+| Everything else (BIOSes, module scripts) | 1.2 |
+| **Total** | **17.2** |
+
+So a first load costs about 17 MB against SPEC 2.7's 15-30 MB target, *without* trimming the disk
+image at all: lazy Range fetching means only the sectors DOS and Windows actually touch are
+transferred. Rebuilding a lean image from the floppies is therefore a size optimisation worth
+maybe a few MB, not a prerequisite for shipping. The server does not compress, so gzip on the
+wire would cut this further.
