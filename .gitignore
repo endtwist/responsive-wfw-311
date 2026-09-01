@@ -1,0 +1,18 @@
+.DS_Store
+node_modules/
+
+# Microsoft-copyrighted inputs: never committed
+guest/ddk/
+image/*.img
+image/*.img.*
+image/floppies/
+*.img
+*.iso
+*.7z
+
+# build outputs
+build/
+guest/**/build/
+guest/**/obj/
+web/dist/
+tools/uasm/
