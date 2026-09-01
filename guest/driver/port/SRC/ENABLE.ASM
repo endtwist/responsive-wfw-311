@@ -372,118 +372,59 @@ cEnd
 
 PUBLIC	enable_read_profile
 enable_read_profile	PROC	NEAR
-
 	push	bp
-
 	cmp	Profile_read,1
 	jne	@F
 	jmp	enable_read_profile_done
 @@:	mov     Profile_read,1
-
-	lea	ax,boot_category
-        push    ds
-        push    ax
-	lea	ax,res_member
-        push    ds
-        push    ax
-	push	ds				;this is the default as well
-        push    ax
-        lea     ax,aszCurDrvFName
-        push    ds
-        push    ax
-        push    MAXFNAMELEN
-	lea	ax,aszSystemIni 		;ptr to "system.ini" string
-        push    ds                              ;long ptr
-        push    ax
-	call	GetPrivateProfileString
-
-	sub	ax,ax				;default return value
-	mov	bx,4				;number different modes
-        lea     si,aszCurDrvFName
-	lea	bp,sysini_modestruc
-	call	enable_find_substring
-
-	mov	bx,ax
-	mov	al,mode_number[bx]
-	mov	Vmode,ax
-	shl	bx,1
-	mov	ax,mode_screen_width[bx]
+;	responsive-wfw311: the host tells us the mode through the adapter.
+	mov	dx,01CEh
+	mov	ax,016h			;DEBUG register reads as 'PV' signature
+	out	dx,ax
+	inc	dx
+	in	ax,dx
+	cmp	ax,05056h
+	jne	erp_defaults
+	dec	dx
+	mov	ax,010h			;HOST_XRES
+	out	dx,ax
+	inc	dx
+	in	ax,dx
 	mov	VScreen_Width,ax
-	mov	ax,mode_screen_height[bx]
+	dec	dx
+	mov	ax,011h			;HOST_YRES
+	out	dx,ax
+	inc	dx
+	in	ax,dx
 	mov	VScreen_Height,ax
-
-@@:	lea	ax,boot_category
-        push    ds
-        push    ax
-	lea	ax,font_member
-        push    ds
-        push    ax
-	push	ds				;this is the default as well
-        push    ax
-        lea     ax,aszCurDrvFName
-        push    ds
-        push    ax
-        push    MAXFNAMELEN
-	lea	ax,aszSystemIni 		;ptr to "system.ini" string
-        push    ds                              ;long ptr
-        push    ax
-	call	GetPrivateProfileString
-
-	mov	ax,96				;default return value
-	mov	bx,2				;number different modes
-        lea     si,aszCurDrvFName
-	lea	bp,sysini_fontstruc
-	call	enable_find_substring
-        mov     dpi_size,ax
-
-@@:	lea	ax,boot_category
-        push    ds
-        push    ax
-	lea	ax,dac_member
-        push    ds
-        push    ax
-	push	ds				;this is the default as well
-        push    ax
-        lea     ax,aszCurDrvFName
-        push    ds
-        push    ax
-        push    MAXFNAMELEN
-	lea	ax,aszSystemIni 		;ptr to "system.ini" string
-        push    ds                              ;long ptr
-        push    ax
-	call	GetPrivateProfileString
-
-	mov	ax,2			       ;default return value
-	mov	bx,2				;number different modes
-        lea     si,aszCurDrvFName
-	lea	bp,sysini_dacstruc
-        call    enable_find_substring
-	mov	dac_size,al
-
-@@:	lea	ax,boot_category
-        push    ds
-        push    ax
-	lea	ax,Enable216_member
-        push    ds
-        push    ax
-	push	ds				;this is the default as well
-        push    ax
-        lea     ax,aszCurDrvFName
-        push    ds
-        push    ax
-        push    MAXFNAMELEN
-	lea	ax,aszSystemIni 		;ptr to "system.ini" string
-        push    ds                              ;long ptr
-        push    ax
-	call	GetPrivateProfileString
-
-	mov	ax,0			       ;default return value
-	mov	bx,2				;number different modes
-        lea     si,aszCurDrvFName
-	lea	bp,sysini_216struc
-        call    enable_find_substring
-	mov	enable_216,ax
-
+	dec	dx
+	mov	ax,012h			;HOST_DPI
+	out	dx,ax
+	inc	dx
+	in	ax,dx
+	mov	dpi_size,ax
+	cmp	VScreen_Width,320
+	jb	erp_defaults
+	cmp	VScreen_Width,2560
+	ja	erp_defaults
+	cmp	VScreen_Height,200
+	jb	erp_defaults
+	cmp	VScreen_Height,1600
+	ja	erp_defaults
+	jmp	short erp_have_mode
+erp_defaults:
+	mov	VScreen_Width,640
+	mov	VScreen_Height,480
+	mov	dpi_size,96
+erp_have_mode:
+	and	VScreen_Width,not 7	;multiple of 8
+	and	VScreen_Height,not 1
+	cmp	dpi_size,120
+	je	@F
+	mov	dpi_size,96
+@@:	mov	Vmode,0
+	mov	dac_size,2
+	mov	enable_216,0
 enable_read_profile_done:
 	push	es
         cCall   AllocCSToDSAlias, <cs>          ;physical_device is in code seg

@@ -28,7 +28,7 @@ assumes ds,Nothing
 assumes es,Nothing
 assumes ss,Nothing
 
-SCREEN_DSCAN	EQU	1024
+SCREEN_DSCAN	EQU	4096		;responsive-wfw311: must match MEMORY_WIDTH in cursor.inc
 
 ;
 ;	blt_pat_dst_prep

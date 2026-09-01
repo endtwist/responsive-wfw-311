@@ -173,6 +173,15 @@ vga_set_features	ENDP			       ;
 ;	can be called directly.
 ;
 
+	externNP pv_apply_banks
+sEnd Code
+sBegin Data
+	externB pv_page
+	externB pv_src_bank
+	externB pv_dst_bank
+sEnd Data
+sBegin Code
+	assumes cs,Code
 PUBLIC	far_set_page
 far_set_page	PROC	FAR
 
@@ -183,37 +192,24 @@ far_set_page	ENDP
 
 PUBLIC	set_page
 set_page	PROC	NEAR
-
+;	DL = 64K bank; CF set = destination (write) bank, clear = source (read) bank
 	pushf
-	push	ax				;save regs
-	push	dx
-	mov	ah,dl
-	mov	dx,VGAREG_SQ_ADDR		;set the Extended page bit
-	mov	al,VGAREG_SQ_EXTENDED_PAGE
-	out	dx,al
-	inc	dx
-	mov	al,ah
-	and	al,01H
-	cli
-	out	dx,al
-
-	mov	dx,VGAREG_MISC_R		;read in the misc reg
-	in	al,dx
-	and	al,NOT 20H			;mask out the page bit
-	shl	ah,4				;place desired page bit in
-	and	ah,20H				; correct bit position and mask
-	or	al,ah				; it into al
-	mov	dx,VGAREG_MISC_W		;then write the new page bit in
-	out	dx,al
-	pop	dx
+	push	ds
+	push	ax
+	mov	ax,DGROUP
+	mov	ds,ax
+	mov	al,dl
+	and	al,3
+	mov	ds:[pv_page],al
 	pop	ax
-	shr	dl,2				;prepare to set bank bits
+	pop	ds
+	push	dx
+	shr	dl,2
 	popf					;carry flag is important
 	call	set_banko
-        sti
+	pop	dx
         ret
-
-set_page    ENDP				;
+set_page    ENDP				;
 
 ;
 ;	set_banko
@@ -243,30 +239,21 @@ far_set_banko	ENDP
 
 PUBLIC	set_banko
 set_banko	PROC	NEAR
-
-	push	ax			;save regs
-	push	cx
-	mov	cx,0FC03H		;bank select mask -- assume dst
-	mov	ah,dl
+;	DL = 256K bank; CF set = destination (write) bank, clear = source (read) bank
+	push	ds
+	push	ax
+	mov	ax,DGROUP
+	mov	ds,ax
 	jc	@F
-	shl	ah,2
-	mov	cx,0F30CH
-@@:	and	ah,cl
-
-	mov	dx,VGAREG_SQ_ADDR
-	mov	al,VGAREG_SQ_BANK_SELECT
-	out	dx,al			;set the bank select index
-	inc	dx
-	in	al,dx			;get current bank reg value
-	and	al,ch			;mask out the old bank select bits so
-	or	al,ah			; that we can put in a new one
-	out	dx,al			;write it out
-
-	pop	cx			;restore the regs
+	mov	ds:[pv_src_bank],dl
+	jmp	short set_banko_apply
+@@:	mov	ds:[pv_dst_bank],dl
+set_banko_apply:
+	call	pv_apply_banks
 	pop	ax
+	pop	ds
         ret
-
-set_banko   ENDP			;
+set_banko   ENDP			;
 
 
 ;
@@ -298,37 +285,24 @@ far_set_both_pages	ENDP
 
 PUBLIC	set_both_pages
 set_both_pages	PROC	NEAR
-
+;	DL = 64K bank for both reads and writes
+	push	ds
+	push	ax
 	push	dx
-        push    ax                              ;save regs
-	push	dx
-	mov	ah,dl
-	mov	dx,VGAREG_SQ_ADDR		;set the Extended page bit
-	mov	al,VGAREG_SQ_EXTENDED_PAGE
-	out	dx,al
-	inc	dx
-	mov	al,ah
-	and	al,01H
-	cli
-	out	dx,al
-
-	mov	dx,VGAREG_MISC_R		;read in the misc reg
-	in	al,dx
-	and	al,NOT 20H			;mask out the page bit
-	shl	ah,4				;place desired page bit in
-	and	ah,20H				; correct bit position and mask
-	or	al,ah				; it into al
-	mov	dx,VGAREG_MISC_W		;then write the new page bit in
-	out	dx,al
+	mov	ax,DGROUP
+	mov	ds,ax
+	mov	al,dl
+	and	al,3
+	mov	ds:[pv_page],al
+	shr	dl,2
+	mov	ds:[pv_src_bank],dl
+	mov	ds:[pv_dst_bank],dl
+	call	pv_apply_banks
 	pop	dx
 	pop	ax
-	shr	dl,2				;prepare to set bank bits
-	call	set_both_banko
-	sti
-	pop	dx
+	pop	ds
         ret
-
-set_both_pages	ENDP				    ;
+set_both_pages	ENDP				    ;
 
 ;
 ;	set_both_banko
@@ -355,25 +329,18 @@ far_set_both_banko	ENDP
 
 PUBLIC	set_both_banko
 set_both_banko	PROC	NEAR
-
-	push	ax			;save regs
-	and	dl,03H
-	mov	ah,dl
-	shl	ah,2
-	or	ah,dl
-
-	mov	dx,VGAREG_SQ_ADDR
-	mov	al,VGAREG_SQ_BANK_SELECT
-	out	dx,al			;set the bank select index
-	inc	dx
-	in	al,dx			;get current bank reg value
-	and	al,0F0H 		;mask out the old bank select bits so
-	or	al,ah			; that we can put in a new one
-	out	dx,al			;write it out
+;	DL = 256K bank for both reads and writes
+	push	ds
+	push	ax
+	mov	ax,DGROUP
+	mov	ds,ax
+	mov	ds:[pv_src_bank],dl
+	mov	ds:[pv_dst_bank],dl
+	call	pv_apply_banks
 	pop	ax
+	pop	ds
 	ret
-
-set_both_banko	ENDP			    ;
+set_both_banko	ENDP			    ;
 
 sEnd    Code
 

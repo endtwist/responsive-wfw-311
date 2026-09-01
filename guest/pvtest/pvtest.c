@@ -58,6 +58,8 @@ static void setmode(unsigned w, unsigned h) {
     wr(R_VIRT_W, PITCH); wr(R_VIRT_H, 1600);
     wr(R_XOFF, 0); wr(R_YOFF, 0);
     wr(R_ENABLE, 1 | 0x40 | 0x80);           /* enable | LFB | no-clear */
+    outpw(0x3C4, 0x0E04);                    /* sequencer: chain-4 on (linear byte addressing) */
+    outpw(0x3C4, 0x0F02);                    /* map mask: all planes */
     cur_bank = 0xFFFF;
     sprintf(buf, "pvtest: mode %ux%u pitch %u (virt_w reads %u)", w, h, PITCH, rd(R_VIRT_W));
     dbg(buf);

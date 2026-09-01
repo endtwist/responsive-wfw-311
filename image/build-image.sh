@@ -7,9 +7,9 @@
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120]
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; esac; done
-IMG=work.img; OFF=16384; M="-i $IMG@@$OFF"
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; esac; done
+OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
 for f in changes/system/*;  do mcopy -o $M "$f" ::/WINDOWS/SYSTEM/; done

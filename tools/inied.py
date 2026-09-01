@@ -32,7 +32,7 @@ if disp == "svga256":
 elif disp == "vga":
     setkey(secs, "boot", "display.drv", "vga.drv"); setkey(secs, "boot", "386grabber", "vga.3gr"); setkey(secs, "386Enh", "display", "*vddvga")
 elif disp == "pvdisp":
-    setkey(secs, "boot", "display.drv", "pvdisp.drv"); setkey(secs, "boot", "386grabber", "vgadib.3gr"); setkey(secs, "386Enh", "display", "vddsvga.386")
+    setkey(secs, "boot", "display.drv", "pvdisp.drv"); setkey(secs, "boot", "386grabber", "vgadib.3gr"); setkey(secs, "386Enh", "display", "*vddvga"); setkey(secs, "boot.description", "display.drv", "Responsive paravirtual display (256 colors)")
 out = []
 for name, lines in secs:
     if name: out.append(f"[{name}]")

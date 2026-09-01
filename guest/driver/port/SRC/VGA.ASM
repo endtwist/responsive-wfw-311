@@ -416,6 +416,7 @@ sBegin	InitSeg
 assumes cs,InitSeg
 
 
+PV_PITCH	equ	4096		;must match MEMORY_WIDTH in cursor.inc
 COLOR_FORMAT	equ	(0801h) 	;msbyte = bits/pel; lsbyte = # planes
 
 ;-----------------------------------------------------------------------;
@@ -874,85 +875,11 @@ assumes ds,Data
 
 PUBLIC	set_board_flags
 set_board_flags 	PROC	NEAR
-
-;	I will assume either 512K or 1Meg of memory
-
-	mov	dl,3				;set bank 3
-	call	far_set_both_banko
-
-	mov	ax,ScreenSelector
-	mov	es,ax
-	mov	ax,es:[0]
-	push	ax
-
-	mov	bx,2
-	mov	ax,55AAH
-	mov	byte ptr es:[0],al
-	mov	byte ptr es:[1],ah
-	mov	al,es:[0]
-	cmp	al,0AAH
-	jne	sbf0
-	mov	al,es:[1]
-	cmp	al,55H
-	jne	sbf0
-
-	mov	ax,00FFH
-	mov	byte ptr es:[0],al
-	mov	byte ptr es:[1],ah
-	mov	al,es:[0]
-	cmp	al,0FFH
-	jne	sbf0
-	mov	al,es:[1]
-	cmp	al,00H
-	jne	sbf0
-	shl	bx,1
-
-sbf0:	pop	ax
-	mov	es:[0],ax
-	mov	Video_Memory_Banks,bl
-
-	mov	dx,03C4H
-	mov	al,08FH
-	out	dx,al
-	inc	dx
-	in	al,dx
-	mov	ah,al
-
-	dec	dx
-	mov	al,08EH
-	out	dx,al
-	inc	dx
-	in	al,dx
+	xor	ax,ax			;no V7 features: no split bank, no 216 blts
 	mov	Video_Board_Id,ax
-
-	sub	bx,bx
-	cmp	ax,07151H			;VRAMII rev B id
-        je      short board_flag_yes_splitbank
-	cmp	ax,07152H			;VRAMII rev C and D id
-	je	short board_flag_yes_splitbank
-	cmp	ax,07760H			;HT216 rev B and C
-	je	short board_flag_yes_splitbank
-	cmp	ax,07763H			;HT216 rev B, C, and D
-	je	short board_flag_yes_splitbank
-	cmp	ax,07764H			;HT216 rev E
-        jne     short board_flag_no_splitbank
-board_flag_yes_splitbank:
-	or	bl,BOARD_FLAG_SPLITBANK
-board_flag_no_splitbank:
-	cmp	ax,07760H			;HT216 rev B and C
-	je	short board_flag_yes_216
-	cmp	ax,07763H			;HT216 rev B, C, and D
-	je	short board_flag_yes_216
-	cmp	ax,07764H			;HT216 rev E
-        jne     short board_flag_no_216
-board_flag_yes_216:
-	cmp	enable_216,1
-	jne	short board_flag_no_216
-	or	bl,BOARD_FLAG_ENABLE_216
-board_flag_no_216:
-	mov	Video_Board_Flags,bl
+	mov	Video_Memory_Banks,al
+	mov	Video_Board_Flags,al
 	ret
-
 set_board_flags 	ENDP
 
 
@@ -977,102 +904,8 @@ far_set_dacsize 	ENDP
 
 PUBLIC  set_dacsize
 set_dacsize	PROC	NEAR
-
-	mov	dx,3C4H 		;permit 8 bit operation
-	mov	al,0C1H 		;if the dac is only a 6 bit dac,
-	out	dx,al			; permitting 8 bit operation has
-	inc	dx			; no effect.
-	in	al,dx
-	and	al,NOT 1
-	or	al,bl
-	out	dx,al
-
-;	Enable an 8 bit DAC if there is 1
-
-	mov	dx,46e8h
-	mov	al,16h
-	out	dx,al			; disable VGA
-	out	dx,al
-
-	mov	dx,3c4h 		; enable Integrator
-	mov	al,0d0h
-	out	dx,al
-
-	mov	al,0bh			; talk to CA1
-	out	dx,al
-
-	push	bx
-	shl	bx,1
-	or	bl,1
-	inc	dx
-	in	al,dx			;bit 0 = (1 then CA1 is output, 0 then
-	and	al,0fch 		; CA1 is an input). Bit 0 should = 1
-	or	al,bl			;bit 1 = (1 then 8 bit DAC, 0 then
-	out	dx,al			; 6 bit DAC)
-
-	mov	al,0eh			; re-enable VGA
-	mov	dx,046e8h
-	out	dx,al
-	out	dx,al
-
-	mov	dac_size,2
-	pop	bx
-	or	bx,bx			;if setting 6 bit dac then done
-	je	@F
-
-	mov	dx,03C7H		;preserve DAC entry 0
-	sub	al,al
-	out	dx,al
-	add	dl,2
-	in	al,dx
-	mov	bh,al
-	in	al,dx
-	mov	bl,al
-	in	al,dx
-	mov	ah,al
-
-	dec	dx			; see if DAC supports 8 bits out
-	sub	al,al
-	out	dx,al
-	inc	dx
-	mov	al,80H			;write 808080H into index 00
-	out	dx,al
-	out	dx,al
-	out	dx,al
-
-	sub	dl,2
-	sub	al,al
-	out	dx,al
-	add	dl,2
-	in	al,dx			;8 bit dac/6 bit dac al = 80/00
-	add	al,80H			;   00/80
-	shr	al,6			;   00/02
-	mov	dac_size,al
-
-	mov	dx,03C8H		;restore DAC entry 0
-	sub	al,al
-	out	dx,al
-	inc	dx
-	mov	ah,al
-	out	dx,al
-	mov	al,bl
-	out	dx,al
-	mov	al,bh
-	out	dx,al
-
-	cmp	dac_size,2
-	jne	@F
-
-	mov	dx,3C4H 		;dac cannot handle 8 bits
-	mov	al,0C1H 		; so reset the DAC output to 6 bit mode
-	out	dx,al
-	inc	dx
-	in	al,dx
-	and	al,NOT 1
-	out	dx,al
-
-@@:     ret
-
+	mov	dac_size,2		;standard 6-bit VGA DAC
+	ret
 set_dacsize	ENDP
 
 
@@ -1095,25 +928,7 @@ far_set_cursor_addr	ENDP
 
 PUBLIC	set_cursor_addr
 set_cursor_addr 	PROC	NEAR
-
-	mov	dx,VGAREG_SQ_ADDR		;set the cursor bank to be
-	mov	al,VGAREG_SQ_INTERFACE		; the last available bank
-	out	dx,al				; in video memory
-	inc	dx
-	in	al,dx
-	mov	ah,Video_Memory_Banks		;NOTE: the hardware forces the
-	dec	ah				; data to come from offset
-	shl	ah,5				; 192K (= 3 * 64K) within a
-	and	ax,609FH			; 256K bank. But we do have a
-	or	al,ah				; choice of the 256 byte
-	out	dx,al				; boundary within a 64K page
-
-	dec	dx				;I choose the last 256 bytes
-	mov	ax,VGAREG_SQ_POINTER_ADDRESS	; of a 64K page.
-	mov	ah,0FFH
-        out     dx,ax
-	ret
-
+	ret				;no hardware cursor on the paravirtual adapter
 set_cursor_addr 	ENDP
 
 
@@ -1122,77 +937,76 @@ set_cursor_addr 	ENDP
 
 	public	setmode
 setmode proc    near
-
-	call	clear_video_ram
-	mov	ax,6F05H
-	mov	bx,Vmode		; set display mode
-        int     10h
-
-        mov     ax,0ea06h               ; enable V7 VGA extentions
-	mov	dx,03c4h
-        out     dx,ax
-
-	mov	ax,0FF94h		;set pointer pattern address
-        out     dx,ax
-
-	mov	dx,3d4H 		;set logical line length
-	mov	al,13H
-	out	dx,al
-	inc	dx
-	in	al,dx
-	cmp	al,40H
-	mov	al,80H
-	ja	@F
-	mov	al,40H
-@@:	out	dx,al
-
-	cmp	Vmode,68H
-	jne	setmode_not_720_512
-
-	mov	dx,3d4h
-	mov	al,3
-	out	dx,al
-	inc	dx
-	in	al,dx
-	and	al,07FH 		;turn off light pen read at 10,11
-	out	dx,al
-	dec	dx
-
-	mov	al,11H
-	out	dx,al
-	inc	dx
-	in	al,dx
-	and	al,07FH 		;turns off write protect cr0-7
-	out	dx,al
-	dec	dx
-
-	mov	ax,0ff12h
+;	responsive-wfw311: program the paravirtual adapter (Bochs DISPI + PV regs).
+;	Visible size from VScreen_Width/Height, scanline pitch fixed at PV_PITCH.
+	push	ax
+	push	dx
+	mov	dx,01CEh
+	mov	ax,4			;ENABLE = 0 while reprogramming
 	out	dx,ax
-
-	mov	al,7
-	out	dx,al
 	inc	dx
-	in	al,dx
-	and	al,0BDH
-	or	al,2
-	out	dx,al
-
-setmode_not_720_512:
-	cmp	Vmode,6AH
-	jne	@F
-
-	mov	dx,3DAH
-	in	al,dx
-	mov	dx,3C0H
-	mov	al,6
-	out	dx,al
-	or	al,al
-	out	dx,al
-	mov	al,20H
-	out	dx,al
-
-@@:	 ret
-
+	xor	ax,ax
+	out	dx,ax
+	dec	dx
+	mov	ax,1			;XRES
+	out	dx,ax
+	inc	dx
+	mov	ax,VScreen_Width
+	out	dx,ax
+	dec	dx
+	mov	ax,2			;YRES
+	out	dx,ax
+	inc	dx
+	mov	ax,VScreen_Height
+	out	dx,ax
+	dec	dx
+	mov	ax,3			;BPP
+	out	dx,ax
+	inc	dx
+	mov	ax,8
+	out	dx,ax
+	dec	dx
+	mov	ax,6			;VIRT_WIDTH = pitch
+	out	dx,ax
+	inc	dx
+	mov	ax,PV_PITCH
+	out	dx,ax
+	dec	dx
+	mov	ax,8			;X_OFFSET
+	out	dx,ax
+	inc	dx
+	xor	ax,ax
+	out	dx,ax
+	dec	dx
+	mov	ax,9			;Y_OFFSET
+	out	dx,ax
+	inc	dx
+	xor	ax,ax
+	out	dx,ax
+	dec	dx
+	mov	ax,4			;ENABLE = on + LFB (device clears memory)
+	out	dx,ax
+	inc	dx
+	mov	ax,0041h
+	out	dx,ax
+	mov	dx,03C4h		;sequencer: chain-4 on, extended memory, odd/even off
+	mov	ax,0E04h		; (the adapter honours planar write modes when
+	out	dx,ax			;  chain-4 is off, like real SVGA silicon)
+	mov	dx,03CEh		;graphics controller: 256-colour shift, write mode 0
+	mov	ax,4005h
+	out	dx,ax
+	mov	ax,0FF08h		;bit mask all ones
+	out	dx,ax
+	mov	ax,0003h		;no rotate, function copy
+	out	dx,ax
+	mov	ax,0001h		;set/reset disabled
+	out	dx,ax
+	mov	dx,03C4h
+	mov	ax,0F02h		;map mask: all planes
+	out	dx,ax
+	pop	dx
+	pop	ax
+	ret
 setmode endp
 
 	public	farsetmode
@@ -1204,59 +1018,7 @@ farsetmode      endp
 
 
 clear_video_ram PROC	NEAR
-
-        pusha
-	push	ds
-	push	es
-	mov	ax,10H			;set a planar mode
-	int	10H
-
-	mov	ax,ScreenSelector      ;set addr to start of bank
-        mov     es,ax
-        sub     di,di
-
-	mov	dx,03C4H
-	mov	ax,0EA06H		;enable extensions
-	out	dx,ax
-
-        mov     dx,03CEH                ;set write mode to write the latches
-        mov     al,05H
-        out     dx,al
-        inc     dx
-        in      al,dx
-        and     al,0FCH
-        or      al,1H
-        out     dx,al
-
-	mov	dx,3C4H 		;clear latches to 0
-	mov	ax,00A0H
-	out	dx,ax
-	inc	al
-	out	dx,ax
-	inc	al
-        out     dx,ax
-	inc	al
-        out     dx,ax
-
-	mov	al,0F6H 		;initialize the bank
-	out	dx,al
-	inc	dx
-	in	al,dx
-	mov	ah,3			;start with the third bank
-
-@@:	and	al,0F0H
-	or	al,ah
-	out	dx,al			;set the bank
-	mov	cx,8000H		;write the latches (0s) into memory
-	rep	stosw
-	dec	ah			;do the next bank
-	jns	@B
-
-	pop	es
-	pop	ds
-	popa
-	ret
-
+	ret				;the adapter clears memory on mode set
 clear_video_ram ENDP
 
 
@@ -1393,43 +1155,7 @@ cEnd
 	assumes es,nothing
 
 hook_int_10h proc near
-
-
-        push    ds
-
-;----------------------------------------------------------------------------;
-; have to change the vectors properly to vaoid GP faults in protected mode   ;
-;----------------------------------------------------------------------------;
-
-	mov	ax,CodeBASE		; get the CS selector
-        cCall   AllocCSToDSAlias,<ax>   ; get a data segment alias
-        push    ax                      ; push sel for call to FreeSelector
-        mov     ds,ax
-	assumes	ds,Code			; do this to save address in CS
-
-        mov     ax,3510h                ; get the vector
-	int	21h	
-	
-        mov     prev_int_10h.off,bx
-        mov     prev_int_10h.sel,es
-
-        mov     dx,CodeOFFSET int_10h_hook
-        mov     ax,CodeBASE
-	mov	ds,ax
-	assumes ds,nothing
-
-        mov     ax,2510h                ; set the vector
-        int     21h
-
-        cCall   FreeSelector            ; free the code alias selector
-                                        ;   .. NOTE pushed param above
-	pop	ds			; get back own data segment
-	assumes	ds,Data
-
-hook_int_10h_exit:
-
-        ret
-
+        ret				;nothing to re-enable after BIOS calls
 hook_int_10h endp
 
 ;---------------------------Public-Routine-----------------------------;
@@ -1460,31 +1186,7 @@ hook_int_10h endp
 	assumes es,nothing
 
 restore_int_10h proc near
-        push    ds                      ; save
-
-        mov     ax,CodeBASE             ; get the CS selector
-        mov     ds,ax                   ; do this to save address in CS
-        assumes ds,Code
-
-        mov     dx, prev_int_10h.off
-        mov     ax, prev_int_10h.sel
-
-        or      ax,ax
-        jz      restore_int_10h_exit
-
-        mov     ds,ax
-	assumes ds,nothing
-
-        mov     ax,2510h                ; set the previous vector
-        int     21h                     ;   takes DS:DX
-
-restore_int_10h_exit:
-
-        pop     ds                      ; get back own data segment
-        assumes ds,Data
-
         ret
-
 restore_int_10h endp
 
 sEnd    InitSeg

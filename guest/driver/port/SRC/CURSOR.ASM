@@ -375,6 +375,9 @@ unexclude	ENDP
 
 PUBLIC	Set_Cursor_Type
 Set_Cursor_Type 	PROC	NEAR
+	lea	bx,swcurs_funcs		;responsive-wfw311: software cursor only
+	and	cursor_flags,NOT DOUBLE_PUMP
+	jmp	Set_Cursor_Type_Found
 
 ;	First see if we can use a hardware cursor!!
 

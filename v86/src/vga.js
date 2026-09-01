@@ -360,6 +360,17 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
 
     // responsive-wfw311 paravirtual extensions (see SPEC.md §2.1)
     this.svga_pitch = 0;        // VIRT_WIDTH in pixels; 0 = same as visible width
+    this.svga_read_bank_offset = 0;
+    /**
+     * responsive-wfw311: Video Seven VRAM-style extended sequencer registers (index >= 5).
+     * The V7VGA-derived display driver relies on a small subset:
+     *   EC..EF  foreground latches (one colour byte per plane)
+     *   FE      fore/back mode; bit 3 = writes take their data from the foreground latches
+     *   A0..A3  back latches (read/write access to the VGA latch register)
+     *   others  stored so the driver's save/restore round-trips.
+     * @type {Uint8Array}
+     */
+    this.v7_seq = new Uint8Array(256);   // PV: separate read/write 64K banks (index 0x18/0x19); BANK (5) sets both
     this.pv_host_xres = 0;
     this.pv_host_yres = 0;
     this.pv_host_dpi = 96;
@@ -473,6 +484,8 @@ VGAScreen.prototype.get_state = function()
     state[63] = this.pv_host_dpi;
     state[64] = this.pv_status;
     state[65] = this.pv_generation;
+    state[66] = this.svga_read_bank_offset;
+    state[67] = this.v7_seq;
     state[60] = this.line_compare;
     state[61] = this.pixel_buffer;
     state[62] = this.dac_mask;
@@ -550,6 +563,8 @@ VGAScreen.prototype.set_state = function(state)
     this.pv_host_dpi = state[63] || 96;
     this.pv_status = state[64] || 0;
     this.pv_generation = state[65] || 0;
+    this.svga_read_bank_offset = state[66] || this.svga_bank_offset;
+    if(state[67]) this.v7_seq.set(state[67]);
     this.line_compare = state[60];
     state[61] && this.pixel_buffer.set(state[61]);
     this.dac_mask = state[62] === undefined ? 0xFF : state[62];
@@ -592,8 +607,13 @@ VGAScreen.prototype.vga_memory_read = function(addr)
 {
     if(this.svga_enabled)
     {
+        if(this.svga_bpp === 8 && !(this.sequencer_memory_mode & 0x8))
+        {
+            // 256-colour "unchained" planar access (chain-4 off), see svga_unchained_read
+            return this.svga_unchained_read(addr - 0xA0000);
+        }
         // vbe banked mode (accessing svga memory through the regular vga memory range)
-        return this.cpu.read8((addr - 0xA0000 | this.svga_bank_offset) + VGA_LFB_ADDRESS | 0);
+        return this.cpu.read8((addr - 0xA0000 | this.svga_read_bank_offset) + VGA_LFB_ADDRESS | 0);
     }
 
     var memory_space_select = this.miscellaneous_graphics_register >> 2 & 0x3;
@@ -666,6 +686,24 @@ VGAScreen.prototype.vga_memory_write = function(addr, value)
 {
     if(this.svga_enabled)
     {
+        if(this.svga_bpp === 8 && !(this.sequencer_memory_mode & 0x8))
+        {
+            this.svga_unchained_write(addr - 0xA0000, value);
+            return;
+        }
+        if(this.svga_bpp === 8 && (this.v7_seq[0xFE] & 0x08))
+        {
+            // chain-4 write in fore-latch mode: this byte is pixel (addr & 3) of a
+            // 4-pixel group; run it through the planar pipeline with latch data.
+            const off = addr - 0xA0000;
+            const plane = off & 3;
+            const plane_dword = this.compute_plane_dword(value, this.v7_fore_latch_dword());
+            if(this.plane_write_bm & 1 << plane)
+            {
+                this.cpu.write8((off | this.svga_bank_offset) + VGA_LFB_ADDRESS | 0, plane_dword >>> (plane * 8) & 0xFF);
+            }
+            return;
+        }
         // vbe banked mode (accessing svga memory through the regular vga memory range)
         this.cpu.write8((addr - 0xA0000 | this.svga_bank_offset) + VGA_LFB_ADDRESS | 0, value);
         return;
@@ -696,6 +734,96 @@ VGAScreen.prototype.vga_memory_write = function(addr, value)
     {
         this.vga_memory_write_text_mode(addr, value);
     }
+};
+
+/**
+ * responsive-wfw311: 256-colour planar ("unchained", Mode-X style) access to the
+ * linear framebuffer. With chain-4 off, CPU address A of the 64K window addresses
+ * plane-address A in all four planes; pixel n lives in plane (n & 3) at plane
+ * address (n >> 2). So the window covers 256K pixels, selected by the 256K bank
+ * (the 64K page bits of the bank register are ignored, as on the V7 chips this
+ * driver targets). Write modes 0-3, set/reset, rotate, bitmask, map mask and the
+ * latches behave as in the planar VGA path. Real SVGA chips route A000 accesses
+ * through the VGA graphics controller exactly like this; stock v86 shortcuts to
+ * linear bytes, which breaks drivers that fill 4 pixels per write.
+ */
+VGAScreen.prototype.svga_unchained_read = function(off)
+{
+    const base = (this.svga_read_bank_offset & ~0x3FFFF) + off * 4;
+    const mem = this.svga_memory;
+    if(base + 3 >= mem.length) return 0xFF;
+    const p0 = mem[base], p1 = mem[base + 1], p2 = mem[base + 2], p3 = mem[base + 3];
+    this.latch_dword = p0 | p1 << 8 | p2 << 16 | p3 << 24;
+    if(this.planar_mode & 0x08)
+    {
+        // read mode 1: colour compare
+        let reading = 0xFF;
+        if(this.color_dont_care & 0x1) reading &= p0 ^ ~(this.color_compare & 0x1 ? 0xFF : 0x00);
+        if(this.color_dont_care & 0x2) reading &= p1 ^ ~(this.color_compare & 0x2 ? 0xFF : 0x00);
+        if(this.color_dont_care & 0x4) reading &= p2 ^ ~(this.color_compare & 0x4 ? 0xFF : 0x00);
+        if(this.color_dont_care & 0x8) reading &= p3 ^ ~(this.color_compare & 0x8 ? 0xFF : 0x00);
+        return reading & 0xFF;
+    }
+    return mem[base + (this.plane_read & 3)];
+};
+
+VGAScreen.prototype.v7_fore_latch_dword = function()
+{
+    const r = this.v7_seq;
+    return (r[0xEC] | r[0xED] << 8 | r[0xEE] << 16 | r[0xEF] << 24) | 0;
+};
+
+VGAScreen.prototype.svga_unchained_write = function(off, value)
+{
+    // V7 fore-latch mode: CPU data is ignored, each plane gets its foreground latch byte
+    const feed = (this.v7_seq[0xFE] & 0x08) ? this.v7_fore_latch_dword() : undefined;
+    const plane_dword = this.compute_plane_dword(value, feed);
+    const base = (this.svga_bank_offset & ~0x3FFFF) + off * 4;
+    const mem = this.svga_memory;
+    if(base + 3 >= mem.length) return;
+    const plane_select = this.plane_write_bm & 0xF;
+    if(plane_select & 0x1) mem[base]     = plane_dword & 0xFF;
+    if(plane_select & 0x2) mem[base + 1] = plane_dword >> 8 & 0xFF;
+    if(plane_select & 0x4) mem[base + 2] = plane_dword >> 16 & 0xFF;
+    if(plane_select & 0x8) mem[base + 3] = plane_dword >>> 24 & 0xFF;
+};
+
+/**
+ * The VGA write-mode pipeline (modes 0-3) applied to one CPU byte; returns 4 plane bytes.
+ * @param {number=} feed_dword  optional per-plane data replacing the fed CPU byte (V7 fore latches)
+ */
+VGAScreen.prototype.compute_plane_dword = function(value, feed_dword)
+{
+    var plane_dword;
+    var write_mode = this.planar_mode & 3;
+    var bitmask = this.apply_feed(this.planar_bitmap);
+    var setreset_dword = this.apply_expand(this.planar_setreset);
+    var setreset_enable_dword = this.apply_expand(this.planar_setreset_enable);
+    switch(write_mode)
+    {
+        case 0:
+            value = this.apply_rotate(value);
+            plane_dword = feed_dword === undefined ? this.apply_feed(value) : feed_dword;
+            plane_dword = this.apply_setreset(plane_dword, setreset_enable_dword);
+            plane_dword = this.apply_logical(plane_dword, this.latch_dword);
+            plane_dword = this.apply_bitmask(plane_dword, bitmask);
+            break;
+        case 1:
+            plane_dword = this.latch_dword;
+            break;
+        case 2:
+            plane_dword = this.apply_expand(value);
+            plane_dword = this.apply_logical(plane_dword, this.latch_dword);
+            plane_dword = this.apply_bitmask(plane_dword, bitmask);
+            break;
+        default:
+            value = this.apply_rotate(value);
+            bitmask &= this.apply_feed(value);
+            plane_dword = setreset_dword;
+            plane_dword = this.apply_bitmask(plane_dword, bitmask);
+            break;
+    }
+    return plane_dword;
 };
 
 VGAScreen.prototype.vga_memory_write_graphical = function(addr, value)
@@ -1449,7 +1577,7 @@ VGAScreen.prototype.port3C0_write = function(value)
                     {
                         // Commit the deferred VBE disable (see port1CF_write case 4)
                         this.svga_enabled = false;
-                        this.svga_bank_offset = 0;
+                        this.svga_bank_offset = 0; this.svga_read_bank_offset = 0;
                     }
 
                     const is_graphical = (value & 0x1) !== 0;
@@ -1612,6 +1740,16 @@ VGAScreen.prototype.port3C5_write = function(value)
             this.sequencer_memory_mode = value;
             break;
         default:
+            if(this.sequencer_index >= 0xA0 && this.sequencer_index <= 0xA3)
+            {
+                // V7 back latch n = byte n of the latch register
+                const shift = (this.sequencer_index - 0xA0) * 8;
+                this.latch_dword = (this.latch_dword & ~(0xFF << shift) | (value & 0xFF) << shift) | 0;
+            }
+            else if(this.sequencer_index >= 5)
+            {
+                this.v7_seq[this.sequencer_index] = value;
+            }
             dbg_log("3C5 / sequencer write " + h(this.sequencer_index) + ": " + h(value), LOG_VGA);
     }
 };
@@ -1633,6 +1771,14 @@ VGAScreen.prototype.port3C5_read = function()
         case 0x06:
             return 0x12;
         default:
+            if(this.sequencer_index >= 0xA0 && this.sequencer_index <= 0xA3)
+            {
+                return this.latch_dword >>> ((this.sequencer_index - 0xA0) * 8) & 0xFF;
+            }
+            if(this.sequencer_index >= 5)
+            {
+                return this.v7_seq[this.sequencer_index];
+            }
     }
     return 0;
 };
@@ -2228,6 +2374,15 @@ VGAScreen.prototype.port1CF_write = function(value)
         case 5:
             dbg_log("SVGA bank offset: " + h(value << 16), LOG_VGA);
             this.svga_bank_offset = value << 16;
+            this.svga_read_bank_offset = value << 16;
+            break;
+        case 0x18:
+            // PV READ_BANK (64K units): bank used for reads through the A000 window
+            this.svga_read_bank_offset = value << 16;
+            break;
+        case 0x19:
+            // PV WRITE_BANK (64K units): bank used for writes through the A000 window
+            this.svga_bank_offset = value << 16;
             break;
         case 8:
             // x offset
@@ -2338,7 +2493,7 @@ VGAScreen.prototype.port1CF_write = function(value)
 
     if(!this.svga_enabled)
     {
-        this.svga_bank_offset = 0;
+        this.svga_bank_offset = 0; this.svga_read_bank_offset = 0;
     }
 
     this.update_layers();
@@ -2426,6 +2581,10 @@ VGAScreen.prototype.svga_register_read = function(n)
             return 0x5056; // 'PV' signature: lets guests detect the extended adapter
         case 0x17:
             return this.pv_generation & 0xFFFF;
+        case 0x18:
+            return this.svga_read_bank_offset >>> 16;
+        case 0x19:
+            return this.svga_bank_offset >>> 16;
 
         case 8:
             // x offset
