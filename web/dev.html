@@ -1,39 +1,104 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>responsive-wfw311 dev</title>
 <style>
-  body { margin:0; background:#222; color:#ccc; font:12px monospace; }
-  #bar { padding:4px 8px; display:flex; gap:12px; align-items:center; }
-  #screen_container { display:inline-block; }
+  html, body { margin:0; height:100%; background:#000; color:#ccc; font:12px monospace; overflow:hidden; }
+  #bar { position:fixed; left:0; right:0; top:0; height:22px; padding:2px 8px; display:flex; gap:12px; align-items:center;
+         background:#222; z-index:2; white-space:nowrap; overflow:hidden; }
+  #bar.hidden { display:none; }
+  #screen_container { position:absolute; left:0; top:22px; }
   #screen_container canvas { display:block; }
+  #log { position:fixed; right:0; bottom:0; max-height:30%; width:40%; overflow:auto; background:rgba(0,0,0,.7); color:#8f8;
+         padding:4px; z-index:2; display:none; white-space:pre; }
 </style>
 <div id="bar">
   <span id="status">loading…</span>
   <button id="reset">reset</button>
+  <label><input type="checkbox" id="follow" checked> follow viewport</label>
+  <label>zoom <input type="number" id="zoom" value="1" min="0.25" max="4" step="0.05" style="width:4em"></label>
   <span id="mode"></span>
+  <span id="host"></span>
+  <button id="logbtn">log</button>
 </div>
 <div id="screen_container">
   <div style="white-space:pre; font:14px monospace"></div>
   <canvas style="display:none"></canvas>
 </div>
+<div id="log"></div>
 <script type="module">
 import { V86 } from "../v86/src/browser/starter.js";
-const status = document.getElementById("status");
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const BAR_H = 22;
+
+// ---- mode controller (SPEC.md §2.8): emulated mode follows the visual viewport
+function viewportSize() {
+  const vv = window.visualViewport;
+  const w = vv ? vv.width : window.innerWidth;
+  const h = (vv ? vv.height : window.innerHeight) - ($("bar").classList.contains("hidden") ? 0 : BAR_H);
+  return [w, h];
+}
+function computeMode() {
+  const zoom = Math.max(0.25, Math.min(4, parseFloat($("zoom").value) || 1));
+  const [vw, vh] = viewportSize();
+  let w = Math.floor(vw * zoom / 8) * 8;
+  let h = Math.floor(vh * zoom / 2) * 2;
+  w = Math.max(320, Math.min(2560, w)); h = Math.max(200, Math.min(1600, h));
+  return [w, h, zoom];
+}
+const initial = computeMode();
+const dpi = params.get("dpi") ? +params.get("dpi") : (viewportSize()[0] < 600 ? 120 : 96);
+
 const emulator = new V86({
   wasm_path: "../v86/build/v86.wasm",
   memory_size: 32 * 1024 * 1024,
   vga_memory_size: 8 * 1024 * 1024,
-  screen_container: document.getElementById("screen_container"),
+  screen_container: $("screen_container"),
   bios: { url: "../v86/bios/seabios.bin" },
   vga_bios: { url: "../v86/bios/vgabios.bin" },
-  hda: { url: "../image/work.img", async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
+  hda: { url: params.get("hda") || "../image/work.img", async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
   boot_order: 0x132,
   autostart: true,
 });
 window.emulator = emulator;
-emulator.add_listener("emulator-ready", () => status.textContent = "running");
-emulator.add_listener("screen-set-size", (s) => {
-  document.getElementById("mode").textContent = `guest mode ${s[0]}x${s[1]}` + (s[2] ? ` @${s[2]}bpp` : " (text)");
+
+let lastReq = null;
+function requestMode(force) {
+  if (!$("follow").checked && !force) return;
+  const [w, h, zoom] = computeMode();
+  if (lastReq && lastReq[0] === w && lastReq[1] === h && !force) return;
+  lastReq = [w, h];
+  emulator.bus.send("pv-request-mode", [w, h]);
+  $("host").textContent = `host wants ${w}x${h} @${dpi}dpi zoom ${zoom}`;
+  log(`host: request ${w}x${h}`);
+}
+let debounce = 0;
+function onViewport() { clearTimeout(debounce); debounce = setTimeout(() => requestMode(false), 300); }
+(window.visualViewport || window).addEventListener("resize", onViewport);
+window.addEventListener("orientationchange", onViewport);
+$("zoom").addEventListener("change", () => requestMode(true));
+$("follow").addEventListener("change", () => requestMode(false));
+
+emulator.add_listener("emulator-ready", () => {
+  $("status").textContent = "running";
+  emulator.bus.send("pv-set-dpi", dpi);
+  emulator.bus.send("pv-request-mode", initial.slice(0, 2));
+  lastReq = initial.slice(0, 2);
+  $("host").textContent = `host wants ${initial[0]}x${initial[1]} @${dpi}dpi`;
+  emulator.screen_set_scale(1, 1);   // defeat v86's automatic 2x for <=640 modes
 });
-document.getElementById("reset").onclick = () => emulator.restart();
+emulator.add_listener("screen-set-size", s => {
+  $("mode").textContent = `guest ${s[0]}x${s[1]}` + (s[2] ? `@${s[2]}bpp` : " text");
+  emulator.screen_set_scale(1, 1);
+});
+emulator.bus.register("pv-debug", line => log("guest: " + line));
+emulator.bus.register("pv-cursor", xy => { window.pvCursor = xy; });
+
+function log(msg) {
+  const el = $("log"); el.textContent += msg + "\n"; el.scrollTop = el.scrollHeight;
+  if (el.textContent.length > 20000) el.textContent = el.textContent.slice(-10000);
+}
+$("logbtn").onclick = () => { const el = $("log"); el.style.display = el.style.display === "block" ? "none" : "block"; };
+$("reset").onclick = () => emulator.restart();
 </script>

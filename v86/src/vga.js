@@ -15,6 +15,7 @@ const VGA_BANK_SIZE = 64 * 1024;
 const MAX_XRES = 2560;
 const MAX_YRES = 1600;
 const MAX_BPP = 32;
+const PV_IRQ = 9; // ISA IRQ used by the paravirtual resize signal (optional; polling is the default)
 
 //const VGA_LFB_ADDRESS = 0xFE000000; // set by seabios
 const VGA_LFB_ADDRESS = 0xE0000000;
@@ -357,6 +358,19 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.dispi_index = 0;
     this.dispi_enable_value = 0;
 
+    // responsive-wfw311 paravirtual extensions (see SPEC.md §2.1)
+    this.svga_pitch = 0;        // VIRT_WIDTH in pixels; 0 = same as visible width
+    this.pv_host_xres = 0;
+    this.pv_host_yres = 0;
+    this.pv_host_dpi = 96;
+    this.pv_status = 0;         // bit0 MODE_REQUEST (W1C), bit1 IRQ_ENABLE
+    this.pv_generation = 0;
+    this.pv_cursor_x = 0;
+    this.pv_cursor_y = 0;
+    this.pv_debug_line = "";
+    bus.register("pv-request-mode", function(data) { this.pv_request_mode(data[0], data[1]); }, this);
+    bus.register("pv-set-dpi", function(dpi) { this.pv_host_dpi = dpi | 0; }, this);
+
     io.register_write(0x1CE, this, undefined, this.port1CE_write);
     io.register_read(0x1CE, this, undefined, this.port1CE_read);
 
@@ -453,6 +467,12 @@ VGAScreen.prototype.get_state = function()
     state[57] = this.horizontal_panning;
     state[58] = this.color_select;
     state[59] = this.clocking_mode;
+    state[60] = this.svga_pitch;
+    state[61] = this.pv_host_xres;
+    state[62] = this.pv_host_yres;
+    state[63] = this.pv_host_dpi;
+    state[64] = this.pv_status;
+    state[65] = this.pv_generation;
     state[60] = this.line_compare;
     state[61] = this.pixel_buffer;
     state[62] = this.dac_mask;
@@ -524,6 +544,12 @@ VGAScreen.prototype.set_state = function(state)
     this.horizontal_panning = state[57];
     this.color_select = state[58];
     this.clocking_mode = state[59];
+    this.svga_pitch = state[60] || 0;
+    this.pv_host_xres = state[61] || 0;
+    this.pv_host_yres = state[62] || 0;
+    this.pv_host_dpi = state[63] || 96;
+    this.pv_status = state[64] || 0;
+    this.pv_generation = state[65] || 0;
     this.line_compare = state[60];
     state[61] && this.pixel_buffer.set(state[61]);
     this.dac_mask = state[62] === undefined ? 0xFF : state[62];
@@ -540,7 +566,7 @@ VGAScreen.prototype.set_state = function(state)
     {
         if(this.svga_enabled)
         {
-            this.set_size_graphical(this.svga_width, this.svga_height, this.svga_width, this.svga_height, this.svga_bpp);
+            this.set_size_graphical(this.svga_width, this.svga_height, this.svga_pitch_px(), this.svga_height, this.svga_bpp);
             this.update_layers();
         }
         else
@@ -2209,8 +2235,46 @@ VGAScreen.prototype.port1CF_write = function(value)
             if(this.svga_offset_x !== value)
             {
                 this.svga_offset_x = value;
-                this.svga_offset = this.svga_offset_y * this.svga_width + this.svga_offset_x;
+                this.svga_offset = this.svga_offset_y * this.svga_pitch_px() + this.svga_offset_x;
                 this.complete_redraw();
+            }
+            break;
+        case 6:
+            // virtual width (pitch in pixels). responsive-wfw311: writable so the
+            // visible width can change without changing the scanline stride.
+            this.svga_pitch = Math.min(value, 4096);
+            if(this.svga_enabled)
+            {
+                this.set_size_graphical(this.svga_width, this.svga_height, this.svga_pitch_px(), this.svga_height, this.svga_bpp);
+                this.complete_redraw();
+            }
+            break;
+        case 0x13:
+            // PV STATUS: write 1 to clear MODE_REQUEST; bit1 IRQ_ENABLE is stored
+            this.pv_status = (this.pv_status & ~(value & 1)) & ~2 | (value & 2);
+            if(value & 1)
+            {
+                this.cpu.device_lower_irq(PV_IRQ);
+            }
+            break;
+        case 0x14:
+            this.pv_cursor_x = value;
+            break;
+        case 0x15:
+            this.pv_cursor_y = value;
+            this.bus.send("pv-cursor", [this.pv_cursor_x, this.pv_cursor_y]);
+            break;
+        case 0x16:
+            // PV DEBUG: bytes accumulate until newline, then go to the console and the bus
+            if(value === 10 || this.pv_debug_line.length > 200)
+            {
+                console.log("[guest] " + this.pv_debug_line);
+                this.bus.send("pv-debug", this.pv_debug_line);
+                this.pv_debug_line = "";
+            }
+            else if(value !== 13)
+            {
+                this.pv_debug_line += String.fromCharCode(value & 0xFF);
             }
             break;
         case 9:
@@ -2219,7 +2283,7 @@ VGAScreen.prototype.port1CF_write = function(value)
             if(this.svga_offset_y !== value)
             {
                 this.svga_offset_y = value;
-                this.svga_offset = this.svga_offset_y * this.svga_width + this.svga_offset_x;
+                this.svga_offset = this.svga_offset_y * this.svga_pitch_px() + this.svga_offset_x;
                 this.complete_redraw();
             }
             break;
@@ -2259,7 +2323,7 @@ VGAScreen.prototype.port1CF_write = function(value)
 
         this.graphical_mode = true;
         this.screen.set_mode(this.graphical_mode);
-        this.set_size_graphical(this.svga_width, this.svga_height, this.svga_width, this.svga_height, this.svga_bpp);
+        this.set_size_graphical(this.svga_width, this.svga_height, this.svga_pitch_px(), this.svga_height, this.svga_bpp);
     }
 
     if(was_enabled && !this.svga_enabled)
@@ -2286,6 +2350,35 @@ VGAScreen.prototype.port1CF_read = function()
     return this.svga_register_read(this.dispi_index);
 };
 
+/** Scanline pitch in pixels (VIRT_WIDTH if set, else the visible width). */
+VGAScreen.prototype.svga_pitch_px = function()
+{
+    return this.svga_pitch || this.svga_width || 1;
+};
+
+/**
+ * Host side of the paravirtual resize path: record the wanted mode, bump the
+ * generation counter, set STATUS.MODE_REQUEST and raise the IRQ if enabled.
+ */
+VGAScreen.prototype.pv_request_mode = function(width, height)
+{
+    width = Math.max(0, Math.min(width | 0, MAX_XRES));
+    height = Math.max(0, Math.min(height | 0, MAX_YRES));
+    if(width === this.pv_host_xres && height === this.pv_host_yres)
+    {
+        return;
+    }
+    this.pv_host_xres = width;
+    this.pv_host_yres = height;
+    this.pv_generation = (this.pv_generation + 1) & 0xFFFF;
+    this.pv_status |= 1;
+    dbg_log("PV: host requests " + width + "x" + height + " (gen " + this.pv_generation + ")", LOG_VGA);
+    if(this.pv_status & 2)
+    {
+        this.cpu.device_raise_irq(PV_IRQ);
+    }
+};
+
 VGAScreen.prototype.svga_register_read = function(n)
 {
     switch(n)
@@ -2304,7 +2397,11 @@ VGAScreen.prototype.svga_register_read = function(n)
             return this.svga_bank_offset >>> 16;
         case 6:
             // virtual width
-            if(this.screen_width)
+            if(this.svga_pitch)
+            {
+                return this.svga_pitch;
+            }
+            else if(this.screen_width)
             {
                 return this.screen_width;
             }
@@ -2313,6 +2410,22 @@ VGAScreen.prototype.svga_register_read = function(n)
                 return 1; // seabios/windows98 divide exception
             }
             break;
+        case 0x10:
+            return this.pv_host_xres;
+        case 0x11:
+            return this.pv_host_yres;
+        case 0x12:
+            return this.pv_host_dpi;
+        case 0x13:
+            return this.pv_status;
+        case 0x14:
+            return this.pv_cursor_x;
+        case 0x15:
+            return this.pv_cursor_y;
+        case 0x16:
+            return 0x5056; // 'PV' signature: lets guests detect the extended adapter
+        case 0x17:
+            return this.pv_generation & 0xFFFF;
 
         case 8:
             // x offset
@@ -2533,7 +2646,7 @@ VGAScreen.prototype.screen_fill_buffer = function()
         if(this.svga_bpp === 8)
         {
             // XXX: Slow, should be ported to rust, but it doesn't have access to vga256_palette
-            const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffet_offset, this.screen_width * this.screen_height);
+            const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffet_offset, this.virtual_width * this.virtual_height);
             const svga_memory = new Uint8Array(this.cpu.wasm_memory.buffer, this.svga_memory.byteOffset, this.vga_memory_size);
             // svga_offset selects the visible part of svga_memory, used for page flipping (e.g. Master of Orion 2)
             const base = this.svga_offset;
@@ -2550,8 +2663,9 @@ VGAScreen.prototype.screen_fill_buffer = function()
             this.cpu.svga_fill_pixel_buffer(this.svga_bpp, this.svga_offset);
 
             const bytes_per_pixel = this.svga_bpp === 15 ? 2 : this.svga_bpp / 8;
-            min_y = (((this.cpu.svga_dirty_bitmap_min_offset[0] / bytes_per_pixel | 0) - this.svga_offset) / this.svga_width | 0);
-            max_y = (((this.cpu.svga_dirty_bitmap_max_offset[0] / bytes_per_pixel | 0) - this.svga_offset) / this.svga_width | 0) + 1;
+            const pitch = this.svga_pitch_px();
+            min_y = (((this.cpu.svga_dirty_bitmap_min_offset[0] / bytes_per_pixel | 0) - this.svga_offset) / pitch | 0);
+            max_y = (((this.cpu.svga_dirty_bitmap_max_offset[0] / bytes_per_pixel | 0) - this.svga_offset) / pitch | 0) + 1;
         }
 
         if(min_y < max_y)

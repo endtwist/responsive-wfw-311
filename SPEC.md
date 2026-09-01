@@ -508,3 +508,18 @@ Next:
    `PVTEST.EXE` DOS mode-set test (banked A000 writes in real mode; the LFB mapping is
    exercised by the Windows driver in Phase 2 where DPMI is available).
 3. Start the V7VGA → `PVDISP.DRV` port: strip bank switching, DISPI mode set, LFB via DPMI.
+
+**2026-09-01 (later) — Phase 1 complete.**
+- `v86/src/vga.js`: `VIRT_WIDTH` (index 6) is writable and carried as a separate pitch through
+  the enable path, offsets, dirty-rect rows, and the 8 bpp renderer; host registers `0x10-0x17`
+  implemented (`HOST_XRES/YRES/DPI`, `STATUS` W1C + IRQ enable, `CURSOR_X/Y`, `DEBUG` byte
+  port with a `'PV'` signature on read, `GENERATION`); `pv_request_mode()` on the bus
+  (`pv-request-mode`, `pv-set-dpi`; emits `pv-debug`, `pv-cursor`); optional IRQ 9.
+- `web/dev.html`: mode controller per §2.8 (visualViewport, 300 ms debounce, zoom, follow
+  toggle, guest debug log panel).
+- `guest/pvtest/pvtest.c` (Open Watcom, 16-bit DOS, built via `tools/watcom.sh`): detects the
+  adapter, sets an 8 bpp mode with pitch 2560 from `HOST_XRES/YRES`, draws a test pattern
+  through the A000 bank window, polls `GENERATION` and re-modes. Verified in the browser:
+  initial mode follows the viewport (e.g. 1000x578), a host request to 640x400 is picked up
+  and applied by the guest in under 1.5 s, palette via DAC ports renders correctly.
+- Image builder gained `boot=win|pvtest|dos`.
