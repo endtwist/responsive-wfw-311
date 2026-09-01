@@ -741,9 +741,49 @@ about 700 tall. USER caches a maximum tracking size per window, derived from the
 when the window was created, and patching the screen metrics does not revisit it. Shrinking is
 unaffected, and Program Manager is unaffected because the companion utility sizes it explicitly.
 
-This is the same class of problem as risk 1 in section 6, one level down: not a cached screen
-size, but a cached *window* limit derived from it. Finding and patching the per-window tracking
-sizes is the obvious next step, using the same signature-matching method that worked for the
-system metrics: the desktop `WND` was located that way already, so walking the window list and
-matching each window's cached maxima is tractable. It is cosmetic rather than structural, so it
-is recorded here rather than fixed under time pressure.
+**Fixed, see the next entry.**
+
+**2026-09-01 (night) — the height clamp is fixed: USER's cached maximum tracking size.**
+Measured rather than guessed. `SetWindowPos(640, 1180)` on the shell returned **640x706
+immediately**, and `MoveWindow` did the same, so USER was clamping the call rather than the
+application resizing itself afterwards. 706 is the old screen height plus 8, which is exactly the
+standard maximum tracking size of screen plus window frame.
+
+The metrics array and both desktop rectangles were already patched (the desktop's window *and*
+client rectangles were found at `hwnd+8` and `hwnd+16`, and confirmed by signature rather than
+assumed), so USER was reading the screen size from somewhere `GetSystemMetrics` does not.
+
+Rather than hard-code an offset, `PVMON` now finds it by experiment, which is the same
+self-verifying idea as the rest of the patching but with a behavioural test instead of a data
+signature:
+
+1. Ask a real window to resize. If it is not clamped, there is nothing to find.
+2. Otherwise scan USER's data segment for every adjacent word pair holding the old screen size,
+   first as screen plus frame, then bare, then plus twice the frame.
+3. For each candidate: write the new value, retry the resize, and keep the candidate only if the
+   clamp goes away. Anything that does not help is restored immediately.
+
+It found the cache on the first strategy: **`tracking size cached at USER:+079E (screen+8,8)`**.
+The offset is learned once and reused for the session, so later re-modes cost nothing.
+
+With it patched, Program Manager fills a 640x1180 portrait screen top to bottom, and a 1240x860
+landscape one, across live re-modes in both directions. Stretch tier 1 is now genuinely complete
+rather than complete-except-for-height.
+
+**2026-09-01 (night) — legibility on phones: magnification with panning.**
+Reported from an actual iPhone: everything is too small to read. The cause was the mode rule in
+2.8. Holding the emulated width at 640 so Windows stays usable means that on a 375-point phone
+every emulated pixel is scaled *down* to 0.59 of a point, and 640 columns of 1993 user interface
+across a phone is simply too fine to read, whatever the font.
+
+There is no way to have both the whole desktop and readable text on a screen that narrow, so the
+page now treats magnification as a first-class control rather than fitting by default:
+- The canvas is drawn at `fit x zoom`, and anything larger than the viewport pans.
+- **Phones start at 1.7x**, which puts an emulated pixel at roughly one point. With the 120 dpi
+  font set PVDPI already selects at phone widths, the system font lands at about 20 points and
+  icon labels are comfortably readable.
+- Pinch to zoom, two-finger drag to pan, and `-` / `+` / `fit` buttons. Two-finger gestures never
+  reach the guest as mouse input.
+- Touch pointing stays pixel-exact while magnified and panned: a tap at guest (300,260) with the
+  view scrolled by (120,200) lands at exactly (300,260), because the mapping is taken from the
+  canvas's rectangle, which already accounts for zoom and scroll.

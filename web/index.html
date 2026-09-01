@@ -6,7 +6,8 @@
 <style>
   html, body { margin:0; height:100%; background:#000; color:#bbb;
                font:12px/1.4 ui-monospace, monospace; overflow:hidden; overscroll-behavior:none; }
-  #screen_container { position:absolute; inset:0; display:grid; place-items:center; }
+  #screen_container { position:absolute; inset:0; overflow:auto; display:grid; place-items:center;
+                      -webkit-overflow-scrolling:touch; }
   #screen_container canvas { display:block; touch-action:none; }
   #bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:10px; align-items:center;
          padding:6px 10px calc(6px + env(safe-area-inset-bottom)); background:rgba(0,0,0,.75);
@@ -23,6 +24,9 @@
   <span id="status">loading</span>
   <span id="mode"></span>
   <span id="zoom"></span>
+  <button id="zoomout">&minus;</button>
+  <button id="zoomin">+</button>
+  <button id="zoomfit">fit</button>
   <button id="kbdbtn">keyboard</button>
   <button id="savebtn">save</button>
   <button id="resetbtn">fresh boot</button>

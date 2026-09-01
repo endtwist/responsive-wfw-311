@@ -162,18 +162,46 @@ window.addEventListener("orientationchange", pump);
 window.addEventListener("resize", pump);
 (function raf() { if (!document.hidden) pump(); requestAnimationFrame(raf); })();
 
-/* The canvas is the emulated screen; CSS-scale it to fill the viewport when the emulated mode
-   had to be larger than the viewport (small screens). */
+/* Display scale.
+ *
+ * Windows needs at least 640 columns to be usable, but a phone is only about 375 points wide,
+ * so fitting the whole desktop on screen shrinks every emulated pixel to well under a point and
+ * the result is unreadable. Magnification is therefore a first-class control rather than an
+ * afterthought: the canvas is drawn at `fit * zoom`, and anything larger than the viewport is
+ * pannable. Phones start magnified, because seeing all of a desktop you cannot read is the
+ * wrong default. The 120 dpi font set (chosen by PVDPI at boot) does the rest.
+ */
+let zoom = viewport()[0] < 600 ? 1.7 : 1;
+const ZOOM_MIN = 0.5, ZOOM_MAX = 6;
+
+function fitScale(c) {
+  const [vw, vh] = viewport();
+  return Math.min(vw / c.width, vh / c.height);
+}
+
 function fitCanvas() {
   const c = document.querySelector("#screen_container canvas");
   if (!c || !c.width) return;
-  const [vw, vh] = viewport();
-  const scale = Math.min(vw / c.width, vh / c.height);
+  const scale = fitScale(c) * zoom;
   const w = Math.round(c.width * scale), h = Math.round(c.height * scale);
   if (c.style.width === w + "px" && c.style.height === h + "px") return;
   c.style.width = w + "px";
   c.style.height = h + "px";
-  c.style.imageRendering = Number.isInteger(scale) ? "pixelated" : "auto";
+  c.style.imageRendering = scale >= 1 && Number.isInteger(scale) ? "pixelated" : "auto";
+  $("zoom").textContent = zoom === 1 ? "" : zoom.toFixed(1) + "x";
+}
+
+function setZoom(z, anchor) {
+  const c = document.querySelector("#screen_container canvas");
+  const box = $("screen_container");
+  const before = c ? fitScale(c) * zoom : 1;
+  zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+  fitCanvas();
+  if (c && anchor) {                     // keep the anchor point under the finger
+    const after = fitScale(c) * zoom;
+    box.scrollLeft = (box.scrollLeft + anchor.x) * (after / before) - anchor.x;
+    box.scrollTop = (box.scrollTop + anchor.y) * (after / before) - anchor.y;
+  }
 }
 
 /* ------------------------------------------------------------------------ touch (SPEC 2.5)
@@ -223,7 +251,18 @@ function installTouch() {
   const queue = fn => (chain = chain.then(fn).catch(() => {}));
   let pressTimer = 0, longFired = false, dragging = false;
 
+  let pinchDist = 0, panLast = null;
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const mid = t => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+
   c.addEventListener("touchstart", ev => {
+    if (ev.touches.length === 2) {          // two fingers: zoom and pan, never mouse input
+      ev.preventDefault();
+      clearTimeout(pressTimer);
+      pinchDist = dist(ev.touches);
+      panLast = mid(ev.touches);
+      return;
+    }
     if (ev.touches.length !== 1) return;
     ev.preventDefault();
     const pt = canvasPoint(ev.touches[0]);
@@ -238,6 +277,19 @@ function installTouch() {
   }, { passive: false });
 
   c.addEventListener("touchmove", ev => {
+    if (ev.touches.length === 2) {
+      ev.preventDefault();
+      const box = $("screen_container");
+      const d = dist(ev.touches), m = mid(ev.touches);
+      if (panLast) { box.scrollLeft -= m.x - panLast.x; box.scrollTop -= m.y - panLast.y; }
+      panLast = m;
+      if (pinchDist > 0 && Math.abs(d - pinchDist) > 8) {
+        const r = c.getBoundingClientRect();
+        setZoom(zoom * (d / pinchDist), { x: m.x - r.left, y: m.y - r.top });
+        pinchDist = d;
+      }
+      return;
+    }
     if (ev.touches.length !== 1) return;
     ev.preventDefault();
     clearTimeout(pressTimer);
@@ -252,6 +304,7 @@ function installTouch() {
   c.addEventListener("touchend", ev => {
     ev.preventDefault();
     clearTimeout(pressTimer);
+    if (panLast) { panLast = null; pinchDist = 0; return; }   // finishing a two-finger gesture
     queue(async () => {
       if (dragging) { button(false, false); dragging = false; return; }
       if (longFired) { longFired = false; return; }
@@ -305,6 +358,9 @@ try {
 
 
 window.addEventListener("pagehide", () => saveState(emulator));
+$("zoomin").onclick = () => setZoom(zoom * 1.25);
+$("zoomout").onclick = () => setZoom(zoom / 1.25);
+$("zoomfit").onclick = () => { setZoom(1); const b = $("screen_container"); b.scrollLeft = 0; b.scrollTop = 0; };
 $("savebtn").onclick = () => saveState(emulator);
 $("resetbtn").onclick = async () => { await clearState(); location.search = "?fresh=1"; };
 

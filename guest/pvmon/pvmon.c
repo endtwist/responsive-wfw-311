@@ -178,7 +178,9 @@ static WORD g_userDS;              /* USER's DGROUP selector */
 static WORD g_gdiDS;               /* GDI's DGROUP selector */
 static WORD g_offCaps;             /* offset of the screen's GDIINFO within it */
 static WORD g_offSysMet;           /* offset of rgwSysMet within it */
-static WORD g_offDeskRc;           /* offset of rcWindow within the desktop WND */
+#define MAX_DESK_RC 4
+static WORD g_deskRc[MAX_DESK_RC];  /* offsets of the desktop's rectangles within its WND */
+static int  g_nDeskRc;
 static BOOL g_patchReady;
 
 typedef HMODULE (WINAPI *PFNMODULEFINDNAME)(LPMODULEENTRY, LPCSTR);
@@ -259,19 +261,25 @@ static BOOL find_gdi_caps(WORD sel, WORD limit)
     return hits > 0;
 }
 
-/* The desktop window's rectangle reads 0,0,cx,cy; find it inside its WND structure. */
+/* The desktop window's rectangles read 0,0,cx,cy; find them inside its WND structure.
+   There is more than one -- the window rectangle and the client rectangle at least -- and
+   USER clamps window sizes against them, so every copy has to be found and patched. Guessing
+   that the client rectangle simply follows the window rectangle was wrong: a resize past the
+   old screen height was silently clamped back to it. */
 static BOOL find_desktop_rect(WORD sel)
 {
     HWND desk = GetDesktopWindow();
     RECT rc;
     WORD base = (WORD)desk, off;
     GetWindowRect(desk, &rc);
-    for (off = 0; off < 96; off += 2) {
+    g_nDeskRc = 0;
+    for (off = 0; off < 128 && g_nDeskRc < MAX_DESK_RC; off += 2) {
         WORD __far *p = PVFP(sel, base + off);
         if (p[0] == (WORD)rc.left && p[1] == (WORD)rc.top &&
-            p[2] == (WORD)rc.right && p[3] == (WORD)rc.bottom) { g_offDeskRc = off; return TRUE; }
+            p[2] == (WORD)rc.right && p[3] == (WORD)rc.bottom)
+            g_deskRc[g_nDeskRc++] = off;
     }
-    return FALSE;
+    return g_nDeskRc > 0;
 }
 
 static void find_user_state(void)
@@ -282,8 +290,9 @@ static void find_user_state(void)
     if (!find_sysmet(g_userDS, 0xF000)) { dbg("pvmon: sysmet not found"); return; }
     if (!find_desktop_rect(g_userDS)) { dbg("pvmon: desktop rect not found"); return; }
     g_patchReady = TRUE;
-    wsprintf(buf, "pvmon: USER ds=%04X sysmet=+%04X deskrc=hwnd+%u",
-             g_userDS, g_offSysMet, (unsigned)g_offDeskRc);
+    wsprintf(buf, "pvmon: USER ds=%04X sysmet=+%04X deskrc=%d at +%u,+%u",
+             g_userDS, g_offSysMet, g_nDeskRc, (unsigned)g_deskRc[0],
+             (unsigned)(g_nDeskRc > 1 ? g_deskRc[1] : 0));
     dbg(buf);
     /* GDI's cached caps are a bonus: the shell reflows without them, but applications that
        ask GetDeviceCaps would otherwise keep seeing the boot-time screen. */
@@ -295,6 +304,71 @@ static void find_user_state(void)
         g_gdiDS = 0;
         dbg("pvmon: GDI caps not found, apps will see the old screen size");
     }
+}
+
+/* USER keeps at least one more copy of the screen size than GetSystemMetrics reads: window
+   sizing is clamped to a maximum tracking size of screen + frame, and after patching the
+   metrics array and the desktop rectangles a resize was still cut to the OLD height plus the
+   frame. Rather than hard-code where that copy lives, find it: every stale (oldW,oldH) word
+   pair left in USER's data segment is a candidate, so patch one, ask a real window to resize,
+   and keep the candidate only if the resize stops being clamped. The offset is remembered, so
+   the search happens once per session.
+
+   Restricting candidates to an adjacent pair that matches the old screen exactly keeps the
+   search both short and safe, and any candidate that does not help is put back immediately. */
+static WORD g_offScreenPair;      /* a word pair that also holds the screen size */
+static WORD g_pairAddW, g_pairAddH; /* what is added to the screen size at that spot */
+static BOOL g_pairSearched;
+
+static BOOL resize_reaches(HWND probe, unsigned w, unsigned h)
+{
+    RECT rc;
+    SetWindowPos(probe, NULL, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    GetWindowRect(probe, &rc);
+    return (unsigned)(rc.bottom - rc.top) + 16 >= h;
+}
+
+/* Try every adjacent word pair holding (oldW+addW, oldH+addH), and keep the one that actually
+   unblocks a resize. Anything that does not help is put straight back. */
+static BOOL search_pair(HWND probe, unsigned oldW, unsigned oldH, unsigned w, unsigned h,
+                        unsigned addW, unsigned addH)
+{
+    WORD wantW = (WORD)(oldW + addW), wantH = (WORD)(oldH + addH);
+    WORD off;
+    char buf[80];
+    for (off = 0; off < 0xF000 - 4; off += 2) {
+        WORD __far *p = PVFP(g_userDS, off);
+        if (p[0] != wantW || p[1] != wantH) continue;
+        p[0] = (WORD)(w + addW); p[1] = (WORD)(h + addH);
+        if (resize_reaches(probe, w, h)) {
+            g_offScreenPair = off; g_pairAddW = (WORD)addW; g_pairAddH = (WORD)addH;
+            wsprintf(buf, "pvmon: tracking size cached at USER:+%04X (screen+%u,%u)",
+                     off, addW, addH);
+            dbg(buf);
+            return TRUE;
+        }
+        p[0] = wantW; p[1] = wantH;
+    }
+    return FALSE;
+}
+
+/* USER keeps more copies of the screen size than GetSystemMetrics reads. After patching the
+   metrics array and the desktop rectangles, a resize was still cut to the OLD height plus the
+   window frame, which is the classic maximum tracking size. Rather than hard-code where that
+   lives, find it by experiment: patch a candidate, ask a real window to resize, and keep the
+   candidate only if the clamp goes away. Learned once, then reused for the session. */
+static void find_screen_pair(unsigned oldW, unsigned oldH, unsigned w, unsigned h)
+{
+    HWND probe = FindWindow("Progman", NULL);
+    unsigned fx, fy;
+    if (!probe || !g_userDS) return;
+    if (resize_reaches(probe, w, h)) return;          /* nothing is clamping us */
+    fx = 2 * GetSystemMetrics(SM_CXFRAME);
+    fy = 2 * GetSystemMetrics(SM_CYFRAME);
+    if (search_pair(probe, oldW, oldH, w, h, fx, fy)) return;   /* screen + frame */
+    if (search_pair(probe, oldW, oldH, w, h, 0, 0)) return;     /* the bare screen size */
+    if (search_pair(probe, oldW, oldH, w, h, 2 * fx, 2 * fy)) return;
+    dbg("pvmon: no cached tracking size found");
 }
 
 /* Tell USER the screen is a different size. */
@@ -311,10 +385,20 @@ static void patch_user_metrics(unsigned w, unsigned h)
     /* the full-screen metrics are the screen less the caption, so keep the difference */
     if (oldW) met[SM_CXFULLSCREEN] = (WORD)(w - (oldW - met[SM_CXFULLSCREEN]));
     if (oldH) met[SM_CYFULLSCREEN] = (WORD)(h - (oldH - met[SM_CYFULLSCREEN]));
-    rc = PVFP(g_userDS, (WORD)GetDesktopWindow() + g_offDeskRc);
-    rc[2] = (WORD)w; rc[3] = (WORD)h;      /* rcWindow.right/bottom */
-    rc[6] = (WORD)w; rc[7] = (WORD)h;      /* rcClient follows rcWindow */
+    {
+        int i;
+        WORD base = (WORD)GetDesktopWindow();
+        for (i = 0; i < g_nDeskRc; i++) {
+            rc = PVFP(g_userDS, base + g_deskRc[i]);
+            rc[2] = (WORD)w; rc[3] = (WORD)h;
+        }
+    }
+    if (g_offScreenPair) {
+        WORD __far *p = PVFP(g_userDS, g_offScreenPair);
+        p[0] = (WORD)(w + g_pairAddW); p[1] = (WORD)(h + g_pairAddH);
+    }
     dbgnum("pvmon: patched USER to", w, h);
+    if (!g_pairSearched) { g_pairSearched = TRUE; find_screen_pair(oldW, oldH, w, h); }
     if (g_gdiDS) {
         WORD __far *caps = PVFP(g_gdiDS, g_offCaps);
         WORD dpiX = caps[LOGPIXELSX / 2], dpiY = caps[LOGPIXELSY / 2];
