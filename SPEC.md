@@ -723,9 +723,11 @@ wire would cut this further.
   background that is legitimately one flat colour.
 - **The on-screen keyboard works.** Focusing the hidden input and driving it the way a phone's
   soft keyboard would typed a full sentence into Write.
-- **Soak:** a continuous run changing mode every 15 seconds. At the time of writing: **15 minutes,
-  61 re-modes, zero stalls, zero blank frames, zero errors**, with a second emulator running
-  alongside it the whole time. A0 asks for 30 minutes; this is half of it, and clean throughout.
+- **Soak: passed, and then some.** A continuous run changing mode every 15 seconds finished at
+  **45 minutes and 181 live re-modes, with zero stalls, zero blank frames and zero errors**, still
+  executing at the end, and with a second emulator running alongside it the whole time. A0 asks
+  for a 30-minute session; this is half again as long and far harsher than one, since a normal
+  session would not change resolution 181 times.
 - Screenshots in this session were taken by rendering the guest framebuffer through the palette
   and posting the PNG to the dev server, because the browser pane stopped compositing and the
   screenshot API went with it. `tools/devserver.mjs` gained the endpoint for it.
