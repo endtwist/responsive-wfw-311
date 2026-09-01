@@ -985,8 +985,10 @@ IDEInterface.prototype.set_disk_buffer = function(buffer)
     {
         // "default" values: 16/63
         // common: 255, 63
-        this.head_count = 16;
-        this.sectors_per_track = 63;
+        // responsive-wfw311: honour a geometry override attached to the buffer
+        const geometry = this.buffer && this.buffer.geometry;
+        this.head_count = geometry ? geometry.heads : 16;
+        this.sectors_per_track = geometry ? geometry.sectors_per_track : 63;
     }
 
     this.cylinder_count = this.sector_count / this.head_count / this.sectors_per_track;
@@ -1006,8 +1008,15 @@ IDEInterface.prototype.set_disk_buffer = function(buffer)
         const rtc = this.cpu.devices.rtc;
 
         // master
-        rtc.cmos_write(CMOS_BIOS_DISKTRANSFLAG,     // TODO: what is this doing, setting LBA translation?
-                       rtc.cmos_read(CMOS_BIOS_DISKTRANSFLAG) | 1 << this.channel_nr * 4);
+        // SeaBIOS reads a 2-bit translation code per drive from CMOS 0x39:
+        // 0 = none (use physical CHS from IDENTIFY), 1 = LBA-assisted.
+        // responsive-wfw311: with an explicit geometry override the disk was
+        // partitioned for its physical CHS, so leave translation at "none".
+        if(!(this.buffer && this.buffer.geometry))
+        {
+            rtc.cmos_write(CMOS_BIOS_DISKTRANSFLAG,
+                           rtc.cmos_read(CMOS_BIOS_DISKTRANSFLAG) | 1 << this.channel_nr * 4);
+        }
 
         // set hard disk type (CMOS_DISK_DATA = 0x12) of C: to 0b1111, keep type of D:
         //   bits 0-3: hard disk type of D:

@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>responsive-wfw311 dev</title>
+<style>
+  body { margin:0; background:#222; color:#ccc; font:12px monospace; }
+  #bar { padding:4px 8px; display:flex; gap:12px; align-items:center; }
+  #screen_container { display:inline-block; }
+  #screen_container canvas { display:block; }
+</style>
+<div id="bar">
+  <span id="status">loading…</span>
+  <button id="reset">reset</button>
+  <span id="mode"></span>
+</div>
+<div id="screen_container">
+  <div style="white-space:pre; font:14px monospace"></div>
+  <canvas style="display:none"></canvas>
+</div>
+<script type="module">
+import { V86 } from "../v86/src/browser/starter.js";
+const status = document.getElementById("status");
+const emulator = new V86({
+  wasm_path: "../v86/build/v86.wasm",
+  memory_size: 32 * 1024 * 1024,
+  vga_memory_size: 8 * 1024 * 1024,
+  screen_container: document.getElementById("screen_container"),
+  bios: { url: "../v86/bios/seabios.bin" },
+  vga_bios: { url: "../v86/bios/vgabios.bin" },
+  hda: { url: "../image/wfw311-base.img", async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
+  boot_order: 0x132,
+  autostart: true,
+});
+window.emulator = emulator;
+emulator.add_listener("emulator-ready", () => status.textContent = "running");
+emulator.add_listener("screen-set-size", (s) => {
+  document.getElementById("mode").textContent = `guest mode ${s[0]}x${s[1]}` + (s[2] ? ` @${s[2]}bpp` : " (text)");
+});
+document.getElementById("reset").onclick = () => emulator.restart();
+</script>

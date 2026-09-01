@@ -373,6 +373,11 @@ V86.prototype.continue_init = async function(emulator, options)
         {
             case "hda":
                 settings.hda = buffer;
+                // responsive-wfw311: optional CHS geometry override, e.g. { heads: 16, sectors_per_track: 32 }
+                if(options.hda && options.hda.heads && options.hda.sectors_per_track)
+                {
+                    buffer.geometry = { heads: options.hda.heads, sectors_per_track: options.hda.sectors_per_track };
+                }
                 break;
             case "hdb":
                 settings.hdb = buffer;

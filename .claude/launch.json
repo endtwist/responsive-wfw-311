@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["tools/devserver.mjs", "8311", "."],
+      "port": 8311
+    }
+  ]
+}
