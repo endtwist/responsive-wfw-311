@@ -729,3 +729,21 @@ wire would cut this further.
 - Screenshots in this session were taken by rendering the guest framebuffer through the palette
   and posting the PNG to the dev server, because the browser pane stopped compositing and the
   screenshot API went with it. `tools/devserver.mjs` gained the endpoint for it.
+
+**2026-09-01 (night) — a real limitation found in window reflow.**
+`PVMON` now resizes any window that filled the old screen directly with `SetWindowPos`, rather
+than restore-then-maximise: Windows 3.x is cooperative, so a maximise only takes effect once the
+owning task pumps messages. Width refits correctly in every case tested.
+
+**Height does not grow past the old screen for an already-maximised application window.** Write,
+maximised at 1280x698 and then re-moded to 640x1180, comes back 640 wide (correct) but still
+about 700 tall. USER caches a maximum tracking size per window, derived from the screen metrics
+when the window was created, and patching the screen metrics does not revisit it. Shrinking is
+unaffected, and Program Manager is unaffected because the companion utility sizes it explicitly.
+
+This is the same class of problem as risk 1 in section 6, one level down: not a cached screen
+size, but a cached *window* limit derived from it. Finding and patching the per-window tracking
+sizes is the obvious next step, using the same signature-matching method that worked for the
+system metrics: the desktop `WND` was located that way already, so walking the window list and
+matching each window's cached maxima is tractable. It is cosmetic rather than structural, so it
+is recorded here rather than fixed under time pressure.

@@ -47,7 +47,8 @@ static void dbgnum(const char *s, unsigned a, unsigned b)
 }
 
 static HINSTANCE g_hInst;
-static unsigned g_fitW, g_fitH;   /* screen the window fixer is fitting to */
+static unsigned g_fitW, g_fitH;     /* screen the window fixer is fitting to */
+static unsigned g_prevW, g_prevH;   /* screen it is fitting from */
 
 /* Bring one top-level window back inside the screen after a resize. Maximised windows are
    re-maximised so they refill it; the rest are clamped, and shrunk if they no longer fit.
@@ -58,14 +59,20 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
     RECT rc;
     int w, h, x, y;
     if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
-    if (IsZoomed(hwnd)) {                       /* re-maximise against the new metrics */
-        ShowWindow(hwnd, SW_RESTORE);
-        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
-        return TRUE;
-    }
     GetWindowRect(hwnd, &rc);
     w = rc.right - rc.left; h = rc.bottom - rc.top;
     x = rc.left; y = rc.top;
+    /* Refill the screen for anything that filled the old one, whether it is formally maximised
+       or merely sized to fit (which is how most of these apps open). Resizing directly is used
+       rather than restore-then-maximise: Windows 3.x is cooperative, and the maximise only
+       takes effect once the owning task pumps messages, which it may not do for a while.
+       Windows smaller than the screen keep the size they were given and are just kept on it. */
+    if (IsZoomed(hwnd) ||
+        (g_prevW && g_prevH &&
+         w >= (int)(g_prevW - g_prevW / 20) && h >= (int)(g_prevH - g_prevH / 20))) {
+        SetWindowPos(hwnd, NULL, 0, 0, g_fitW, g_fitH, SWP_NOZORDER | SWP_NOACTIVATE);
+        return TRUE;
+    }
     if (w > (int)g_fitW) w = g_fitW;
     if (h > (int)g_fitH) h = g_fitH;
     if (x + w > (int)g_fitW) x = g_fitW - w;
@@ -77,11 +84,12 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
     return TRUE;
 }
 
-static void fit_windows(void)
+static void fit_windows(unsigned prevW, unsigned prevH)
 {
     FARPROC proc;
     g_fitW = GetSystemMetrics(SM_CXSCREEN);
     g_fitH = GetSystemMetrics(SM_CYSCREEN);
+    g_prevW = prevW; g_prevH = prevH;
     proc = MakeProcInstance((FARPROC)FitWindow, g_hInst);
     if (!proc) return;
     EnumWindows((WNDENUMPROC)proc, 0L);
@@ -138,7 +146,7 @@ static void arrange_shell(void)
        re-arranges them itself. */
     idArrange = find_menu_command(pm, "Arrange");
     if (idArrange) PostMessage(pm, WM_COMMAND, idArrange, 0L);
-    fit_windows();
+    fit_windows(g_prevW, g_prevH);
     dbgnum("pvmon: arranged shell to", cx, cy);
     if (!idArrange) dbg("pvmon: no Arrange command found");
 }
@@ -342,6 +350,8 @@ static BOOL live_remode(unsigned w, unsigned h)
        pixels underneath. Re-moding with the cursor drawn leaves that state describing a
        screen that no longer exists, and USER's mouse path then stalls: mouse bytes stop
        being read from the controller entirely. Hide it across the change and show it after. */
+    g_prevW = GetSystemMetrics(SM_CXSCREEN);
+    g_prevH = GetSystemMetrics(SM_CYSCREEN);
     ShowCursor(FALSE);
     r = Escape(hdc, PV_REMODE, 0, NULL, NULL);
     ReleaseDC(NULL, hdc);
