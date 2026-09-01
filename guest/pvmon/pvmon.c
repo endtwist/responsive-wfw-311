@@ -27,6 +27,10 @@
 #define R_DEBUG     0x16
 #define R_GEN       0x17
 
+/* Private display-driver escapes (see guest/driver/port/SRC/CONTROL.ASM) */
+#define PV_QUERY_MODE 0x4A00   /* out: cur w,h, host w,h, dpi, generation */
+#define PV_REMODE     0x4A01   /* re-mode the adapter live; 1 if the mode changed */
+
 #define POLL_MS       250
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
 #define IDT_POLL      1
@@ -98,6 +102,27 @@ static void arrange_shell(void)
 static unsigned g_lastGen;
 static unsigned g_wantW, g_wantH, g_stable;
 static BOOL g_restarting;
+static BOOL g_live;            /* WIN.INI [PVMon] Live=1 -> try the Phase 3 live re-mode */
+static unsigned g_doneW, g_doneH;  /* mode the live path has already applied */
+
+/* Phase 3 step 3a: ask the driver to re-mode the adapter underneath a running Windows.
+   The driver updates its own surface state and GDI's copy of the screen BITMAP. GDI's
+   cached device caps and USER's screen metrics are still the old size at this point, so
+   the shell is expected to keep drawing at the old geometry until 3b/3c land. */
+static BOOL live_remode(void)
+{
+    HDC hdc;
+    int r;
+    hdc = GetDC(NULL);
+    if (!hdc) return FALSE;
+    r = Escape(hdc, PV_REMODE, 0, NULL, NULL);
+    ReleaseDC(NULL, hdc);
+    dbgnum("pvmon: live re-mode returned", (unsigned)r, 0);
+    if (r <= 0) return FALSE;
+    InvalidateRect(NULL, NULL, TRUE);        /* repaint everything we can reach */
+    arrange_shell();
+    return TRUE;
+}
 
 static BOOL adapter_present(void)
 {
@@ -118,8 +143,16 @@ static void poll(HWND hwnd)
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
     if (w != g_wantW || h != g_wantH) { g_wantW = w; g_wantH = h; g_stable = 0; return; }
     if (w == curW && h == curH) { g_stable = 0; return; }
+    if (g_live && w == g_doneW && h == g_doneH) { g_stable = 0; return; }
     if (++g_stable < SETTLE_POLLS) return;
     dbgnum("pvmon: host wants", w, h);
+    if (g_live && live_remode()) {
+        /* Until 3b/3c patch USER and GDI, GetSystemMetrics still reports the old size, so
+           remember what we applied instead of comparing against it, or we would keep
+           re-triggering and fall through to the restart below. */
+        g_doneW = w; g_doneH = h; g_stable = 0;
+        return;
+    }
     dbgnum("pvmon: exiting Windows from", curW, curH);
     g_restarting = TRUE;
     KillTimer(hwnd, IDT_POLL);
@@ -137,6 +170,8 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     case WM_CREATE: {
         HDC hdc; TEXTMETRIC tm; char buf[80];
         g_lastGen = rd(R_GEN);
+        g_live = GetProfileInt("PVMon", "Live", 0) != 0;
+        if (g_live) dbg("pvmon: live re-mode enabled");
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);
         dbgnum("pvmon: up, screen", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));

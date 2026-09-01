@@ -581,3 +581,28 @@ Next:
 
 Next: Phase 3. Steps 3a-3e in 2.4, starting with the driver-side `PV_REMODE` escape and the
 host-side memory differ for finding GDI/USER cached screen dimensions.
+
+**2026-09-01 (night) — Phase 3 step 3a done: the adapter re-modes under a running Windows.**
+- `PVDISP.DRV` gained two private escapes in `CONTROL.ASM`: `PV_QUERY_MODE` (0x4A00) reports
+  current and host-requested geometry, and `PV_REMODE` (0x4A01) performs the re-mode. Both live
+  in the resident-enough `_BLUEMOON` segment rather than `_INIT`, which Windows discards once
+  it is up, so the mode-programming sequence is duplicated there instead of calling `setmode`.
+- The re-mode writes `ENABLE` with bit 7 set, so video memory keeps its contents across the
+  mode change. That matters: a live re-mode must not blank the screen.
+- **GDI hands the driver its own copy of the screen `BITMAP` as `lp_device` on every call**, so
+  the driver patches `bmWidth`, `bmHeight` and `bmWidthPlanes` directly through that pointer.
+  No memory scanning is needed for the surface itself, which removes a chunk of the risk in 2.4
+  step 5. Scanning is still needed for USER's metrics and GDI's cached caps.
+- `PVMON` calls the escape when `WIN.INI [PVMon] Live=1` (`image/build-image.sh live=1`),
+  otherwise it uses the Phase 2.5 restart. Verified in the browser: a request for 800x500 while
+  running at 1024x768 re-modes immediately, the escape returns 1, **Windows does not crash, the
+  cursor stays live and the desktop repaints**. As predicted for 3a, the shell keeps its old
+  1024x768 geometry and is simply clipped by the smaller screen, because USER's metrics and
+  GDI's cached caps are still the old size.
+
+Next (3b): patch USER's screen metrics and the desktop window rectangle. Approach, avoiding
+hard-coded offsets: reach USER's DGROUP through TOOLHELP.DLL (shipped with WfW 3.11), then find
+`rgwSysMet` by matching a run of entries against `GetSystemMetrics` return values, and find the
+desktop window's rectangles by matching `0,0,cx,cy` inside its `WND` structure, which in Win16
+is addressed by the `HWND` value itself as an offset into USER's DGROUP. Both are self-verifying
+signatures rather than version-specific constants.

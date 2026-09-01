@@ -7,8 +7,8 @@
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; esac; done
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
@@ -43,7 +43,8 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 # 96 dpi system fonts and captions collide once PVDPI selects the 120 dpi (8514) fonts.
 # A real large-font install widens it, so do the same here, for both DPI settings.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
+  PVMon.Live=$LIVE \
   "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )"
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
 rm -rf $TMP
-echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD"
+echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD live=$LIVE"
