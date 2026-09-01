@@ -3,6 +3,8 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+// Byte accounting, so the first-load delivery budget can be measured: GET /__stats
+const stats = { bytes: 0, byPath: {} };
 const port = Number(process.argv[2] || 8311);
 const root = path.resolve(process.argv[3] || ".");
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
@@ -10,6 +12,12 @@ const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".
   ".bin": "application/octet-stream", ".png": "image/png", ".svg": "image/svg+xml", ".map": "application/json" };
 http.createServer((req, res) => {
   const url = decodeURIComponent(new URL(req.url, "http://x").pathname);
+  if (url === "/__stats") {
+    if (req.method === "DELETE") { stats.bytes = 0; stats.byPath = {}; }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify(stats));
+  }
+  const count = n => { stats.bytes += n; stats.byPath[url] = (stats.byPath[url] || 0) + n; };
   let file = path.normalize(path.join(root, url));
   if (!file.startsWith(root)) { res.writeHead(403); return res.end(); }
   if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, "index.html");
@@ -25,9 +33,11 @@ http.createServer((req, res) => {
     headers["Content-Range"] = `bytes ${start}-${end}/${size}`; headers["Content-Length"] = end - start + 1;
     res.writeHead(206, headers);
     if (req.method === "HEAD") return res.end();
+    count(end - start + 1);
     return fs.createReadStream(file, { start, end }).pipe(res);
   }
   headers["Content-Length"] = size; res.writeHead(200, headers);
   if (req.method === "HEAD") return res.end();
+  count(size);
   fs.createReadStream(file).pipe(res);
 }).listen(port, "127.0.0.1", () => console.log(`dev server http://127.0.0.1:${port}/ root=${root}`));
