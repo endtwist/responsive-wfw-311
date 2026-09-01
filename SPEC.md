@@ -95,14 +95,21 @@ stub if we want parity):
 
 | Reg (index) | Name | R/W | Meaning |
 |---|---|---|---|
-| `0x0A` | `HOST_XRES` | R | Resolution the host wants, derived from the viewport (§2.8) |
-| `0x0B` | `HOST_YRES` | R | " |
-| `0x0C` | `HOST_DPI` | R | 96 or 120, chosen from initial device class, fixed per session |
-| `0x0D` | `STATUS` | R/W1C | bit0 `MODE_REQUEST` set by host when HOST_XRES/YRES change; guest writes 1 to clear. bit1 `IRQ_ENABLE` |
-| `0x0E` | `CURSOR_X` | W | Guest cursor position, written by the driver's `MoveCursor` (see §2.5) |
-| `0x0F` | `CURSOR_Y` | W | " |
-| `0x10` | `DEBUG` | W | Byte written appears on the host console (like Bochs port `0xE9`) |
-| `0x11` | `GENERATION` | R | Increments on every host mode request; lets a poller detect a missed edge |
+| `0x10` | `HOST_XRES` | R | Resolution the host wants, derived from the viewport (§2.8) |
+| `0x11` | `HOST_YRES` | R | " |
+| `0x12` | `HOST_DPI` | R | 96 or 120, chosen from initial device class, fixed per session |
+| `0x13` | `STATUS` | R/W1C | bit0 `MODE_REQUEST` set by host when HOST_XRES/YRES change; guest writes 1 to clear. bit1 `IRQ_ENABLE` |
+| `0x14` | `CURSOR_X` | W | Guest cursor position, written by the driver's `MoveCursor` (see §2.5) |
+| `0x15` | `CURSOR_Y` | W | " |
+| `0x16` | `DEBUG` | W | Byte written appears on the host console (like Bochs port `0xE9`) |
+| `0x17` | `GENERATION` | R | Increments on every host mode request; lets a poller detect a missed edge |
+
+Indices `0x00-0x0A` are the standard Bochs set (`0x0A` is `VIDEO_MEMORY_64K`), so ours start at
+`0x10`. Confirmed against `v86/src/vga.js`: v86 caps modes at exactly 2560x1600 (`MAX_XRES` /
+`MAX_YRES`), which matches the allocation in §2.8. One gap: v86 treats `VIRT_WIDTH` (index 6)
+as read-only and uses the visible width as the scanline pitch. Fixed pitch therefore needs a
+small v86 change in Phase 1: honour `VIRT_WIDTH` writes and carry a separate `svga_pitch`
+through the renderer and dirty-rect tracking. QEMU already honours `VIRT_WIDTH`.
 
 Plus an optional IRQ line (ISA IRQ 9 or 11, or PCI INTA if we present the device as
 PCI) raised when `MODE_REQUEST` sets and `IRQ_ENABLE` is on. See D2 for why this is
