@@ -464,3 +464,38 @@ project; flagging, not deciding.
   sub-question: default `zoom` on phones (1.0 vs. ~0.6), decided in Phase 4 testing.
 - **D5** Rebuild a lean image from the floppies (recommended) vs. trim the existing CF
   image.
+
+---
+
+## 8. Status log
+
+**2026-09-01 — Phase 0 essentially complete (one afternoon, not one weekend).**
+
+Done:
+- Repo initialised in this folder; v86 vendored under `v86/` with local patches listed in
+  `v86/VENDORED.md`. Rust stable + wasm32 target installed; `v86.wasm` builds
+  (`make build/v86.wasm`, after a one-line fix to v86's linker wrapper for macOS rustup).
+- **Milestone 0a: WfW 3.11 boots to Program Manager in the locally built v86** at
+  `web/dev.html` (serve with `node tools/devserver.mjs`, or the `dev` launch config), disk
+  streamed lazily via HTTP Range requests, 32 MB RAM. Two v86 fixes were needed: an
+  `hda: { heads, sectors_per_track }` CHS override, and not forcing SeaBIOS LBA translation
+  when an override is present (the DOS 6.22 MBR uses raw CHS and the image is 16/32).
+- **Milestone 0b: the DDK's V7VGA 8 bpp sample display driver builds from source** with the
+  genuine MASM 5.10A / LINK4 / RC 3.11 / MAPSYM toolchain running headless under DOSBox-X
+  (`tools/dosbuild.sh`), ~2 minutes for the full driver. Toolchain-rot risk retired.
+- UASM (native MASM-compatible assembler) was built (`tools/build-uasm.sh`) but does not
+  accept the DDK's `cmacros.inc` nested-macro idioms even in `-Zm` mode. Parked; the real
+  MASM path is the build of record.
+
+Findings that adjust the plan:
+- The base image runs the stock 4 bpp `VGA.DRV` (640x480x16). `SVGA256.DR_` and
+  `SUPERVGA.DR_` are present in `WFWINST/` but not installed. The Phase 1 smoke test is to
+  install `SVGA256.DRV` (VESA path) and confirm 256-colour modes on v86's VBE.
+- No DIB engine on the image or in the supplied DDK/SDK (see §0 update). V7VGA is the base.
+
+Next:
+1. `image/build-image.sh`: mtools-based image editing (copy files in, edit `SYSTEM.INI`)
+   so every image change is scripted and reproducible.
+2. Phase 1 smoke test with `SVGA256.DRV`; then add the host registers (§2.1) to `vga.js`
+   and the `VIRT_WIDTH` pitch support; `PVTEST.EXE` DOS mode-set test.
+3. Start the V7VGA → `PVDISP.DRV` port: strip bank switching, DISPI mode set, LFB via DPMI.
