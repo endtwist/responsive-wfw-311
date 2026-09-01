@@ -39,12 +39,18 @@ function viewportSize() {
   const h = (vv ? vv.height : window.innerHeight) - ($("bar").classList.contains("hidden") ? 0 : BAR_H);
   return [w, h];
 }
+// Windows 3.x needs room: below ~640x400 the shell and dialogs clip badly. Rather than
+// clamp (which would stretch the aspect), shrink the emulated pixel scale on small
+// viewports so the mode stays usable, per SPEC.md 2.8.
+const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
 function computeMode() {
-  const zoom = Math.max(0.25, Math.min(4, parseFloat($("zoom").value) || 1));
-  const [vw, vh] = viewportSize();
-  let w = Math.floor(vw * zoom / 8) * 8;
-  let h = Math.floor(vh * zoom / 2) * 2;
-  w = Math.max(320, Math.min(2560, w)); h = Math.max(200, Math.min(1600, h));
+  let zoom = Math.max(0.25, Math.min(4, parseFloat($("zoom").value) || 1));
+  let [vw, vh] = viewportSize();
+  if (!(vw > 0) || !(vh > 0)) { vw = 1024; vh = 768; }   // hidden/zero-size pane
+  zoom = Math.max(zoom, MIN_W / vw, MIN_H / vh);          // never below the usable minimum
+  zoom = Math.min(zoom, MAX_W / vw, MAX_H / vh);          // never past the framebuffer
+  let w = Math.max(MIN_W, Math.min(MAX_W, Math.floor(vw * zoom / 8) * 8));
+  let h = Math.max(MIN_H, Math.min(MAX_H, Math.floor(vh * zoom / 2) * 2));
   return [w, h, zoom];
 }
 const initial = computeMode();

@@ -547,3 +547,37 @@ Next:
   status bit only while a mouse byte is pending. No Microsoft patch needed.
 - Open: title bars come out sky blue (index 9) where the default scheme's dark blue (0,0,128)
   should map to index 4. Colour matching in the driver's RealizeObject path to check.
+
+**2026-09-01 (night) — Phase 2.5 done: acceptance A1 met.**
+- **A1 achieved.** Resizing the viewport re-modes Windows to the new size, unattended, with the
+  shell laid out for it. Verified 1024x768 -> 800x600 -> 1280x698 and back in the browser.
+- **`ExitWindows(EW_RESTARTWINDOWS)` does not work here and was abandoned.** It restarts
+  Windows at the new mode (the driver re-reads `HOST_XRES/YRES` in `Enable`, and PVMON in the
+  restarted instance reports the new `SM_CXSCREEN`), but the restarted instance never paints:
+  a full framebuffer scan shows *no* writes reach video memory, not even for Ctrl+Esc, while
+  the identical mode reached by a fresh start paints correctly. Something keeps the screen
+  "owned" across the in-place restart (VDD / USER repaint suppression is the likely culprit).
+  Not worth chasing, because Phase 3 never exits Windows at all.
+- **What ships instead:** `PVMON.EXE` calls `ExitWindows(0, 0)` and `AUTOEXEC.BAT` runs
+  `WIN` in a loop, so Windows comes straight back up through exactly the fresh-start path that
+  works. Costs a brief text-mode flash and a full Windows start (~25-40 s in v86 at present).
+- **`PVDPI.EXE` (SPEC 2.6) implemented and verified.** Runs before each `WIN`, reads
+  `HOST_DPI` and copies `SYSTEM.96` or `SYSTEM.120` over `SYSTEM.INI`. PVMON now logs what GDI
+  actually ended up with: 96 dpi gives a 16-pixel system font, 120 dpi a 20-pixel one, so the
+  driver's reported DPI and the loaded font set agree. Because the DPI is re-chosen at every
+  restart, a device-class change across a resize is handled for free.
+- **PVMON does the window wrangling of SPEC 2.3 / stretch tier 1**: sizes Program Manager to
+  the screen, maximises the active group, arranges the group icons, and invokes Program
+  Manager's own *Arrange Icons* command. That command is located by scanning menu text for
+  "Arrange" rather than hard-coding Program Manager's private menu IDs.
+- Two things that looked like driver bugs and were not: icon captions collided because Program
+  Manager restores item positions saved at the old resolution (fixed by the arrange above,
+  plus `IconSpacing=100` for the large-font case), and a full-resolution framebuffer dump
+  confirmed glyph rendering itself is correct.
+- The host now never asks for a mode below 640x400, shrinking the emulated pixel scale on small
+  viewports instead (SPEC 2.8). Windows 3.x shells and dialogs clip badly below that, and the
+  browser pane can report a zero-size viewport while hidden, which previously produced
+  nonsense modes like 640x1600.
+
+Next: Phase 3. Steps 3a-3e in 2.4, starting with the driver-side `PV_REMODE` escape and the
+host-side memory differ for finding GDI/USER cached screen dimensions.
