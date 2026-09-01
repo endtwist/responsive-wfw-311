@@ -523,3 +523,27 @@ Next:
   initial mode follows the viewport (e.g. 1000x578), a host request to 640x400 is picked up
   and applied by the guest in under 1.5 s, palette via DAC ports renders correctly.
 - Image builder gained `boot=win|pvtest|dos`.
+
+**2026-09-01 (evening) — Phase 2 milestone: PVDISP.DRV runs Windows; input fixed.**
+- `PVDISP.DRV` (the V7VGA port, bank-window model kept, pitch 4096) boots WfW 3.11 at the
+  viewport size in 256 colours (`image/work-pvdisp.img`, `tools/build-driver.sh`).
+- Fills were coming out as a single colour: the V7 driver never writes pixel bytes for solid
+  and pattern fills. It loads colours into Video Seven "foreground latch" sequencer registers
+  (EC-EF), sets sequencer FE bit 3, and every CPU write then stores those latches into the
+  map-masked planes through the normal ALU. v86 now emulates that subset (`v7_seq` in
+  `vga.js`: extended sequencer storage with read-back, fore-latch write mode in both the
+  unchained and chain-4 paths, back-latch access A0-A3). Same 4-pixel-per-address model as
+  the driver's planar "nibble" loops. The original spec's "no VGA register emulation" holds
+  for the mode-set path; the *write* path emulates the V7 ALU because that is far cheaper
+  than rewriting ~55k lines of blit code.
+- Keyboard and mouse were dead under Windows on **every** image, including stock VGA.DRV.
+  Root cause (found by tracing PIC mask writes and 8042 traffic in v86 and QEMU side by
+  side): VKD disables the keyboard interface (0xAD), reads the command byte by polling, and
+  re-enables. v86 raised IRQ1 for that polled byte; the real 8042 and QEMU do not raise the
+  keyboard IRQ while the interface is disabled. WfW 3.11's VKD never completes that dataless
+  interrupt, so VPICD leaves IRQ1 masked for the session (this is the known "WfW 3.11
+  freezes keyboard/mouse under v86" issue for which v86's docs prescribe Microsoft's VKDA.386).
+  Fixed in `v86/src/ps2.js`: no IRQ while an interface is disabled, re-raise on enable, AUXB
+  status bit only while a mouse byte is pending. No Microsoft patch needed.
+- Open: title bars come out sky blue (index 9) where the default scheme's dark blue (0,0,128)
+  should map to index 4. Colour matching in the driver's RealizeObject path to check.

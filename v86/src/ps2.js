@@ -254,12 +254,20 @@ PS2.prototype.raise_irq = function()
     }
 };
 
+/** A byte already in the output buffer gets its IRQ when the interface/IRQ is (re)enabled. */
+PS2.prototype.update_irq_lines = function()
+{
+    if(!this.next_byte_is_ready) return;
+    if(this.next_byte_is_aux) this.mouse_irq(); else this.kbd_irq();
+};
+
 PS2.prototype.mouse_irq = function()
 {
     this.next_byte_is_ready = true;
     this.next_byte_is_aux = true;
 
-    if(this.command_register & 2)
+    // responsive-wfw311: no IRQ while the aux interface is disabled (0xA7 / command byte bit 5)
+    if((this.command_register & 2) && !(this.command_register & 0x20))
     {
         dbg_log("Mouse irq", LOG_PS2);
 
@@ -276,7 +284,11 @@ PS2.prototype.kbd_irq = function()
     this.next_byte_is_ready = true;
     this.next_byte_is_aux = false;
 
-    if(this.command_register & 1)
+    // responsive-wfw311: no IRQ while the keyboard interface is disabled (0xAD / command byte
+    // bit 4), like a real 8042 and QEMU. WfW 3.11's VKD disables the interface, reads the
+    // command byte by polling and re-enables; an IRQ1 for that polled byte confuses it into
+    // never completing the interrupt, which leaves IRQ1 masked for the whole session.
+    if((this.command_register & 1) && !(this.command_register & 0x10))
     {
         dbg_log("Keyboard irq", LOG_PS2);
 
@@ -462,10 +474,14 @@ PS2.prototype.port64_read = function()
     if(this.next_byte_is_ready)
     {
         status_byte |= 0x1;
-    }
-    if(this.next_byte_is_aux)
-    {
-        status_byte |= 0x20;
+        // responsive-wfw311: AUXB (bit 5) only qualifies a byte that is actually in the
+        // output buffer, as on a real 8042 and in QEMU. Reporting it with OBF clear made
+        // WfW 3.11's VKD treat a spurious IRQ1 as mouse data and never finish the
+        // interrupt, leaving IRQ1 masked for the rest of the session.
+        if(this.next_byte_is_aux)
+        {
+            status_byte |= 0x20;
+        }
     }
 
     dbg_log("port 64 read: " + h(status_byte), LOG_PS2);
@@ -481,6 +497,7 @@ PS2.prototype.port60_write = function(write_byte)
     {
         this.command_register = write_byte;
         this.read_command_register = false;
+        this.update_irq_lines();
 
         // not sure, causes "spurious ack" in Linux
         //this.kbd_buffer.push(0xFA);
@@ -800,6 +817,7 @@ PS2.prototype.port64_write = function(write_byte)
         // Enable second port
         dbg_log("Enable second port", LOG_PS2);
         this.command_register &= ~0x20;
+        this.update_irq_lines();
         break;
     case 0xA9:
         // test second ps/2 port
@@ -830,6 +848,7 @@ PS2.prototype.port64_write = function(write_byte)
         // Enable Keyboard
         dbg_log("Enable Keyboard", LOG_PS2);
         this.command_register &= ~0x10;
+        this.update_irq_lines();
         break;
     case 0xFE:
         dbg_log("CPU reboot via PS2");
