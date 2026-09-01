@@ -98,6 +98,19 @@ emulator.add_listener("screen-set-size", s => {
   $("mode").textContent = `guest ${s[0]}x${s[1]}` + (s[2] ? `@${s[2]}bpp` : " text");
   emulator.screen_set_scale(1, 1);
 });
+// Browsers throttle timers in a hidden tab to roughly nothing, which freezes the emulator
+// mid-session. Messages from a worker are not throttled, so use one as a heartbeat and drive
+// the emulator by hand while the page is hidden.
+try {
+  const src = URL.createObjectURL(new Blob(["setInterval(()=>postMessage(0),1)"], { type: "text/javascript" }));
+  const ticker = new Worker(src);
+  ticker.onmessage = () => {
+    if (document.hidden && emulator.v86 && emulator.v86.running) {
+      try { emulator.v86.do_tick(); } catch (e) { /* emulator not ready yet */ }
+    }
+  };
+} catch (e) { log("host: no worker ticker (" + e.message + ")"); }
+
 emulator.bus.register("pv-debug", line => log("guest: " + line));
 emulator.bus.register("pv-cursor", xy => { window.pvCursor = xy; });
 

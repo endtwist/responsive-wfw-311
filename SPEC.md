@@ -606,3 +606,37 @@ hard-coded offsets: reach USER's DGROUP through TOOLHELP.DLL (shipped with WfW 3
 desktop window's rectangles by matching `0,0,cx,cy` inside its `WND` structure, which in Win16
 is addressed by the `HWND` value itself as an offset into USER's DGROUP. Both are self-verifying
 signatures rather than version-specific constants.
+
+**2026-09-01 (night) — Phase 3 step 3b: Windows reflows live. Acceptance A2 substantially met.**
+- `PVMON` now finds USER's state without a single hard-coded offset, and logs what it found:
+  `USER ds=0766 sysmet=+0074 deskrc=hwnd+8`. The method:
+  1. USER's data segment comes from TOOLHELP.DLL, loaded dynamically so a missing DLL just
+     disables the live path: walk the global heap for the `GT_DGROUP` block owned by USER.
+  2. `rgwSysMet` is found by scanning that segment for twelve consecutive words that equal
+     `GetSystemMetrics(0..11)`. The match was unique.
+  3. The desktop window's rectangle is found by scanning its `WND` structure for `0,0,cx,cy`,
+     using the fact that a Win16 `HWND` *is* the offset of that structure in USER's segment.
+  Each location is verified against live values before anything is written, which is what makes
+  this safe to do to a running OS.
+- On re-mode PVMON patches `SM_CXSCREEN`/`SM_CYSCREEN`, the full-screen metrics, and the desktop
+  window's `rcWindow`/`rcClient`, then repaints and re-arranges the shell.
+- **Result: Program Manager resizes itself to the new screen and its icons re-wrap, live, with no
+  restart and no reboot.** Verified shrinking (1024x768 -> 800x500), growing (-> 1200x700), and
+  seven consecutive changes ending at 776x440, with 98% of the final screen painted and no
+  corruption. This is the thing the project set out to prove is possible.
+- **The cursor must be hidden across the mode change.** Re-moding with the software cursor drawn
+  does not just leave a stale cursor: USER's mouse path stops dead, and mouse bytes stop being
+  read out of the 8042 entirely (the controller's buffer fills and never drains). Wrapping the
+  escape in `ShowCursor(FALSE)`/`ShowCursor(TRUE)`, plus `ClipCursor(NULL)` and a clamped
+  `SetCursorPos` afterwards, fixes it completely: the pointer then reaches past the old screen
+  width on a grow, and the mouse still works after seven re-modes.
+- Timing: about 1.3 s for a shrink end to end. Most of that is deliberate delay, 300 ms of host
+  debounce plus three 250 ms settle polls; the re-mode itself is not the cost.
+- Tooling note: `web/dev.html` now keeps the VM running when the page is hidden, by driving the
+  emulator from a worker heartbeat. Browsers throttle hidden-tab timers to a standstill, which
+  froze the emulator mid-test and looked exactly like a guest hang, costing a wrong diagnosis
+  before it was spotted.
+
+Remaining for a complete A2: step 3c, GDI's cached device caps. The shell reflows correctly
+without it because layout comes from USER, but `GetDeviceCaps(HORZRES/VERTRES)` still reports the
+boot-time screen for applications that ask.

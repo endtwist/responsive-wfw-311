@@ -16,6 +16,7 @@
  * Build: guest/pvmon/build.sh  (Open Watcom via tools/watcom.sh)
  */
 #include <windows.h>
+#include <toolhelp.h>
 #include <conio.h>
 
 #define DISPI_INDEX 0x1CE
@@ -105,20 +106,160 @@ static BOOL g_restarting;
 static BOOL g_live;            /* WIN.INI [PVMon] Live=1 -> try the Phase 3 live re-mode */
 static unsigned g_doneW, g_doneH;  /* mode the live path has already applied */
 
+/* ------------------------------------------------------------------ Phase 3 step 3b
+ * After a live re-mode the driver and GDI's screen surface know the new size, but USER
+ * still reports the old one, so the shell lays itself out for a screen that is no longer
+ * there. USER keeps the screen size in its system-metrics array and in the desktop
+ * window's rectangles, both in USER's own data segment.
+ *
+ * Nothing here hard-codes a Windows build. USER's data segment is found through
+ * TOOLHELP.DLL, the metrics array is found by matching a run of entries against what
+ * GetSystemMetrics returns, and the desktop rectangle is found by matching 0,0,cx,cy
+ * inside the desktop window's structure, which in Win16 is addressed by the HWND value
+ * itself as an offset into that segment. Every location is verified against the live
+ * values before it is written to, and the whole thing simply switches itself off if any
+ * step fails.
+ */
+#define PVFP(sel, off) ((WORD __far *)(((DWORD)(WORD)(sel) << 16) | (WORD)(off)))
+#define MET_RUN 12                 /* metrics matched in a row to accept a candidate */
+
+static WORD g_userDS;              /* USER's DGROUP selector */
+static WORD g_offSysMet;           /* offset of rgwSysMet within it */
+static WORD g_offDeskRc;           /* offset of rcWindow within the desktop WND */
+static BOOL g_patchReady;
+
+typedef HMODULE (WINAPI *PFNMODULEFINDNAME)(LPMODULEENTRY, LPCSTR);
+typedef BOOL (WINAPI *PFNGLOBALWALK)(LPGLOBALENTRY, WORD);
+
+static WORD find_user_dgroup(void)
+{
+    HINSTANCE th;
+    PFNMODULEFINDNAME pModuleFindName;
+    PFNGLOBALWALK pGlobalFirst, pGlobalNext;
+    MODULEENTRY me;
+    GLOBALENTRY ge;
+    HMODULE hUser;
+    WORD sel = 0;
+
+    th = LoadLibrary("TOOLHELP.DLL");
+    if (th < HINSTANCE_ERROR) return 0;
+    pModuleFindName = (PFNMODULEFINDNAME)GetProcAddress(th, "ModuleFindName");
+    pGlobalFirst    = (PFNGLOBALWALK)GetProcAddress(th, "GlobalFirst");
+    pGlobalNext     = (PFNGLOBALWALK)GetProcAddress(th, "GlobalNext");
+    if (pModuleFindName && pGlobalFirst && pGlobalNext) {
+        me.dwSize = sizeof(me);
+        hUser = pModuleFindName(&me, "USER");
+        if (hUser) {
+            ge.dwSize = sizeof(ge);
+            if (pGlobalFirst(&ge, GLOBAL_ALL)) {
+                do {
+                    if (ge.hOwner == hUser && ge.wType == GT_DGROUP) {
+                        sel = (WORD)ge.hBlock;    /* DGROUP is fixed: handle is the selector */
+                        break;
+                    }
+                    ge.dwSize = sizeof(ge);
+                } while (pGlobalNext(&ge, GLOBAL_ALL));
+            }
+        }
+    }
+    FreeLibrary(th);
+    return sel;
+}
+
+/* rgwSysMet[i] is what GetSystemMetrics(i) returns, so a run of them is a strong signature. */
+static BOOL find_sysmet(WORD sel, WORD limit)
+{
+    WORD want[MET_RUN];
+    WORD off;
+    int i, hits = 0;
+    for (i = 0; i < MET_RUN; i++) want[i] = (WORD)GetSystemMetrics(i);
+    for (off = 0; off < limit - MET_RUN * 2; off += 2) {
+        WORD __far *p = PVFP(sel, off);
+        for (i = 0; i < MET_RUN; i++) if (p[i] != want[i]) break;
+        if (i == MET_RUN) { if (!hits++) g_offSysMet = off; }
+    }
+    if (hits == 1) return TRUE;
+    dbgnum("pvmon: sysmet candidates", (unsigned)hits, 0);
+    return hits > 0;               /* ambiguous: take the first, but say so */
+}
+
+/* The desktop window's rectangle reads 0,0,cx,cy; find it inside its WND structure. */
+static BOOL find_desktop_rect(WORD sel)
+{
+    HWND desk = GetDesktopWindow();
+    RECT rc;
+    WORD base = (WORD)desk, off;
+    GetWindowRect(desk, &rc);
+    for (off = 0; off < 96; off += 2) {
+        WORD __far *p = PVFP(sel, base + off);
+        if (p[0] == (WORD)rc.left && p[1] == (WORD)rc.top &&
+            p[2] == (WORD)rc.right && p[3] == (WORD)rc.bottom) { g_offDeskRc = off; return TRUE; }
+    }
+    return FALSE;
+}
+
+static void find_user_state(void)
+{
+    char buf[80];
+    g_userDS = find_user_dgroup();
+    if (!g_userDS) { dbg("pvmon: USER DGROUP not found, live re-mode limited"); return; }
+    if (!find_sysmet(g_userDS, 0xF000)) { dbg("pvmon: sysmet not found"); return; }
+    if (!find_desktop_rect(g_userDS)) { dbg("pvmon: desktop rect not found"); return; }
+    g_patchReady = TRUE;
+    wsprintf(buf, "pvmon: USER ds=%04X sysmet=+%04X deskrc=hwnd+%u",
+             g_userDS, g_offSysMet, (unsigned)g_offDeskRc);
+    dbg(buf);
+}
+
+/* Tell USER the screen is a different size. */
+static void patch_user_metrics(unsigned w, unsigned h)
+{
+    WORD __far *met;
+    WORD __far *rc;
+    unsigned oldW, oldH;
+    if (!g_patchReady) return;
+    met = PVFP(g_userDS, g_offSysMet);
+    oldW = met[SM_CXSCREEN]; oldH = met[SM_CYSCREEN];
+    met[SM_CXSCREEN] = w;
+    met[SM_CYSCREEN] = h;
+    /* the full-screen metrics are the screen less the caption, so keep the difference */
+    if (oldW) met[SM_CXFULLSCREEN] = (WORD)(w - (oldW - met[SM_CXFULLSCREEN]));
+    if (oldH) met[SM_CYFULLSCREEN] = (WORD)(h - (oldH - met[SM_CYFULLSCREEN]));
+    rc = PVFP(g_userDS, (WORD)GetDesktopWindow() + g_offDeskRc);
+    rc[2] = (WORD)w; rc[3] = (WORD)h;      /* rcWindow.right/bottom */
+    rc[6] = (WORD)w; rc[7] = (WORD)h;      /* rcClient follows rcWindow */
+    dbgnum("pvmon: patched USER to", w, h);
+}
+
 /* Phase 3 step 3a: ask the driver to re-mode the adapter underneath a running Windows.
    The driver updates its own surface state and GDI's copy of the screen BITMAP. GDI's
    cached device caps and USER's screen metrics are still the old size at this point, so
    the shell is expected to keep drawing at the old geometry until 3b/3c land. */
-static BOOL live_remode(void)
+static BOOL live_remode(unsigned w, unsigned h)
 {
     HDC hdc;
     int r;
+    POINT pt;
     hdc = GetDC(NULL);
     if (!hdc) return FALSE;
+    /* The display driver owns the cursor, and its software cursor keeps a saved copy of the
+       pixels underneath. Re-moding with the cursor drawn leaves that state describing a
+       screen that no longer exists, and USER's mouse path then stalls: mouse bytes stop
+       being read from the controller entirely. Hide it across the change and show it after. */
+    ShowCursor(FALSE);
     r = Escape(hdc, PV_REMODE, 0, NULL, NULL);
     ReleaseDC(NULL, hdc);
     dbgnum("pvmon: live re-mode returned", (unsigned)r, 0);
-    if (r <= 0) return FALSE;
+    if (r <= 0) { ShowCursor(TRUE); return FALSE; }
+    patch_user_metrics(w, h);
+    /* Put the pointer somewhere that exists on the new screen and let USER recompute its
+       clip rectangle from the metrics we just patched. */
+    GetCursorPos(&pt);
+    if (pt.x >= (int)w) pt.x = (int)w - 1;
+    if (pt.y >= (int)h) pt.y = (int)h - 1;
+    ClipCursor(NULL);
+    SetCursorPos(pt.x, pt.y);
+    ShowCursor(TRUE);
     InvalidateRect(NULL, NULL, TRUE);        /* repaint everything we can reach */
     arrange_shell();
     return TRUE;
@@ -146,7 +287,7 @@ static void poll(HWND hwnd)
     if (g_live && w == g_doneW && h == g_doneH) { g_stable = 0; return; }
     if (++g_stable < SETTLE_POLLS) return;
     dbgnum("pvmon: host wants", w, h);
-    if (g_live && live_remode()) {
+    if (g_live && live_remode(w, h)) {
         /* Until 3b/3c patch USER and GDI, GetSystemMetrics still reports the old size, so
            remember what we applied instead of comparing against it, or we would keep
            re-triggering and fall through to the restart below. */
@@ -171,7 +312,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         HDC hdc; TEXTMETRIC tm; char buf[80];
         g_lastGen = rd(R_GEN);
         g_live = GetProfileInt("PVMon", "Live", 0) != 0;
-        if (g_live) dbg("pvmon: live re-mode enabled");
+        if (g_live) { dbg("pvmon: live re-mode enabled"); find_user_state(); }
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);
         dbgnum("pvmon: up, screen", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
