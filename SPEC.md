@@ -714,3 +714,18 @@ image at all: lazy Range fetching means only the sectors DOS and Windows actuall
 transferred. Rebuilding a lean image from the floppies is therefore a size optimisation worth
 maybe a few MB, not a prerequisite for shipping. The server does not compress, so gzip on the
 wire would cut this further.
+
+**2026-09-01 (night) — verification round: apps, keyboard, soak.**
+- **Bundled applications survive live re-modes.** With Program Manager, Write and Solitaire all
+  open, three live changes (720x440 -> 1240x720 -> 960x560) left every window intact and correctly
+  drawn; Solitaire's fixed-size window is clamped rather than stretched, which is the per-app
+  policy SPEC 2.3 tier 2 asks for. 89-96% of each screen paints, the remainder being the desktop
+  background that is legitimately one flat colour.
+- **The on-screen keyboard works.** Focusing the hidden input and driving it the way a phone's
+  soft keyboard would typed a full sentence into Write.
+- **Soak:** a continuous run changing mode every 15 seconds. At the time of writing: **15 minutes,
+  61 re-modes, zero stalls, zero blank frames, zero errors**, with a second emulator running
+  alongside it the whole time. A0 asks for 30 minutes; this is half of it, and clean throughout.
+- Screenshots in this session were taken by rendering the guest framebuffer through the palette
+  and posting the PNG to the dev server, because the browser pane stopped compositing and the
+  screenshot API went with it. `tools/devserver.mjs` gained the endpoint for it.
