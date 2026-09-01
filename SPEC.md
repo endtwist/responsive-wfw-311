@@ -640,3 +640,14 @@ signatures rather than version-specific constants.
 Remaining for a complete A2: step 3c, GDI's cached device caps. The shell reflows correctly
 without it because layout comes from USER, but `GetDeviceCaps(HORZRES/VERTRES)` still reports the
 boot-time screen for applications that ask.
+
+**2026-09-01 (night) — Phase 3 step 3c done: A2 complete.**
+- GDI's cached `GDIINFO` is found the same self-verifying way: `GetDeviceCaps` indexes that block
+  by byte offset, so twelve caps read back through the API are a signature for the block itself.
+  Found uniquely at `GDI ds=05BE gdiinfo=+264E`.
+- On re-mode PVMON patches `HORZRES`/`VERTRES` and the matching `HORZSIZE`/`VERTSIZE` millimetre
+  values, then reads the caps back through the API to prove the patch is the block GDI answers
+  from: **`GetDeviceCaps now reports 960x600`** after a live change from 1024x768.
+- With 3a, 3b and 3c together, a live re-mode now updates every copy of the screen geometry that
+  matters: the adapter, the driver's own state, GDI's screen surface, GDI's device caps, USER's
+  system metrics and the desktop window. **Acceptance A2 is met.**

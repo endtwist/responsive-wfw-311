@@ -124,6 +124,8 @@ static unsigned g_doneW, g_doneH;  /* mode the live path has already applied */
 #define MET_RUN 12                 /* metrics matched in a row to accept a candidate */
 
 static WORD g_userDS;              /* USER's DGROUP selector */
+static WORD g_gdiDS;               /* GDI's DGROUP selector */
+static WORD g_offCaps;             /* offset of the screen's GDIINFO within it */
 static WORD g_offSysMet;           /* offset of rgwSysMet within it */
 static WORD g_offDeskRc;           /* offset of rcWindow within the desktop WND */
 static BOOL g_patchReady;
@@ -131,7 +133,7 @@ static BOOL g_patchReady;
 typedef HMODULE (WINAPI *PFNMODULEFINDNAME)(LPMODULEENTRY, LPCSTR);
 typedef BOOL (WINAPI *PFNGLOBALWALK)(LPGLOBALENTRY, WORD);
 
-static WORD find_user_dgroup(void)
+static WORD find_dgroup(LPCSTR module)
 {
     HINSTANCE th;
     PFNMODULEFINDNAME pModuleFindName;
@@ -148,7 +150,7 @@ static WORD find_user_dgroup(void)
     pGlobalNext     = (PFNGLOBALWALK)GetProcAddress(th, "GlobalNext");
     if (pModuleFindName && pGlobalFirst && pGlobalNext) {
         me.dwSize = sizeof(me);
-        hUser = pModuleFindName(&me, "USER");
+        hUser = pModuleFindName(&me, module);
         if (hUser) {
             ge.dwSize = sizeof(ge);
             if (pGlobalFirst(&ge, GLOBAL_ALL)) {
@@ -183,6 +185,29 @@ static BOOL find_sysmet(WORD sel, WORD limit)
     return hits > 0;               /* ambiguous: take the first, but say so */
 }
 
+/* GDI keeps the GDIINFO the driver filled in at Enable, and GetDeviceCaps indexes it by byte
+   offset, so a run of caps read back through the API is a signature for the block itself.
+   Applications that ask GetDeviceCaps(HORZRES) read this, not USER's metrics. */
+#define CAPS_RUN 12
+static BOOL find_gdi_caps(WORD sel, WORD limit)
+{
+    HDC hdc;
+    WORD want[CAPS_RUN];
+    WORD off;
+    int i, hits = 0;
+    hdc = GetDC(NULL);
+    if (!hdc) return FALSE;
+    for (i = 0; i < CAPS_RUN; i++) want[i] = (WORD)GetDeviceCaps(hdc, i * 2);
+    ReleaseDC(NULL, hdc);
+    for (off = 0; off < limit - CAPS_RUN * 2; off += 2) {
+        WORD __far *p = PVFP(sel, off);
+        for (i = 0; i < CAPS_RUN; i++) if (p[i] != want[i]) break;
+        if (i == CAPS_RUN) { if (!hits++) g_offCaps = off; }
+    }
+    if (hits != 1) dbgnum("pvmon: gdiinfo candidates", (unsigned)hits, 0);
+    return hits > 0;
+}
+
 /* The desktop window's rectangle reads 0,0,cx,cy; find it inside its WND structure. */
 static BOOL find_desktop_rect(WORD sel)
 {
@@ -201,7 +226,7 @@ static BOOL find_desktop_rect(WORD sel)
 static void find_user_state(void)
 {
     char buf[80];
-    g_userDS = find_user_dgroup();
+    g_userDS = find_dgroup("USER");
     if (!g_userDS) { dbg("pvmon: USER DGROUP not found, live re-mode limited"); return; }
     if (!find_sysmet(g_userDS, 0xF000)) { dbg("pvmon: sysmet not found"); return; }
     if (!find_desktop_rect(g_userDS)) { dbg("pvmon: desktop rect not found"); return; }
@@ -209,6 +234,16 @@ static void find_user_state(void)
     wsprintf(buf, "pvmon: USER ds=%04X sysmet=+%04X deskrc=hwnd+%u",
              g_userDS, g_offSysMet, (unsigned)g_offDeskRc);
     dbg(buf);
+    /* GDI's cached caps are a bonus: the shell reflows without them, but applications that
+       ask GetDeviceCaps would otherwise keep seeing the boot-time screen. */
+    g_gdiDS = find_dgroup("GDI");
+    if (g_gdiDS && find_gdi_caps(g_gdiDS, 0xF000)) {
+        wsprintf(buf, "pvmon: GDI ds=%04X gdiinfo=+%04X", g_gdiDS, g_offCaps);
+        dbg(buf);
+    } else {
+        g_gdiDS = 0;
+        dbg("pvmon: GDI caps not found, apps will see the old screen size");
+    }
 }
 
 /* Tell USER the screen is a different size. */
@@ -229,6 +264,24 @@ static void patch_user_metrics(unsigned w, unsigned h)
     rc[2] = (WORD)w; rc[3] = (WORD)h;      /* rcWindow.right/bottom */
     rc[6] = (WORD)w; rc[7] = (WORD)h;      /* rcClient follows rcWindow */
     dbgnum("pvmon: patched USER to", w, h);
+    if (g_gdiDS) {
+        WORD __far *caps = PVFP(g_gdiDS, g_offCaps);
+        WORD dpiX = caps[LOGPIXELSX / 2], dpiY = caps[LOGPIXELSY / 2];
+        caps[HORZRES / 2] = (WORD)w;
+        caps[VERTRES / 2] = (WORD)h;
+        /* the physical size in millimetres has to follow the pixel count */
+        if (dpiX) caps[HORZSIZE / 2] = (WORD)((DWORD)w * 254 / (10L * dpiX));
+        if (dpiY) caps[VERTSIZE / 2] = (WORD)((DWORD)h * 254 / (10L * dpiY));
+        dbgnum("pvmon: patched GDI caps to", w, h);
+        {   /* read it back through the API, to prove that is the block GDI answers from */
+            HDC hdc = GetDC(NULL);
+            if (hdc) {
+                dbgnum("pvmon: GetDeviceCaps now reports",
+                       (unsigned)GetDeviceCaps(hdc, HORZRES), (unsigned)GetDeviceCaps(hdc, VERTRES));
+                ReleaseDC(NULL, hdc);
+            }
+        }
+    }
 }
 
 /* Phase 3 step 3a: ask the driver to re-mode the adapter underneath a running Windows.
@@ -322,7 +375,8 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (hdc) {
             SelectObject(hdc, GetStockObject(SYSTEM_FONT));
             GetTextMetrics(hdc, &tm);
-            wsprintf(buf, "pvmon: dpi %d/%d, sysfont h=%d avew=%d, iconspacing=%d",
+            wsprintf(buf, "pvmon: caps %dx%d, dpi %d/%d, sysfont h=%d avew=%d, iconspacing=%d",
+                     GetDeviceCaps(hdc, HORZRES), GetDeviceCaps(hdc, VERTRES),
                      GetDeviceCaps(hdc, LOGPIXELSX), GetDeviceCaps(hdc, LOGPIXELSY),
                      (int)tm.tmHeight, (int)tm.tmAveCharWidth,
                      GetSystemMetrics(SM_CXICONSPACING));
