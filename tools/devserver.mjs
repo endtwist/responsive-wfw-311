@@ -12,6 +12,24 @@ const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".
   ".bin": "application/octet-stream", ".png": "image/png", ".svg": "image/svg+xml", ".map": "application/json" };
 http.createServer((req, res) => {
   const url = decodeURIComponent(new URL(req.url, "http://x").pathname);
+  // Screenshots: the page POSTs a PNG data URL here so a frame can be captured even when the
+  // browser pane is not compositing and no screenshot API is available.
+  if (url === "/__shot" && req.method === "OPTIONS") {
+    res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS",
+                         "Access-Control-Allow-Headers": "Content-Type" });
+    return res.end();
+  }
+  if (url === "/__shot" && req.method === "POST") {
+    let body = "";
+    req.on("data", d => body += d);
+    req.on("end", () => {
+      const b64 = body.replace(/^data:image\/\w+;base64,/, "");
+      const name = `shot-${Date.now()}.png`;
+      fs.writeFileSync(path.join(root, "shots", name), Buffer.from(b64, "base64"));
+      res.writeHead(200, { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" }); res.end(name);
+    });
+    return;
+  }
   if (url === "/__stats") {
     if (req.method === "DELETE") { stats.bytes = 0; stats.byPath = {}; }
     res.writeHead(200, { "Content-Type": "application/json" });
