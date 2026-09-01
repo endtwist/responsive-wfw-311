@@ -22,6 +22,25 @@ Machine state: node 22, clang, make, python 3.14, git/gh, QEMU 11.1, UTM, Docker
 build.sh). **Missing:** Rust toolchain (v86 needs `cargo` + `wasm32-unknown-unknown`),
 DOSBox/DOSBox-X, a MASM-compatible assembler, and the WfW 3.11 DDK.
 
+**Update (Phase 0, day 1):** Josh supplied the *Windows 3.1* DDK (ISO, which also carries
+Visual C++ 1.52c) and the *Windows for Workgroups 3.1* SDK (two floppies). Neither has the
+DIB engine or the 3.11 SVGA sample. What they do have, and how the plan adapts:
+
+- `DDK/286/DISPLAY/8PLANE/V7VGA`: a complete 256-colour SVGA display driver in MASM 5.1
+  (~55k lines, Video Seven, bank-switched). This is the porting base for `PVDISP.DRV`
+  instead of the DIB-engine sample: same GDI export surface, 8 bpp, already handles
+  palettes, cursors, DIBs, RLE, and the 3.x mode-switch protocol. Bank switching gets
+  removed in favour of the linear framebuffer, which simplifies rather than complicates.
+- `DDK/286/TOOLS`: MASM 5.10, LINK, LINK4, NMAKE, WDEB386. `VISUALC/US/VC152C` on the
+  same ISO: full VC++ 1.52c incl. `RC` and 16-bit `CL`, plus **debug `USER.SYM`/`GDI.SYM`**.
+- `DDK/DOCUMENT/DDAG31.TXT`: the Display Driver Adaptation Guide.
+- WfW 3.1 SDK `DEBUG/`: debug `USER.EXE`, `GDI.EXE`, `KRNL386.EXE` with `.SYM` files, and
+  `WDEB386`. These are the *3.1* kernels, not 3.11; symbol names carry over, offsets do
+  not, which is fine for the derivation method in §2.4.
+- The DIB-engine route stays available if the 3.11 SVGA supplement (`SVGA.EXE`, with
+  `DIBENG.DLL`, `SVGA256.DRV`, `VFLATD.386`) or the 3.11 DDK turns up; it is no longer
+  on the critical path.
+
 Consequence for the plan: Phase 0 shrinks. There is already a known-good WfW install and a
 macOS-hosted Win16 build loop. Phase 0 becomes "v86 builds locally and boots the existing
 image" plus "DDK toolchain runs", not a from-scratch install.
@@ -35,13 +54,14 @@ Windows to a new resolution without a reboot.
 
 Concrete acceptance tests, in order of ambition:
 
-1. **A0 (Phase 2):** WfW 3.11 boots on the paravirtual adapter at any of 640x480,
-   800x600, 1024x768 (chosen at boot), runs Program Manager, File Manager, Write,
+1. **A0 (Phase 2):** WfW 3.11 boots on the paravirtual adapter at the resolution the
+   host requests at boot (any width that is a multiple of 8, from 640x480 up to
+   2560x1600), runs Program Manager, File Manager, Write,
    Paintbrush, Solitaire for a 30-minute session with no visual corruption or hang.
-2. **A1 (Phase 2.5, baseline ship):** Dragging the browser across a breakpoint causes
+2. **A1 (Phase 2.5, baseline ship):** Resizing the browser window causes
    Windows to restart itself (`ExitWindows(EW_RESTARTWINDOWS)`) at the new resolution
    within ~10 s, session state in apps lost, no DOS prompt visible.
-3. **A2 (Phase 3):** Same drag re-modes live. Program Manager reflows, open apps keep
+3. **A2 (Phase 3):** Same resize re-modes live to the new viewport size. Program Manager reflows, open apps keep
    state, mouse hit-testing is correct, screen repaints cleanly. Total time under 1 s.
 4. **A3 (Phase 4):** Phone rotation portrait/landscape does A2. Background the tab, kill
    the browser, reopen: session restored from snapshot in under 5 s, no cold boot.
@@ -64,17 +84,18 @@ is the same interface. That gives us:
 - A framebuffer device that already exists, is tested, and is identical in v86 and QEMU,
   so the driver can be regression-tested in QEMU's harness and run in the browser
   unchanged.
-- An existing DDK code path to start from: the WfW 3.11 DDK SVGA sample driver
-  (DIB-engine based) has a VESA VBE code path, and v86 ships a VGA BIOS with VBE. That
-  sample driver very likely boots on stock v86 today with zero code written. This is the
-  new Phase 1 milestone (see §3).
+- WfW 3.11 itself ships `SVGA256.DRV`, a VESA-VBE 256-colour driver, and v86 ships a
+  VGA BIOS with VBE. Selecting that stock driver on stock v86 should already give
+  640x480x256 and 800x600x256 with zero code written; that is the Phase 0/1 smoke test
+  that proves the VBE LFB path and the 8 bpp palette path in v86 before we write a byte
+  of driver.
 
 What we add to the DISPI register set, in v86 only at first (QEMU gets a tiny patch or a
 stub if we want parity):
 
 | Reg (index) | Name | R/W | Meaning |
 |---|---|---|---|
-| `0x0A` | `HOST_XRES` | R | Resolution the host wants, from breakpoint table |
+| `0x0A` | `HOST_XRES` | R | Resolution the host wants, derived from the viewport (§2.8) |
 | `0x0B` | `HOST_YRES` | R | " |
 | `0x0C` | `HOST_DPI` | R | 96 or 120, chosen from initial device class, fixed per session |
 | `0x0D` | `STATUS` | R/W1C | bit0 `MODE_REQUEST` set by host when HOST_XRES/YRES change; guest writes 1 to clear. bit1 `IRQ_ENABLE` |
@@ -93,11 +114,11 @@ framebuffer mapping, and lose the free QEMU parity and the free SVGA-sample star
 point. Cost estimate: +2 weekends in Phase 1 and a harder Phase 2.
 
 **Framebuffer policy: fixed pitch.** Allocate the framebuffer once at the largest mode
-(1024 px × 768 lines × 1 byte = 768 KB; at 16 bpp, 1.5 MB) and keep `VIRT_WIDTH`
-(pitch) fixed at 1024 pixels across all modes. A re-mode then changes only the visible
+(2560 px × 1600 lines × 1 byte = 4 MB at 8 bpp; see §2.8) and keep `VIRT_WIDTH`
+(pitch) fixed at 2560 pixels across all modes. A re-mode then changes only the visible
 width and height. Anything in GDI, USER, or the DIB engine that cached the scanline
 stride stays valid, which removes an entire class of Phase 3 corruption bugs. Host side,
-rendering simply reads a `w×h` window out of a `1024×768` buffer.
+rendering simply reads a `w×h` window out of a `2560×1600` buffer.
 
 **Colour depth.** 8 bpp palettised for Phases 1-3 (what the DDK SVGA sample does, what
 Win 3.x apps expect, smallest framebuffer, cheapest host conversion). 16 bpp is a
@@ -110,8 +131,9 @@ which v86 already emulates and applies to LFB modes at 8 bpp. **VERIFY** in Phas
 
 An NE-format DLL, `PVDISP.DRV`, installed via `SYSTEM.INI [boot] display.drv=` plus a
 matching `OEMSETUP.INF`-style entry (or just hand-edited `SYSTEM.INI` since we own the
-image). Based on the WfW 3.11 DDK SVGA sample, which sits on top of `DIBENG.DLL`
-(shipped with WfW 3.11). The driver:
+image). Based on the Windows 3.1 DDK `8PLANE/V7VGA` sample (see §0 update), a
+self-contained 8 bpp driver; the DIB-engine variant is an alternative if that toolkit
+becomes available. The driver:
 
 - Implements the required GDI display-driver exports by ordinal (`Enable`, `Disable`,
   `ReEnable`, `BitBlt`, `Output`, `ExtTextOut`, `RealizeObject`, `Control`,
@@ -120,8 +142,9 @@ image). Based on the WfW 3.11 DDK SVGA sample, which sits on top of `DIBENG.DLL`
   `CreateDIBitmap`, `DibToDevice`, `SelectBitmap`, `BitmapBits`, `EnumDFonts`,
   `EnumObj`, `ColorInfo`, `Pixel`, `StrBlt`, `ScanLR`, `DeviceMode`, `DeviceBitmap`,
   `FastBorder`, `SetAttribute`, `GetCharWidth`, `GetDriverResourceID`,
-  `UserRepaintDisable`). Nearly all forward to the DIB engine's `DIB_*` twins; the
-  sample already does this. **VERIFY** exact ordinal list against the DDK.
+  `UserRepaintDisable`). The V7VGA sample implements all of these in asm; we keep its
+  implementations and change only the surface addressing (linear instead of banked),
+  `Enable`/`SetMode`, and `Control`. **VERIFY** exact ordinal list against DDAG31.
 - `Enable` (first call, fills `GDIINFO`): reads `HOST_XRES/YRES/DPI` from the device and
   reports `dpHorzRes/dpVertRes/dpLogPixelsX/Y` accordingly. This alone makes the
   restart-based fallback (A1) work with no other code.
@@ -225,7 +248,7 @@ acceptable and vastly simpler than heuristic scanning. To derive them:
 - 3b. Add step 6 (USER metrics + desktop rect). Expect: new windows open correctly
   positioned, maximise works, but repaint artefacts remain in old DCs.
 - 3c. Add step 5 and DC-cache patching. Expect: clean.
-- 3d. Grow re-mode (640 → 1024). Same code path; verifies nothing depended on the
+- 3d. Grow re-mode (e.g. 640 → 1600 wide). Same code path; verifies nothing depended on the
   visible area being the whole buffer.
 - 3e. Stress: re-mode every 500 ms for an hour in the QEMU harness, screenshot diffing.
 
@@ -262,13 +285,14 @@ DOS, reusing the A1 path.
 Static site (any host; Vercel is connected if we want previews). Components:
 
 - v86 fork with the adapter changes, built to `libv86.js` + `v86.wasm`.
-- **Breakpoint controller:** listens to `visualViewport` `resize` (and `orientationchange`
-  as a hint), debounces 300 ms, maps CSS width to the table below, writes
+- **Mode controller:** listens to `visualViewport` `resize` (and `orientationchange`
+  as a hint), debounces 300 ms, computes the mode per §2.8, writes
   `HOST_XRES/YRES`, bumps `GENERATION`, raises the IRQ if enabled. Also chooses the
   session DPI once at boot.
-- **Canvas scaling:** the emulated mode is chosen so integer or near-integer scaling is
-  possible; the canvas is CSS-sized to the viewport with `image-rendering: pixelated`
-  when the scale is integer and default (bilinear) otherwise.
+- **Canvas scaling:** with `zoom` = 1 the canvas is exactly viewport-sized and each
+  emulated pixel is one CSS pixel (rendered at device-pixel ratio, so crisp on retina).
+  With other zooms the canvas is CSS-scaled; `image-rendering: pixelated` for integer
+  ratios, bilinear otherwise.
 - **Disk delivery:** v86 supports lazily fetched disk images via HTTP Range requests
   (`async: true`), so first load does not need the whole image, only the sectors DOS and
   Windows actually touch. Combined with a service worker that caches fetched ranges, the
@@ -281,17 +305,39 @@ Static site (any host; Vercel is connected if we want previews). Components:
 - **Memory budget:** VM RAM 32 MB, VGA/LFB 2 MB, v86 overhead ~20-30 MB, snapshot
   buffer transient. Target under 150 MB total tab footprint on iOS.
 
-### 2.8 Breakpoint table (unchanged, plus orientation)
+### 2.8 Mode selection: match the screen (supersedes the breakpoint table)
 
-| Class | CSS viewport width | Emulated mode | DPI (per session) |
-|---|---|---|---|
-| Phone portrait | < 600 | 640x480 | 120 |
-| Phone landscape | < 600 tall, or < 1024 wide with height < 600 | 800x480 (or 800x600 if height allows; test) | 120 |
-| Tablet | 600-1024 | 800x600 | 96 or 120, decide in Phase 4 testing |
-| Desktop | > 1024 | 1024x768 | 96 |
+Per Josh's update: the emulated resolution follows the actual viewport instead of
+snapping to 640x480 / 800x600 / 1024x768 classes. The fixed-pitch framebuffer (§2.1)
+makes arbitrary widths free.
 
-Non-4:3 modes such as 800x480 are free with a fixed-pitch framebuffer and are worth
-having for phone landscape. All modes must fit in the 1024x768 allocation.
+- **Mode:** `w = floor(visualViewport.width × zoom / 8) × 8`,
+  `h = floor(visualViewport.height × zoom / 2) × 2`, clamped to the framebuffer
+  allocation. `zoom` is 1.0 by default (one emulated pixel per CSS pixel) and is a
+  user-adjustable setting persisted in `localStorage`, for people who want a bigger or
+  smaller Windows on the same screen.
+- **Framebuffer allocation:** 2560 × 1600 × 8 bpp = 4 MB, pitch fixed at 2560. Viewports
+  wider than that are letterboxed/scaled by the host rather than re-moded larger.
+- **Re-mode trigger:** after the 300 ms debounce, re-mode if either dimension changed by
+  8 px or more. Smaller jitters (iOS URL bar animations mid-flight) are ignored.
+- **DPI (per session, unchanged):** 120 if the initial CSS viewport width is under 600,
+  else 96.
+- **Minimum size risk (new):** a phone in portrait is roughly 390 × 850 CSS px. Windows
+  3.x assumes at least 640 px of width in places (some dialogs, Program Manager's
+  default group layout, Setup). The OS will run below that, but dialogs may clip. If
+  this is unacceptable in Phase 4 testing, the fix is a default `zoom` below 1 on narrow
+  screens (e.g. 0.6, giving ~640 wide on a 390 px phone) rather than a return to fixed
+  classes. The 120 DPI fonts partly offset the shrink.
+- **Rotation** is just a resize: portrait 390 × 850 becomes landscape 850 × 390.
+
+Reference viewport sizes (CSS px) the plan is tested against:
+
+| Device | Portrait | Landscape |
+|---|---|---|
+| iPhone 16 Pro | 402 × 874 | 874 × 402 |
+| iPhone SE 2 (BrowserStack floor) | 375 × 667 | 667 × 375 |
+| iPad 11" | 820 × 1180 | 1180 × 820 |
+| Laptop browser window | — | typically 1200-1900 × 700-1100 |
 
 ---
 
@@ -394,7 +440,7 @@ project; flagging, not deciding.
 | 2 | 1992 toolchain rot | Reduced | Watcom already runs here; UASM native; DOSBox-X only as fallback; retire in Phase 0 |
 | 3 | App compatibility tail | Unchanged | Scope is shell + bundled apps |
 | 4 | WebKit memory ceilings | Unchanged | 32 MB VM; measure in Phase 1, not Phase 4. Local device is an iPhone 16 Pro (not memory-constrained); older iPhones and low-end Android via BrowserStack real-device cloud. Target the oldest iOS BrowserStack offers that still gets Safari updates (iPhone SE 2nd gen / iPhone XR class) as the floor |
-| 5 | **New:** DDK availability and completeness | New | Need the WfW 3.11 DDK specifically (has DIB engine + SVGA sample). The Win 3.1 DDK lacks DIBENG; the Win95 DDK has DIBENG minidriver samples but in the 95 model. If only the 95 DDK is available, we write the DLL shell ourselves against DIBENG exports, +2 weekends |
+| 5 | DDK availability and completeness | **Resolved** | We have the Win 3.1 DDK, no DIB engine. Base is the V7VGA 8 bpp sample (§0 update). Cost: the driver is ~55k lines of MASM we own rather than a thin shell over DIBENG; benefit: no dependency on a DLL we cannot rebuild |
 | 6 | **New:** DPMI physical mapping of the LFB from a ring-3 driver | New | Standard DPMI 0800h; fallback is a 200-line VxD |
 | 7 | **New:** DISPI 8 bpp palette path in v86 | New | Verified in Phase 1; fallback is 16 bpp from the start |
 
@@ -407,6 +453,7 @@ project; flagging, not deciding.
   vs. hardware IRQ into the driver.
 - **D3** Accept the A1 restart-based resize as the shipping fallback? (Original spec
   said decide before Phase 3; recommending yes, and building it in Phase 2.5.)
-- **D4** Phone landscape mode: 800x480 (fills modern phones) vs. stay 4:3.
+- **D4** ~~Phone landscape mode~~ Superseded: modes match the screen (§2.8). Remaining
+  sub-question: default `zoom` on phones (1.0 vs. ~0.6), decided in Phase 4 testing.
 - **D5** Rebuild a lean image from the floppies (recommended) vs. trim the existing CF
   image.
