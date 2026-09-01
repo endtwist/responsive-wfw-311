@@ -488,14 +488,23 @@ Done:
   MASM path is the build of record.
 
 Findings that adjust the plan:
-- The base image runs the stock 4 bpp `VGA.DRV` (640x480x16). `SVGA256.DR_` and
-  `SUPERVGA.DR_` are present in `WFWINST/` but not installed. The Phase 1 smoke test is to
-  install `SVGA256.DRV` (VESA path) and confirm 256-colour modes on v86's VBE.
+- The base image runs the stock 4 bpp `VGA.DRV` (640x480x16). `SVGA256.DR_` was
+  installed into a scripted work image (`image/build-image.sh display=svga256 res=2`) and
+  **fails with "An error occurred while trying to initialize the video adapter" on both v86
+  and QEMU `-vga std`**. `strings` on the driver shows only chipset-specific init paths
+  (`VIDEOINIT_TSENG/TRIDENT/CIRRUS542X/CIRRUS6420/ATI/OAK`) and no VESA path, so the
+  "free" 256-colour smoke test is off the table. §2.1's claim that the stock driver would
+  run on v86 is withdrawn; 8 bpp palette and LFB behaviour get verified by our own
+  `PVTEST` in Phase 1 instead. v86 itself is not implicated (QEMU fails identically).
+- Image editing is scripted: `image/build-image.sh [display=vga|svga256|pvdisp] [res=] [dpi=]`
+  copies `image/changes/**` into a fresh `work.img` with mtools and edits `SYSTEM.INI`
+  via `tools/inied.py`. `tools/msexpand.py` handles SZDD files; the WfW 3.11 setup files
+  are KWAJ (LZH), so those are expanded with the image's own `EXPAND.EXE` via
+  `tools/dosbuild.sh` instead.
 - No DIB engine on the image or in the supplied DDK/SDK (see §0 update). V7VGA is the base.
 
 Next:
-1. `image/build-image.sh`: mtools-based image editing (copy files in, edit `SYSTEM.INI`)
-   so every image change is scripted and reproducible.
-2. Phase 1 smoke test with `SVGA256.DRV`; then add the host registers (§2.1) to `vga.js`
-   and the `VIRT_WIDTH` pitch support; `PVTEST.EXE` DOS mode-set test.
+2. Phase 1: add the host registers (§2.1) to `vga.js` and the `VIRT_WIDTH` pitch support;
+   `PVTEST.EXE` DOS mode-set test (banked A000 writes in real mode; the LFB mapping is
+   exercised by the Windows driver in Phase 2 where DPMI is available).
 3. Start the V7VGA → `PVDISP.DRV` port: strip bank switching, DISPI mode set, LFB via DPMI.

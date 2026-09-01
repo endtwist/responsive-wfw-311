@@ -26,7 +26,7 @@ const emulator = new V86({
   screen_container: document.getElementById("screen_container"),
   bios: { url: "../v86/bios/seabios.bin" },
   vga_bios: { url: "../v86/bios/vgabios.bin" },
-  hda: { url: "../image/wfw311-base.img", async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
+  hda: { url: "../image/work.img", async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
   boot_order: 0x132,
   autostart: true,
 });
