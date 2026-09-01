@@ -46,6 +46,48 @@ static void dbgnum(const char *s, unsigned a, unsigned b)
     char buf[64]; wsprintf(buf, "%s %ux%u", (LPSTR)s, a, b); dbg(buf);
 }
 
+static HINSTANCE g_hInst;
+static unsigned g_fitW, g_fitH;   /* screen the window fixer is fitting to */
+
+/* Bring one top-level window back inside the screen after a resize. Maximised windows are
+   re-maximised so they refill it; the rest are clamped, and shrunk if they no longer fit.
+   This is the rest of SPEC 2.3's window wrangling: without it, a window that was maximised at
+   the old size keeps that size, and windows can end up entirely off-screen after a shrink. */
+BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
+{
+    RECT rc;
+    int w, h, x, y;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+    if (IsZoomed(hwnd)) {                       /* re-maximise against the new metrics */
+        ShowWindow(hwnd, SW_RESTORE);
+        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        return TRUE;
+    }
+    GetWindowRect(hwnd, &rc);
+    w = rc.right - rc.left; h = rc.bottom - rc.top;
+    x = rc.left; y = rc.top;
+    if (w > (int)g_fitW) w = g_fitW;
+    if (h > (int)g_fitH) h = g_fitH;
+    if (x + w > (int)g_fitW) x = g_fitW - w;
+    if (y + h > (int)g_fitH) y = g_fitH - h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x != rc.left || y != rc.top || w != rc.right - rc.left || h != rc.bottom - rc.top)
+        SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    return TRUE;
+}
+
+static void fit_windows(void)
+{
+    FARPROC proc;
+    g_fitW = GetSystemMetrics(SM_CXSCREEN);
+    g_fitH = GetSystemMetrics(SM_CYSCREEN);
+    proc = MakeProcInstance((FARPROC)FitWindow, g_hInst);
+    if (!proc) return;
+    EnumWindows((WNDENUMPROC)proc, 0L);
+    FreeProcInstance(proc);
+}
+
 /* Fit the shell to the current screen. Program Manager restores the window rectangles it
    saved in PROGMAN.INI, which were sized for whatever resolution it last ran at, so after a
    resize its main window and group windows are the wrong size and icon captions collide.
@@ -96,6 +138,7 @@ static void arrange_shell(void)
        re-arranges them itself. */
     idArrange = find_menu_command(pm, "Arrange");
     if (idArrange) PostMessage(pm, WM_COMMAND, idArrange, 0L);
+    fit_windows();
     dbgnum("pvmon: arranged shell to", cx, cy);
     if (!idArrange) dbg("pvmon: no Arrange command found");
 }
@@ -405,6 +448,7 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 {
     WNDCLASS wc; HWND hwnd; MSG msg;
     if (hPrev) return 0;                       /* single instance */
+    g_hInst = hInst;
     if (!adapter_present()) return 0;          /* not on the paravirtual adapter: do nothing */
     wc.style = 0; wc.lpfnWndProc = WndProc; wc.cbClsExtra = 0; wc.cbWndExtra = 0;
     wc.hInstance = hInst; wc.hIcon = NULL; wc.hCursor = NULL; wc.hbrBackground = NULL;

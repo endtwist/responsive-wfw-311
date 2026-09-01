@@ -690,3 +690,11 @@ Not done, and honestly outstanding:
   floppies, so first-load size is untuned. Lazy Range loading hides most of it, but the
   delivery budget in 2.7 is unverified.
 - Two-finger scroll is still deferred, as planned.
+
+**2026-09-01 (night) — window wrangling completed (SPEC 2.3, stretch tier 1).**
+`PVMON` now walks every top-level window after a re-mode with `EnumWindows`: maximised windows
+are restored and re-maximised so they refill the new screen, and the rest are clamped, and shrunk
+if they no longer fit. Verified by measuring the title bar of a maximised application in the
+framebuffer across three live re-modes: it spans 0-1279 at 1280x698, 0-799 after shrinking to
+800x500, and 0-1095 after growing to 1096x600. Without this, a window maximised at the old size
+kept it, and windows could be left entirely off-screen after a shrink.
