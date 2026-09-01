@@ -478,19 +478,22 @@ VGAScreen.prototype.get_state = function()
     state[57] = this.horizontal_panning;
     state[58] = this.color_select;
     state[59] = this.clocking_mode;
-    state[60] = this.svga_pitch;
-    state[61] = this.pv_host_xres;
-    state[62] = this.pv_host_yres;
-    state[63] = this.pv_host_dpi;
-    state[64] = this.pv_status;
-    state[65] = this.pv_generation;
-    state[66] = this.svga_read_bank_offset;
-    state[67] = this.v7_seq;
     state[60] = this.line_compare;
     state[61] = this.pixel_buffer;
     state[62] = this.dac_mask;
     state[63] = this.character_map_select;
     state[64] = this.font_page_ab_enabled;
+
+    // responsive-wfw311 state. Kept from 80 up: upstream owns 0-64 and adding fields in the
+    // middle silently aliased them, which restored a snapshot with the wrong scanline pitch.
+    state[80] = this.svga_pitch;
+    state[81] = this.pv_host_xres;
+    state[82] = this.pv_host_yres;
+    state[83] = this.pv_host_dpi;
+    state[84] = this.pv_status;
+    state[85] = this.pv_generation;
+    state[86] = this.svga_read_bank_offset;
+    state[87] = this.v7_seq;
 
     return state;
 };
@@ -557,19 +560,20 @@ VGAScreen.prototype.set_state = function(state)
     this.horizontal_panning = state[57];
     this.color_select = state[58];
     this.clocking_mode = state[59];
-    this.svga_pitch = state[60] || 0;
-    this.pv_host_xres = state[61] || 0;
-    this.pv_host_yres = state[62] || 0;
-    this.pv_host_dpi = state[63] || 96;
-    this.pv_status = state[64] || 0;
-    this.pv_generation = state[65] || 0;
-    this.svga_read_bank_offset = state[66] || this.svga_bank_offset;
-    if(state[67]) this.v7_seq.set(state[67]);
     this.line_compare = state[60];
     state[61] && this.pixel_buffer.set(state[61]);
     this.dac_mask = state[62] === undefined ? 0xFF : state[62];
     this.character_map_select = state[63] === undefined ? 0 : state[63];
     this.font_page_ab_enabled = state[64] === undefined ? 0 : state[64];
+
+    this.svga_pitch = state[80] || 0;
+    this.pv_host_xres = state[81] || 0;
+    this.pv_host_yres = state[82] || 0;
+    this.pv_host_dpi = state[83] || 96;
+    this.pv_status = state[84] || 0;
+    this.pv_generation = state[85] || 0;
+    this.svga_read_bank_offset = state[86] || this.svga_bank_offset;
+    if(state[87]) this.v7_seq.set(state[87]);
 
     this.screen.set_mode(this.graphical_mode);
 

@@ -173,6 +173,14 @@ cEnd
 ;	This routine moves the cursor hot spot to a designated x,y coord.
 
 
+; responsive-wfw311: the host needs to know where the guest thinks the pointer is, so that a
+; tap or a click at an absolute position can be turned into the right relative mouse motion
+; for the stock PS/2 driver (SPEC 2.5). The adapter has a register pair for it.
+PV_DISPI_INDEX	equ	01CEh
+PV_DISPI_DATA	equ	01CFh
+PV_R_CURSOR_X	equ	014h
+PV_R_CURSOR_Y	equ	015h
+
 cProc	MoveCursor,<FAR,PUBLIC,WIN,PASCAL>,<si,di,es,ds>
 	parmW	abs_x				;x coordinate of cursor
 	parmW	abs_y				;y coordinate of cursor
@@ -184,6 +192,21 @@ cBegin
 	mov	cursor_ycoord,ax
 	or	cursor_flags,NEW_COORDS
 	LeaveCrit a
+
+	push	dx				;tell the host the new pointer position
+	mov	dx,PV_DISPI_INDEX
+	mov	ax,PV_R_CURSOR_X
+	out	dx,ax
+	inc	dx
+	mov	ax,abs_x
+	out	dx,ax
+	dec	dx
+	mov	ax,PV_R_CURSOR_Y
+	out	dx,ax
+	inc	dx
+	mov	ax,abs_y
+	out	dx,ax
+	pop	dx
 
 	test	cursor_flags,YES_CURSOR 	;if NULL cursor data, done
 	jz	MoveCursor_Busy

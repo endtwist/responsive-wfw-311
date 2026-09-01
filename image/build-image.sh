@@ -42,7 +42,10 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 # Program Manager lays icon captions out on a fixed pixel spacing; the stock 77 is sized for
 # 96 dpi system fonts and captions collide once PVDPI selects the 120 dpi (8514) fonts.
 # A real large-font install widens it, so do the same here, for both DPI settings.
+# Mouse acceleration would break absolute pointing: the host turns a tap into relative motion
+# from the cursor position the driver reports, which only lands correctly at a 1:1 mickey ratio.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
+  windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
   PVMon.Live=$LIVE \
   "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )"
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI

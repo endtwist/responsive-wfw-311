@@ -651,3 +651,42 @@ boot-time screen for applications that ask.
 - With 3a, 3b and 3c together, a live re-mode now updates every copy of the screen geometry that
   matters: the adapter, the driver's own state, GDI's screen surface, GDI's device caps, USER's
   system metrics and the desktop window. **Acceptance A2 is met.**
+
+**2026-09-01 (night) — Phase 4: the product page, touch, snapshots. A3 met.**
+`web/index.html` + `web/app.js` are the real page now; `web/dev.html` stays as the debug page.
+Verified in an emulated 375x812 phone viewport:
+- **Mode follows the phone.** Windows boots straight into **640x1384 portrait**, scaled to fill
+  the screen, shell reflowed, large fonts. PVDPI picks 120 dpi automatically at phone width, so
+  the text is legible rather than merely small.
+- **Rotation is just a resize.** Turning the viewport to 812x375 live re-modes to **864x400**,
+  patching USER, GDI caps and the shell, exactly as a desktop resize does. Rotation came for
+  free from Phase 3, as the original spec predicted.
+- **Touch pointing is pixel-exact.** The driver now mirrors the cursor position to the adapter's
+  `CURSOR_X/Y` registers from `MoveCursor`, and the page steers the guest pointer to a tap by
+  sending relative motion and correcting against that reported position. A tap at guest (700,320)
+  lands at (700,320), **error zero**, and tapping the menu bar opens the menu. Mouse acceleration
+  is switched off in `WIN.INI` so a mickey is a pixel.
+  Gestures are serialised behind a promise chain: a press that fires while the pointer is still
+  being steered drags whatever is under it, which is exactly what happened first time.
+- **Snapshots meet A3 comfortably.** 32 MB of VM compresses to **2.0 MB** with `CompressionStream`
+  and saves in about 0.65 s; restore from IndexedDB is effectively instantaneous, well inside the
+  5 s the spec asked for. Snapshots are keyed by image and DPI, so a device-class change cold
+  boots rather than restoring a mismatched font set.
+- Two v86 bugs of my own making, both worth recording:
+  1. My Phase 1 state fields were written into slots 60-67 of the VGA save state, which upstream
+     already uses. Restoring therefore read `line_compare` as the scanline pitch and rendered a
+     sheared screen. PV state now lives from slot 80 up.
+  2. A hidden page throttles timers to a standstill, which freezes the emulator and stalls any
+     `setTimeout` debounce. The mode controller is now driven by a worker heartbeat and a
+     `requestAnimationFrame` loop instead, and keeping the VM running while hidden is opt-in
+     (`?keepalive=1`); by default it idles and the snapshot covers eviction.
+- The service worker is network-first with a cache fallback. Cache-first pinned the first build
+  it ever saw and silently served stale code, which cost a confusing debug cycle.
+
+Not done, and honestly outstanding:
+- The 30-minute soak of A0 has not been run.
+- No testing on real hardware yet: the iPhone 16 Pro and BrowserStack runs need a deployment.
+- The disk image is still derived from the 245 MB CF image rather than rebuilt lean from the
+  floppies, so first-load size is untuned. Lazy Range loading hides most of it, but the
+  delivery budget in 2.7 is unverified.
+- Two-finger scroll is still deferred, as planned.

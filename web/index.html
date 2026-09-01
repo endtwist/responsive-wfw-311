@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000">
+<title>Responsive Windows for Workgroups 3.11</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; color:#bbb;
+               font:12px/1.4 ui-monospace, monospace; overflow:hidden; overscroll-behavior:none; }
+  #screen_container { position:absolute; inset:0; display:grid; place-items:center; }
+  #screen_container canvas { display:block; touch-action:none; }
+  #bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:10px; align-items:center;
+         padding:6px 10px calc(6px + env(safe-area-inset-bottom)); background:rgba(0,0,0,.75);
+         z-index:2; font-size:11px; }
+  #bar button { font:inherit; padding:4px 8px; }
+  #kbd { position:fixed; left:-1000px; top:0; opacity:0; }
+</style>
+<div id="screen_container">
+  <div style="white-space:pre; font:14px monospace"></div>
+  <canvas style="display:none"></canvas>
+</div>
+<input id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+<div id="bar">
+  <span id="status">loading</span>
+  <span id="mode"></span>
+  <span id="zoom"></span>
+  <button id="kbdbtn">keyboard</button>
+  <button id="savebtn">save</button>
+  <button id="resetbtn">fresh boot</button>
+</div>
+<script type="module" src="app.js"></script>
