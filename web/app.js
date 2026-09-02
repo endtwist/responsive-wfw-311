@@ -340,6 +340,7 @@ async function psToPdf(psBytes) {
   return new Promise((resolve, reject) => {
     let out = null;
     createModule({
+      locateFile: f => "https://cdn.jsdelivr.net/npm/@jspawn/ghostscript-wasm@0.0.2/" + f,   // the glue looks next to the page otherwise
       arguments: ["-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-sDEVICE=pdfwrite", "-sOutputFile=/out.pdf", "/in.ps"],
       preRun: [m => { m.FS.writeFile("/in.ps", psBytes); }],
       postRun: [m => { try { out = m.FS.readFile("/out.pdf"); } catch (e) { reject(e); return; } resolve(out); }],
@@ -354,13 +355,45 @@ function offerDownload(bytes, name, type) {
   document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 60000);
 }
+/* Plain text (the Generic / Text Only driver) becomes a PDF directly: one Courier page per form
+   feed, 66 lines of 80 columns, written by hand since a text page needs no interpreter. */
+function textToPdf(text) {
+  const pages = text.replace(/\r/g, "").split("\f").filter((p, i, a) => p.trim() || a.length === 1);
+  const esc = t => t.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)").replace(/[^\x20-\x7e]/g, "?");
+  const objs = [];
+  const add = body => (objs.push(body), objs.length);
+  const font = add("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
+  const pageIds = [];
+  const kids = [];
+  const pagesId = objs.length + 1 + pages.length * 2;      // reserved: filled after the pages
+  for (const p of pages) {
+    const lines = p.split("\n").slice(0, 66);
+    let content = "BT /F1 10 Tf 12 TL 36 756 Td\n";
+    for (const ln of lines) content += `(${esc(ln.slice(0, 96))}) Tj T*\n`;
+    content += "ET";
+    const cid = add(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+    const pid = add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${cid} 0 R >>`);
+    kids.push(`${pid} 0 R`);
+  }
+  const realPagesId = add(`<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${kids.length} >>`);
+  const catalog = add(`<< /Type /Catalog /Pages ${realPagesId} 0 R >>`);
+  let out = "%PDF-1.4\n", offsets = [];
+  objs.forEach((b, i) => { offsets.push(out.length); out += `${i + 1} 0 obj\n${b.replace(new RegExp(`/Parent ${pagesId} 0 R`, "g"), `/Parent ${realPagesId} 0 R`)}\nendobj\n`; });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + offsets.map(o => String(o).padStart(10, "0") + " 00000 n \n").join("");
+  out += `trailer\n<< /Size ${objs.length + 1} /Root ${catalog} 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return new TextEncoder().encode(out);
+}
+
 async function finishPrintJob(b64) {
   try {
     const bin = atob(b64); const ps = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) ps[i] = bin.charCodeAt(i);
-    report("print", `job ${ps.length} bytes of PostScript`);
+    const isPostScript = bin.startsWith("%!") || bin.startsWith("\x04%!") || bin.startsWith("\x1b%-12345X");
+    report("print", `job ${ps.length} bytes, ${isPostScript ? "PostScript" : "text"}`);
     let pdf = null;
-    try { pdf = await psToPdf(ps); } catch (e) { report("print", "ghostscript failed: " + (e && e.message || e)); }
+    if (!isPostScript) pdf = textToPdf(bin);
+    else try { pdf = await psToPdf(ps); } catch (e) { report("print", "ghostscript failed: " + (e && e.message || e)); }
     const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 16);
     if (pdf) offerDownload(pdf, `windows-${stamp}.pdf`, "application/pdf");
     else offerDownload(ps, `windows-${stamp}.ps`, "application/postscript");
