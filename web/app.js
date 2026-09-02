@@ -894,16 +894,18 @@ function placeLayers(src) {
       l: Math.max(0, L.gx - L.wx),
       t: Math.max(0, L.gy - L.wy),
       b: Math.max(0, (L.wy + L.wh) - (L.gy + L.gh)),
+      r: Math.max(0, (L.wx + L.ww) - (L.gx + L.gw)),   // border + a vertical scrollbar (GetClientRect excludes it)
     };
     const capRow = Math.min(inset.t, inset.l + shell.cap);   // border plus caption
     const menuRow = inset.t - capRow;                        // menu bar, if the window has one
     const box = Math.max(12, shell.cap);                     // a caption box is square
     const hl = Math.round(inset.l * c), ht = Math.round(inset.t * c), hb = Math.round(inset.b * c);
-    const availW = vw - 2 * hl;                        // edge to edge: a layer may fill the width
+    const hr = Math.round(inset.r * c);
+    const availW = vw - hl - hr;                       // edge to edge: a layer may fill the width
     const availH = vh - ht - hb;
     const s = Math.min(c, availW / Math.max(1, L.gw), availH / Math.max(1, L.gh));
     const cw = Math.round(L.gw * s), ch = Math.round(L.gh * s);
-    const hw = cw + 2 * hl, hh = ch + ht + hb;
+    const hw = cw + hl + hr, hh = ch + ht + hb;
     let p = layerPos[key];
     if (!p) {
       const owner = L.kind === "O" ? bySlot[L.slot] : null;
@@ -935,7 +937,7 @@ function placeLayers(src) {
     const vis = { w: Math.min(L.gw, cw / zs), h: Math.min(L.gh, ch / zs) };   // guest px visible
     zp.px = Math.max(0, Math.min(L.gw - vis.w, zp.px));
     zp.py = Math.max(0, Math.min(L.gh - vis.h, zp.py));
-    const w = { ...L, src: L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb,
+    const w = { ...L, src: L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb, hr,
                 zs, px: zp.px, py: zp.py, vw: vis.w, vh: vis.h };
     if (L.kind === "W") bySlot[L.slot] = w;
     out.push(w);
@@ -1017,7 +1019,8 @@ function drawWindow(g, src, w) {
   }
   if (hl > 0) {                                       // side borders, stretched only lengthways, caption to bottom
     blit(g, src, w.wx, w.wy + capRow, inset.l, w.wh - capRow - inset.b, w.x, w.y + capH, hl, w.hh - capH - hb);
-    blit(g, src, w.wx + w.ww - inset.l, w.wy + capRow, inset.l, w.wh - capRow - inset.b, w.x + w.hw - hl, w.y + capH, hl, w.hh - capH - hb);
+    { const hr = w.hr == null ? hl : w.hr, ir = w.inset.r == null ? inset.l : w.inset.r;
+      blit(g, src, w.wx + w.ww - ir, w.wy + capRow, ir, w.wh - capRow - inset.b, w.x + w.hw - hr, w.y + capH, hr, w.hh - capH - hb); }
   }
   if (hb > 0)
     blit(g, src, w.wx, w.gy + w.gh, Math.min(w.ww, Math.round(w.hw / c)), inset.b,
