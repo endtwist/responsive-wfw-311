@@ -556,7 +556,7 @@ function present() {
   const now = performance.now();
   if (now - lastBeat > 15000) {
     lastBeat = now;
-    const ic = emulator.v86 && emulator.v86.cpu.instruction_counter ? emulator.v86.cpu.instruction_counter[0] >>> 0 : 0;
+    let ic = 0; try { ic = emulator.get_instruction_counter() >>> 0; } catch (e) {}
     const mips = lastIc ? ((ic - lastIc) >>> 0) / (now - lastBeatAt) / 1000 : 0;
     lastIc = ic; lastBeatAt = now;
     report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} layers=${layers.length} ready=${desktopReady} mips=${mips.toFixed(1)} pvmon=${shell.ver || "?"}`);
