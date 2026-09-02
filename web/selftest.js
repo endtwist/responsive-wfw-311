@@ -188,8 +188,9 @@ export async function tour(env, opts = {}) {
   };
 
   /* Closing: PVMON posts WM_CLOSE; a "save changes?" box gets an N; Alt+F4 is the fallback. */
-  const closeApp = async (slot, row) => {
-    const gone = () => !winOf(slot);
+  const closeApp = async (slot, row, title) => {
+    // gone from its slot and not still published under any slot (a box PVMON re-slotted)
+    const gone = () => !winOf(slot) && !(title && st.layers.some(x => x.kind === "W" && x.title === title));
     const wait = async ms => {
       const start = performance.now();
       while (performance.now() - start < ms) {
@@ -205,8 +206,42 @@ export async function tour(env, opts = {}) {
     bus("pv-command", [CMD_ACTIVATE, slot]); await sleep(300);
     await chord(SC.alt, SC.f4);
     if (await wait(8000)) { row.close = "pass:alt-f4"; return true; }
-    row.close = "fail";
+    row.close = "fail" + (title && st.layers.some(x => x.kind === "W" && x.title === title) ? ":still-published" : "");
     return false;
+  };
+
+  /* Anything on the desktop besides the shell is in the way of the next launch: a message box the
+     last program left behind (Print Manager's "has been turned off" box is 924 wide, off the phone,
+     so only the keyboard reaches it), a stray menu, a program that did not close. Front-most first:
+     Enter (a #32770 message box's default button), then Esc, then CMD_CLOSE (N to a save prompt),
+     then Alt+F4, each followed by a wait for a layout without it. Returns what was dismissed. */
+  const dismissStrays = async (row, key = "stray") => {
+    const removed = [];
+    for (let round = 0; round < 8; round++) {
+      const strays = st.layers.filter(L => L.kind !== "S");
+      if (!strays.length) break;
+      const L = strays[strays.length - 1];
+      const tag = `${L.kind}${L.slot}:${(L.title || "?").slice(0, 24)}`;
+      const gone = () => !st.layers.some(x => x.kind === L.kind && x.slot === L.slot && x.title === L.title);
+      let how = null;
+      for (const step of ["enter", "esc", "close", "alt-f4"]) {
+        if (step === "enter") await press(SC.enter);
+        else if (step === "esc") await press(SC.esc);
+        else if (step === "close") { if (!(L.kind === "W" && L.slot >= 0)) continue; bus("pv-command", [CMD_CLOSE, L.slot]); }
+        else { if (L.kind === "W" && L.slot >= 0) { bus("pv-command", [CMD_ACTIVATE, L.slot]); await sleep(200); } await chord(SC.alt, SC.f4); }
+        const start = performance.now();
+        while (performance.now() - start < 2500 && !gone()) {
+          if (L.kind === "W" && step !== "enter" && dialogsOf(L.slot).length) await press(SC.n);
+          await sleep(100);
+        }
+        if (gone()) { how = step; break; }
+      }
+      removed.push(`${tag}/${how || "stuck"}`);
+      if (!how) break;
+      await sleep(300);
+    }
+    if (removed.length && row) row[key] = (row[key] ? row[key] + "|" : "") + removed.join("|").replace(/\s+/g, "_");
+    return removed;
   };
 
   /* ---- preamble */
@@ -227,9 +262,8 @@ export async function tour(env, opts = {}) {
   const preexisting = st.layers.filter(L => L.kind !== "S").map(L => `${L.kind}${L.slot}:${L.title}`);
   let cleaned = "none";
   if (preexisting.length) {
-    for (const L of st.layers.filter(l => l.kind === "O" || l.kind === "T")) await press(SC.esc);
-    for (const L of st.layers.filter(l => l.kind === "W")) await closeApp(L.slot, {});
-    cleaned = (await until(() => !st.layers.some(l => l.kind === "W" || l.kind === "O"), 10000)) ? "ok" : "fail:" + st.layers.filter(l => l.kind !== "S").map(l => l.kind + l.slot).join("|");
+    const removed = await dismissStrays(null);
+    cleaned = st.layers.some(l => l.kind !== "S") ? "fail:" + removed.join("|") : "ok:" + removed.join("|");
   }
   const mips0 = await mips();
   post(`TOUR-BEGIN apps=${apps.length} shell=${st.shell.w}x${st.shell.h} pvmon=v${st.shell.ver} mips=${mips0.toFixed(1)} clock=${clock.driven} dom=${!!env.dom} preexisting=${preexisting.length ? preexisting.join("|") : "-"} cleaned=${cleaned} ua=${env.ua}`);
@@ -242,6 +276,7 @@ export async function tour(env, opts = {}) {
     rows.push(row);
     if (dead) { row.launch = "skip"; continue; }
     try {
+      if (st.layers.some(L => L.kind !== "S")) await dismissStrays(row);       // left by the last program
       const before = new Set(st.layers.filter(L => L.kind === "W").map(L => L.slot));
       const pubBefore = st.pubSeq;
       /* launch */
@@ -263,11 +298,13 @@ export async function tour(env, opts = {}) {
         const x = st.layers.find(l => l.kind === "X");
         // "pvmon: run FOO.EXE -> N": WinExec's return, below 32 is an error (2 = file not found)
         const we = /-> (\d+)$/.exec(st.runs[st.runs.length - 1] || "");
-        row.launch = x ? "fail:noslot" : we && +we[1] < 32 ? `fail:winexec=${we[1]}` : "fail:timeout";
+        // something else on the desktop (a box the program itself put up, a leftover) is the likely
+        // reason: name it rather than let every later launch time out behind it
+        const blockers = st.layers.filter(l => l.kind !== "S").map(l => `${l.kind}${l.slot}:${(l.title || "?").slice(0, 24)}`);
+        row.launch = x ? "fail:noslot" : we && +we[1] < 32 ? `fail:winexec=${we[1]}` : blockers.length ? "fail:blocked-by=" + blockers.join("|").replace(/\s+/g, "_") : "fail:timeout";
         row.alive = (await alive()) ? "pass" : "fail";
         if (row.alive === "fail") dead = true;
-        // whatever did appear is closed so the next app starts clean
-        for (const l of st.layers) if (l.kind === "O" && !before.has(l.slot)) await press(SC.esc);
+        if (blockers.length) await dismissStrays(row);       // so the next app starts clean
         continue;
       }
       row.launch = "pass";
@@ -326,13 +363,15 @@ export async function tour(env, opts = {}) {
       const now = winOf(L.slot);
       if (now && row.fit === "pass" && (now.ww > SHELL_W || now.wh > st.shell.h)) row.fit = `fail:grew:${now.ww}x${now.wh}`;
       /* close and confirm the guest survived */
-      await closeApp(L.slot, row);
+      await closeApp(L.slot, row, L.title);
       if (env.dom) {
         const drawn = () => { if (env.present && typeof document !== "undefined" && document.hidden) env.present(); return hostLayer("W", L.slot); };
         row.layer = (await until(() => !drawn(), 2000, 100)) ? "pass" : "fail:still-drawn";
       }
       row.alive = (await alive()) ? "pass" : "fail";
       if (row.alive === "fail") dead = true;
+      await sleep(300);
+      if (st.layers.some(l => l.kind !== "S")) await dismissStrays(row);   // a box it left behind
       if (app.name === "DOSPRMPT") await sleep(1500);            // the DOS VM tears down slowly
     } catch (e) {
       row.error = "fail:" + (e && e.message || e);
@@ -354,7 +393,7 @@ export async function tour(env, opts = {}) {
 }
 
 export function fmtRow(r) {
-  const order = ["launch", "match", "fit", "slot", "scale", "tap", "kbd", "focus", "launchdlg", "dlg", "dlg1", "dlgfit", "dlgsep", "dlgpix", "dlgclose", "close", "layer", "alive", "error"];
+  const order = ["launch", "match", "fit", "slot", "scale", "tap", "kbd", "focus", "launchdlg", "dlg", "dlg1", "dlgfit", "dlgsep", "dlgpix", "dlgclose", "close", "layer", "alive", "stray", "error"];
   const parts = [r.app.padEnd(8)];
   for (const k of order) if (r[k] !== undefined) parts.push(`${k}=${r[k]}`);
   if (r.t !== undefined) parts.push(`t=${r.t}`);

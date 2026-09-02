@@ -1446,3 +1446,13 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
 - Keybar: keys fire on tap release (touchstart passive) so the bar pans; `keyboardShift()` subtracts the bar height; a stale focused `#kbd` (keyboard dismissed by its own key) is blurred on touchstart so the next tap's focus is fresh.
 - Owned dialogs: the strip-fill mask smeared vertical streaks over the owner (Sound Recorder + Open). Removed. An O layer that still overlaps its owner in guest space is drawn coincident with its copy (transient-style, owner's client scale/position); one placed clear of the owner by the hook goes below the owner on the host too when there is room.
 - Image `work-phone-20260902-133432` (PVMON v22, PVHOOK invariant) + snapshot; Sound Recorder 407x241 with Open below it composites as one image; Program Manager 3 icons across.
+- Follow-up 2 (same day, after the merge with PVMON v22): Print Manager with the spooler off puts up
+  a 924-wide "Print Manager has been turned off" message box as its only window; it is off the phone,
+  so no tap reaches it, and every later launch timed out behind it. The tour now dismisses anything
+  that is not the shell before each launch and after each close — front-most first: Enter (a
+  message box's default button), Esc, CMD_CLOSE (N to a save prompt), Alt+F4, each followed by a
+  wait for a layout without it — and records it in the row (`stray=W0:Print_Manager/enter`). A
+  launch that times out while something else is on the desktop is reported as
+  `launch=fail:blocked-by=<layers>` and the desktop is cleared before the next app, so one stuck box
+  costs one row, not the rest of the run. `close` also checks that no window with the program's
+  title is still published anywhere (`fail:still-published`).
