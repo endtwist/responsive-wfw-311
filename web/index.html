@@ -3,8 +3,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#000">
+<!-- Installable: standalone, portrait, full-screen on an iOS home screen. The icon is the Windows
+     logo drawn as guest-style pixels (tools/mkicon.mjs). -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Windows 3.11">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <title>Responsive Windows for Workgroups 3.11</title>
 <style>
+  /* Safe areas (notch, home indicator) as tokens the compositor can read: it keeps guest pixels
+     out from under them and paints the insets black, which is nothing, not chrome. */
+  :root { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
+          --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px); }
   html, body { margin:0; height:100%; background:#000; color:#bbb;
                font:12px/1.4 ui-monospace, monospace; overflow:hidden; overscroll-behavior:none; }
   /* The guest's own canvas is never shown: it is the source the compositor draws slices from. */
@@ -17,7 +30,11 @@
          padding:6px 10px calc(6px + env(safe-area-inset-bottom)); background:rgba(0,0,0,.75);
          z-index:2; font-size:11px; }
   #bar button { font:inherit; padding:4px 8px; }
-  #kbd { position:fixed; left:-1000px; top:0; opacity:0; }
+  /* The hidden input that summons the platform keyboard. It must stay focusable on iOS: on
+     screen, non-zero size, visible to layout (opacity, not display/visibility), 16 px so Safari
+     does not zoom the page when it takes the focus. */
+  #kbd { position:fixed; left:0; top:0; width:2px; height:2px; padding:0; border:0; margin:0; opacity:0.01;
+         font-size:16px; pointer-events:none; z-index:0; background:transparent; color:transparent; caret-color:transparent; }
 /* On a phone the page shows nothing of its own: no toolbar, the desktop is the whole viewport. */
 .phone #bar { display: none; }
 .phone #pres { height: 100dvh; }
@@ -31,6 +48,8 @@
 #keybar button { display:inline-block; min-width:42px; height:40px; margin:0 3px; padding:0 10px; border:0; border-radius:6px;
   background:#636366; color:#fff; font:inherit; font-weight:600; vertical-align:middle; }
 #keybar button.on { background:#0a84ff; }
+#keybar button.lock { background:#0a84ff; box-shadow: inset 0 0 0 2px #fff; }
+#keybar button.hide { float:right; background:#3a3a3c; }
 #keybar button:active { background:#8e8e93; }
 #keybar .gap { display:inline-block; width:10px; }
 </style>
@@ -40,7 +59,7 @@
   <div style="white-space:pre; font:14px monospace"></div>
   <canvas style="display:none"></canvas>
 </div>
-<input id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+<input id="kbd" type="text" inputmode="text" enterkeyhint="enter" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="keyboard input">
 <div id="bar">
   <span id="status">loading</span>
   <span id="mode"></span>

@@ -9,7 +9,8 @@ const port = Number(process.argv[2] || 8311);
 const root = path.resolve(process.argv[3] || ".");
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
   ".wasm": "application/wasm", ".json": "application/json", ".css": "text/css", ".img": "application/octet-stream",
-  ".bin": "application/octet-stream", ".png": "image/png", ".svg": "image/svg+xml", ".map": "application/json" };
+  ".bin": "application/octet-stream", ".png": "image/png", ".svg": "image/svg+xml", ".map": "application/json",
+  ".webmanifest": "application/manifest+json", ".gz": "application/gzip" };
 http.createServer((req, res) => {
   const url = decodeURIComponent(new URL(req.url, "http://x").pathname);
   // Screenshots: the page POSTs a PNG data URL here so a frame can be captured even when the
@@ -65,12 +66,16 @@ http.createServer((req, res) => {
   if (!file.startsWith(root)) { res.writeHead(403); return res.end(); }
   if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, "index.html");
   // Clean application paths: /solitaire, /hearts ... are the page, which reads the last segment.
-  if (!fs.existsSync(file) && /^\/[a-z]+\/?$/i.test(url)) file = path.join(root, "web", "index.html");
+  // The site root is the page too (the PWA manifest's start_url).
+  if (!fs.existsSync(file) && (url === "/" || /^\/[a-z]+\/?$/i.test(url))) file = path.join(root, "web", "index.html");
   if (!fs.existsSync(file)) { res.writeHead(404); return res.end("404 " + url); }
   const size = fs.statSync(file).size;
   const headers = { "Content-Type": mime[path.extname(file)] || "application/octet-stream",
     "Accept-Ranges": "bytes", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*",
     "Last-Modified": fs.statSync(file).mtime.toUTCString() };
+  // The service worker is registered with scope "/" from /web/sw.js: allowed here, and a real
+  // deployment must send the same header (or serve sw.js from the root).
+  if (url === "/web/sw.js") headers["Service-Worker-Allowed"] = "/";
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
   if (range) {
     let start = range[1] === "" ? Math.max(0, size - Number(range[2])) : Number(range[1]);

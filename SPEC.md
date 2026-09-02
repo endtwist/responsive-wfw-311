@@ -1199,3 +1199,93 @@ iOS keyboard (needs a gesture map or a hardware keyboard).
   intact, DOS text visible (105 text rows, 218 after `dir`), the VM's text/font pages in
   `pv_text_mem` (16K), the VDD's traffic never reaches `svga_memory`. No driver or image rebuild
   needed: vga.js is loaded as a source module.
+
+### 2026-09-02 — host pass: keyboard in the gesture, audio unlock, placement, scroll policy, watchdog, PWA
+Verified in the pane (mobile preset, synthetic TouchEvents through the real handlers, `?diag=1` trace
+in `shots/devicelog.txt`); "phone" items below are what still needs the real device.
+- **Keyboard (Fix 3).** The focus decision is made *inside* the tap's touchend, synchronously
+  (`tapKeyboard` -> `focusKeyboard`); the old path focused 350 ms later from a timer, which iOS does
+  not count as the gesture — that was the whole bug, for Notepad as much as the DOS box. Rule: the
+  guest's last word (`PVK 1`) or a manual hold focuses; otherwise a tap on a window (or inside a
+  shell-owned dialog) focuses speculatively and `speculativeRelease` lets go after 700 ms if no
+  `PVK 1` arrives; `PVK 0` blurs after a 400 ms debounce. Programs that never take text (Solitaire,
+  Hearts, Minesweeper, Paintbrush, Clock) and bare desktop taps do not try, so the keyboard does not
+  pop up and down on every card. `?kbtest=1` focuses on every tap regardless. The caption long-press
+  toggle now focuses on the release (inside the gesture). Every attempt logs `kbd ...` with
+  `activeElement`, `visualViewport.height/innerHeight`, want/held. `#kbd` is on screen (2x2 px,
+  opacity .01, 16 px font, `inputmode=text`) so it is focusable on iOS; a focused input whose
+  keyboard was dismissed is blurred first, or `focus()` is a no-op. Pane: DOS box tap ->
+  `focus try (want "MS-DOS Prompt")`, `activeElement === kbd` right after the touchend; desktop tap
+  while wanted -> focus, then `PVK 0` -> blur 400 ms later. Phone: watch for `kbd focus result ...
+  vvh=<less than innerHeight>` after a Notepad or DOS box tap.
+- **Keyboard bar.** Ctrl/Alt: one tap arms (blue), a second locks (blue with a white inset ring)
+  until tapped again, a third clears; armed modifiers are spent by the next key, locked ones stay.
+  A hide key (`⌄`, first on the bar) blurs the input and suppresses `PVK 1` for 1.5 s so the focus
+  that is still in the guest does not summon it straight back. The layer pan above the keyboard
+  (`keyboardShift`) is unchanged: it shows the focused layer's bottom edge, so the DOS box (340
+  rows) is fully above the keyboard and Notepad's caption stays at the top with the first lines
+  visible — the host does not know where the caret is. Not testable in the pane (no visual viewport
+  change); phone item.
+- **Audio.** `unlockAudio` on touchend/click/keydown/pointerup (capturing, whole document), on
+  touchstart, visibilitychange, focus and pageshow: resumes the speaker adapter's context and starts
+  a looped silent WAV `<audio>` in the same gesture, which is what lets Web Audio through the
+  iPhone's ring/silent switch (nothing is drawn). `report("audio", ...)` logs state, sampleRate and
+  the media element's state whenever they change, and `onstatechange` logs "interrupted" (iOS after
+  a call/background). Pane: `state=running rate=48000 silent=playing`. Phone: look for the same
+  line after the first tap in Chrome; if state stays `suspended` the log will say which event fired.
+- **Placement.** New layers: no cascade; x centred (0 when the layer fills the width, which it may
+  now — the 8 px side margin is gone), y under the shell's caption strip (Program Manager's caption
+  stays reachable), top-aligned when taller than that. Solitaire opens 375 wide at y=48. Drag is
+  unchanged (off-screen allowed).
+- **One-finger scroll policy** (`SURFACE_POLICY`, by published title): Help, Write, Notepad,
+  Cardfile, File Manager, Control Panel, Print Manager, Task List, Calendar, Character Map, Media
+  Player, Clipboard scroll (CMD_SCROLL line messages, 24 px per line, no button); Solitaire,
+  Paintbrush, Minesweeper, Hearts, MS-DOS, Terminal, Reversi and anything unknown pointer-drag. A
+  tap is a click everywhere; the scroll starts after 8 px of travel. Pane: a 120 px drag on
+  Notepad's client sent `scroll 2 2`, `scroll 2 1`, `scroll 2 1` and no button events.
+- **Pointer.** `setGuestCursor(false)` on every touchstart, `(true)` on a real mouse `pointermove`
+  or mousedown; only transitions are sent. Verified in VRAM: after CMD_CURSOR 0 the 16x24 block at
+  the reported pointer position is all background; after CMD_CURSOR 1 Notepad's I-beam is there (27
+  black pixels, hotspot centred). Finding on the way: **the command register is single-slot** —
+  two `pv-command` sends within PVMON's 40 ms poll overwrote each other (CMD_CURSOR 1 followed by
+  CMD_ACTIVATE lost the cursor command). `sendCommand`/`sendCommandString` now queue and send the
+  next command only once the guest has cleared the register (`vga.pv_cmd === 0`), with a 2 s
+  timeout so a hung guest cannot wedge the host; consecutive scroll steps merge.
+- **Rotation / safe areas.** `viewport()` is now the visual viewport minus `env(safe-area-inset-*)`
+  (read from CSS tokens on :root); the compositor translates by the insets and paints them black,
+  `hostPoint` subtracts them. On an orientation change the layer positions and zooms are reset (the
+  default placement rule applies to the new width), the shell height is re-sent in both orientations
+  (landscape 375x812 -> 480 rows at 0.78), and `orient <o> WxH safe={...}` is logged. Pane: 812x375
+  re-arranged the shell (PVS 352x404) and re-placed Solitaire/DOS box/Notepad for the width.
+- **Instant first paint.** `saveFrame` stores `#pres` as a PNG data URL in IndexedDB (`lastframe`;
+  Safari rejects Blobs) on hide/pagehide and every 20 s while visible and changed; `loadFrame`
+  reads it before the emulator exists and `presentOnce` draws it until the restored guest reports
+  `PVA` (30 s cap; never over a cold boot). `report("firstframe", "shown ...")` marks the moment.
+  Pane: the record is written (750x1624, 58 KB) and loaded on the next visit (`pvState().firstFrame`);
+  the pre-PVA paint itself could not be caught because the hidden pane has no rAF and the local
+  restore completes in ~3 s — phone item (the page should open on the last desktop, not black).
+- **PWA.** `web/manifest.webmanifest` (standalone/fullscreen, portrait, start_url `/`),
+  `apple-mobile-web-app-*` meta, icons `web/icon-192.png`/`icon-512.png` from `tools/mkicon.mjs`
+  (the four-pane flag as VGA pixel art). The service worker is registered only over https and not
+  on localhost, with scope `/` (the dev server sends `Service-Worker-Allowed: /` for `/web/sw.js`;
+  the https deploy must too, or serve sw.js from the root — the registration falls back to the
+  default scope otherwise). `sw.js`: network-first, per-asset precache that tolerates 404s, never
+  touches `*.img`, `*.state.gz`, `current.json`, `/__*` or cross-origin (Ghostscript CDN), and caches
+  the page once under `/web/index.html` for every clean path. LAN http is unaffected (no secure
+  context, registration rejects quietly). The dev server also serves `/` as the page.
+- **Watchdog (Fix 4).** `PVH` heartbeat lines are tracked when PVMON sends them (none yet); the
+  page records the last input (`noteInput` ring, 20 entries) and the last composite change (a
+  sampled signature of the guest canvas every 8th frame). Visible page + heartbeat silent 5 s, or
+  input with no change for 5 s -> one `WATCHDOG {json}` line to `/__log` (why, mips, CPU regs,
+  eip/cs/ds/ss, flags with IF/VM, in_hlt, cr0, `pv_idle_stat(0/1)`, last 50 protocol lines, last 20
+  inputs, keyboard trace, layers, viewport, safe insets) plus a PNG to `/__shot`; one bundle per
+  minute. `window.pvWatchdog()` forces one (pane: eax=1689 in_hlt=1 IF=true, i.e. the idle hook).
+- **Owned/transient masking (Fix 2, host side).** `drawWindow` clips the rects of PVO/PVT children
+  that overlap the owner's client in VRAM out of the client blit and fills each with a one-pixel
+  strip of the owner's own client bordering the rect, so a fallback placement never shows two copies
+  and there is no see-through ring where the child's layer is smaller than the hole. Pane: Notepad
+  File > Open — the dialog layer is the only copy, Notepad's client around it is its own white.
+- Test harness notes: the pane is hidden, so `document.hidden` is true (the watchdog and the
+  periodic frame save skip; `pvWatchdog()` / `pvSaveFrame()` force them) and a synthetic tap must
+  dispatch touchstart and touchend in the same JS call (a tool round-trip between them is >500 ms
+  and becomes a long press).
