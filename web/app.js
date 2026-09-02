@@ -1172,11 +1172,15 @@ function placeLayers(src) {
     const capRow = Math.min(inset.t, inset.l + shell.cap);   // border plus caption
     const menuRow = inset.t - capRow;                        // menu bar, if the window has one
     const box = Math.max(12, shell.cap);                     // a caption box is square
-    const hl = Math.round(inset.l * c), ht = Math.round(inset.t * c), hb = Math.round(inset.b * c);
-    const hr = Math.round(inset.r * c);
+    // A window wider than the viewport is scaled uniformly, chrome included: at the desktop's
+    // chrome scale its menu bar ran off the right edge ("File Edit View Text Pick Options Hel|")
+    // with the far menus unreachable. Windows that fit keep the desktop's chrome scale.
+    const cc = L.ww * c <= vw ? c : Math.max(0.3, Math.min(c, vw / L.ww, vh / Math.max(1, L.wh)));
+    const hl = Math.round(inset.l * cc), ht = Math.round(inset.t * cc), hb = Math.round(inset.b * cc);
+    const hr = Math.round(inset.r * cc);
     const availW = vw - hl - hr;                       // edge to edge: a layer may fill the width
     const availH = vh - ht - hb;
-    const s = Math.min(c, availW / Math.max(1, L.gw), availH / Math.max(1, L.gh));
+    const s = Math.min(cc, availW / Math.max(1, L.gw), availH / Math.max(1, L.gh));
     const cw = Math.round(L.gw * s), ch = Math.round(L.gh * s);
     const hw = cw + hl + hr, hh = ch + ht + hb;
     let p = layerPos[key];
@@ -1215,7 +1219,7 @@ function placeLayers(src) {
     const vis = { w: Math.min(L.gw, cw / zs), h: Math.min(L.gh, ch / zs) };   // guest px visible
     zp.px = Math.max(0, Math.min(L.gw - vis.w, zp.px));
     zp.py = Math.max(0, Math.min(L.gh - vis.h, zp.py));
-    const w = { ...L, src: L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb, hr,
+    const w = { ...L, src: L, key, s, c: cc, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb, hr,
                 zs, px: zp.px, py: zp.py, vw: vis.w, vh: vis.h };
     if (L.kind === "W") bySlot[L.slot] = w;
     out.push(w);
