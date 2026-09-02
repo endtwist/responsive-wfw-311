@@ -530,7 +530,7 @@ function buildKeybar() {
     if (k[2]) b.className = k[2];
     const act = ev => {
       ev.preventDefault();                                 // keep the hidden input focused
-      if (k[1] === "hide") { hideKeyboard("bar"); return; }
+      if (k[1] === "hide") { keybarOpen = false; hideKeyboard("bar"); return; }
       if (typeof k[1] === "string") { sticky[k[1]] = (sticky[k[1]] + 1) % 3; updateKeybar(); }
       else keybarPress(k[1]);
     };
@@ -567,19 +567,32 @@ function updateKeybar() {
     b.classList.toggle("on", st === 1); b.classList.toggle("lock", st === 2);
   }
   const up = keyboardUp();
-  bar.classList.toggle("show", up);
+  // Folded by default: with the keyboard up only a small tab shows; tapping it opens the bar.
+  const tab = $("keybartab");
+  bar.classList.toggle("show", up && keybarOpen);
+  if (tab) { tab.classList.toggle("show", up); tab.classList.toggle("open", keybarOpen); }
   if (up) {
     const vv = window.visualViewport;
     // dock to the bottom of the visible viewport, i.e. the top edge of the keyboard (on Chrome for
     // iOS that is the top of its own accessory row: it is part of the keyboard's height)
+    const bottom = window.innerHeight - (vv.offsetTop + vv.height);
     bar.style.top = "auto";
-    bar.style.bottom = (window.innerHeight - (vv.offsetTop + vv.height)) + "px";
+    bar.style.bottom = bottom + "px";
+    if (tab) tab.style.bottom = (bottom + (keybarOpen ? bar.offsetHeight : 0)) + "px";
     const r = bar.getBoundingClientRect();
     const line = `bar=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} vv=${Math.round(vv.offsetTop)}+${Math.round(vv.height)}/${innerHeight} scale=${vv.scale} shift=${keyboardShift()} guestRoom=${Math.round(r.top - safe.t)}px mode=${KBD_MODE}`;
     if (line !== keybarLogged) { keybarLogged = line; diag("keybar " + line); }
   } else keybarLogged = "";
 }
 let keybarLogged = "";
+let keybarOpen = false;
+(function installKeybarTab() {
+  const tab = $("keybartab");
+  if (!tab) return;
+  const flip = ev => { ev.preventDefault(); keybarOpen = !keybarOpen; updateKeybar(); pump && pump(); };
+  tab.addEventListener("touchend", flip, { passive: false });
+  tab.addEventListener("mousedown", ev => { if (!("ontouchstart" in window)) flip(ev); else ev.preventDefault(); });
+})();
 if (window.visualViewport) { window.visualViewport.addEventListener("resize", updateKeybar); window.visualViewport.addEventListener("scroll", updateKeybar); }
 document.addEventListener("focusin", () => setTimeout(updateKeybar, 50));
 document.addEventListener("focusout", () => setTimeout(updateKeybar, 50));

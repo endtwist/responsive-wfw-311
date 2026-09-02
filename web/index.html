@@ -47,6 +47,10 @@
   -webkit-overflow-scrolling:touch; scrollbar-width:none; font:14px -apple-system, system-ui, sans-serif; user-select:none; -webkit-user-select:none; touch-action:pan-x;
   gap:2px; align-items:center; }
 #keybar::-webkit-scrollbar { display:none; }
+#keybartab { position:fixed; right:8px; z-index:3; display:none; height:26px; padding:0 10px; border:0; border-radius:6px 6px 0 0;
+  background:rgba(28,28,30,.92); color:#fff; font:12px -apple-system, system-ui, sans-serif; user-select:none; -webkit-user-select:none; }
+#keybartab.show { display:block; }
+#keybartab.open { background:#0a84ff; }
 #keybar.show { display:flex; }
 /* Dense: 34 px keys, 2 px gaps, no vertical padding beyond the safe area. Esc Tab arrows Ctrl Alt
    Del come first; the rest is behind the horizontal scroll. The hide key stays pinned at the right. */
@@ -61,6 +65,8 @@
 </style>
 <canvas id="pres"></canvas>
 <div id="keybar"></div>
+<!-- The bar is folded away by default: this small tab on top of the keyboard opens it. -->
+<button id="keybartab" aria-label="extra keys">⌨ keys</button>
 <div id="screen_container">
   <div style="white-space:pre; font:14px monospace"></div>
   <canvas style="display:none"></canvas>
