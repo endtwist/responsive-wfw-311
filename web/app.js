@@ -467,6 +467,7 @@ function updateKeybar() {
 if (window.visualViewport) { window.visualViewport.addEventListener("resize", updateKeybar); window.visualViewport.addEventListener("scroll", updateKeybar); }
 document.addEventListener("focusin", () => setTimeout(updateKeybar, 50));
 document.addEventListener("focusout", () => setTimeout(updateKeybar, 50));
+setInterval(updateKeybar, 1000);                       // belt and braces: keyboard geometry changes without events on some iOS versions
 
 /* The soft keyboard follows the guest: when an edit control takes the focus the hidden input is
    focused, which summons the platform keyboard, and it is blurred when the focus leaves. iOS only
@@ -492,6 +493,7 @@ function syncKeyboard() {
   if (!inp) return;
   if (wantKeyboard && document.activeElement !== inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
   else if (!wantKeyboard && document.activeElement === inp) inp.blur();
+  setTimeout(updateKeybar, 100);
 }
 const CMD_SCROLL = 7, CMD_CURSOR = 10;
 const touchDevice = ("ontouchstart" in window) || (window.matchMedia && matchMedia("(pointer: coarse)").matches);
@@ -1209,7 +1211,7 @@ function installTouch() {
  */
 function installKeyboard() {
   const inp = $("kbd");
-  buildKeybar();
+  buildKeybar(); updateKeybar();
   $("kbdbtn").onclick = () => { inp.value = ""; inp.focus(); };
   inp.addEventListener("input", () => {
     for (const ch of inp.value) emulator.keyboard_send_text(ch);
