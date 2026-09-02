@@ -88,10 +88,18 @@ const dpi = params.get("dpi") ? +params.get("dpi") : (viewport()[0] < 600 ? 120 
 /* Local snapshots are keyed by the image's identity (size and modification time from the
    server), not just its name: a snapshot of an older build of the image restores a guest whose
    PVMON and screen layout no longer match this page, and it looks like a hang. */
-let stateKey = `wfw311:${IMAGE}:${dpi}`;
-const stateKeyReady = fetch(IMAGE, { method: "HEAD" })
-  .then(r => { stateKey += `:${r.headers.get("content-length")}:${r.headers.get("last-modified")}`; })
-  .catch(() => {});
+let stateKey = `wfw311:${IMAGE}:${dpi}`, stateKeyQualified = false, shippedStamp = "";
+const stateKeyReady = Promise.all([
+  fetch(IMAGE, { method: "HEAD" }).then(r => {
+    if (!r.ok) throw new Error("HEAD " + r.status);
+    stateKey += `:${r.headers.get("content-length")}:${r.headers.get("last-modified")}`;
+    stateKeyQualified = true;
+  }),
+  // The shipped boot snapshot's stamp: a local snapshot is only trusted if it was made on top of
+  // the same shipped state, so a new build can never be shadowed by an old local save.
+  fetch(`../image/boot.state.gz?v=${encodeURIComponent(IMAGE)}`, { method: "HEAD" })
+    .then(r => { if (r.ok) shippedStamp = `${r.headers.get("content-length")}:${r.headers.get("last-modified")}`; }),
+]).catch(e => report("statekey", String(e)));
 
 /* ------------------------------------------------------------------------------- snapshots
  * Mobile browsers evict background tabs, so the VM is saved on hide and restored on load.
@@ -108,6 +116,7 @@ function idb() {
 async function saveState(emulator) {
   try {
     await stateKeyReady;
+    if (!stateKeyQualified) return;                     // cannot label it: do not keep it
     const raw = await emulator.save_state();
     let blob = new Blob([raw]);
     if (typeof CompressionStream === "function") {
@@ -117,7 +126,7 @@ async function saveState(emulator) {
     const db = await idb();
     await new Promise((res, rej) => {
       const tx = db.transaction("state", "readwrite");
-      tx.objectStore("state").put({ bytes, at: Date.now() }, stateKey);
+      tx.objectStore("state").put({ bytes, at: Date.now(), shipped: shippedStamp }, stateKey);
       tx.oncomplete = res; tx.onerror = () => rej(tx.error);
     });
     status(`saved ${(bytes.byteLength / 1048576).toFixed(1)} MB`);
@@ -133,6 +142,10 @@ async function loadState() {
       q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
     });
     if (!rec) return null;
+    if (!stateKeyQualified || (rec.shipped || "") !== shippedStamp) {
+      report("state", `local snapshot ignored: qualified=${stateKeyQualified} shipped=${rec.shipped}/${shippedStamp}`);
+      return null;
+    }
     let blob = rec.blob || new Blob([rec.bytes]);
     if (typeof DecompressionStream === "function") {
       blob = await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).blob();
@@ -198,8 +211,11 @@ emulator.add_listener("emulator-ready", async () => {
      snapshot (the desktop already up, so a cold visit takes seconds instead of a minute), then a
      real boot. After any restore PVMON is asked to describe the layout again, since the host has
      no memory of it. */
-  let snap = params.get("fresh") ? null : await loadState();
-  if (!snap && !params.get("fresh") && !params.get("mkstate")) snap = await loadShippedState();
+  if (params.get("reset")) {
+    try { await new Promise(r => { const d = indexedDB.deleteDatabase(DB); d.onsuccess = d.onerror = d.onblocked = r; }); } catch (e) {}
+  }
+  let snap = params.get("fresh") || params.get("reset") ? null : await loadState();
+  if (!snap && !params.get("fresh") && !params.get("mkstate")) { snap = await loadShippedState(); report("state", `shipped snapshot ${snap ? snap.byteLength + " bytes" : "unavailable"}`); }
   if (snap) {
     try {
       await emulator.restore_state(snap);
