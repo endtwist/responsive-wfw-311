@@ -89,10 +89,20 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
                coordinates by their program would otherwise land in the desktop column */
             RECT orc; int slotX;
             GetWindowRect(cs->hwndParent, &orc);
-            if (orc.left < (int)SLOT_W) goto pass;                /* owner is the shell: leave it */
-            slotX = (orc.left / SLOT_W) * SLOT_W;
             w = cs->cx; h = cs->cy;
             if (w <= 0 || h <= 0) goto pass;                      /* CW_USEDEFAULT: let Windows decide */
+            if (orc.left < (int)SLOT_W) {
+                /* owner is the shell: Windows would centre this on the 2560-wide screen, far off
+                   the desktop column; centre it in the column instead (PVMON reflows if too wide) */
+                slotX = 0;
+                cs->x = ((int)shellW - w) / 2;
+                cs->y = (orc.top + orc.bottom - h) / 2;
+                if (cs->x + w > (int)shellW) cs->x = (int)shellW - w;
+                if (cs->x < 0) cs->x = 0;
+                if (cs->y < 0) cs->y = 0;
+                goto pass;
+            }
+            slotX = (orc.left / SLOT_W) * SLOT_W;
             cs->x = (orc.left + orc.right - w) / 2;
             cs->y = (orc.top + orc.bottom - h) / 2;
             if (cs->x + w > slotX + SLOT_W) cs->x = slotX + SLOT_W - w;

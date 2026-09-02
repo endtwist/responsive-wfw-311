@@ -7,8 +7,8 @@
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; esac; done
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
@@ -46,10 +46,11 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 # from the cursor position the driver reports, which only lands correctly at a 1:1 mickey ratio.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.MaxHeight.WINFILE=600 PVMon.Size.WINOA386=400x340 PVMon.DefaultSize=352x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CLOCK CHARMAP PBRUSH" \
-  "windows.device=PDF Printer,PSCRIPT,C:\\PRINT.PRN" \
-  "devices.PDF Printer=PSCRIPT,C:\\PRINT.PRN" \
-  "PrinterPorts.PDF Printer=PSCRIPT,C:\\PRINT.PRN,15,45" \
+  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.MaxHeight.WINFILE=600 PVMon.Size.WINOA386=352x360 "PVMon.KeyboardApps=WINOA386 TERMINAL" PVMon.DefaultSize=352x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CLOCK CHARMAP PBRUSH" \
+  "windows.spooler=$SPOOLER" \
+  "windows.device=PDF Printer,$PRINTER,C:\\PRINT.PRN" \
+  "devices.PDF Printer=$PRINTER,C:\\PRINT.PRN" \
+  "PrinterPorts.PDF Printer=$PRINTER,C:\\PRINT.PRN,15,45" \
   "Ports.C:\\PRINT.PRN=" \
   "PSCRIPT,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \
   "PostScript,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \

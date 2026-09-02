@@ -14,7 +14,7 @@ while p + 22 <= len(d):
     if name.startswith(b"WINDOWS 386"):
         flags = struct.unpack_from("<I", d, off + 16)[0]
         # clear fFullScreen, set fALTENTERdis: no way back to full screen from inside the box
-        new = (flags & ~0x8) | 0x100
+        new = (flags & ~0x8) | 0x100 | 0x1     # fEnableClose: the DOS box can be closed from its system menu
         struct.pack_into("<I", d, off + 16, new)
         # low priorities: a DOS session at the default foreground priority (100) starves Windows,
         # and on a phone the emulator is slow to begin with; 20/10 keeps the desktop responsive

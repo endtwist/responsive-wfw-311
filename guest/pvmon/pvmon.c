@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 20     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 21     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -857,6 +857,28 @@ static void report_focus(void)
             if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) want = 1;
         }
     }
+    if (!want) {
+        /* programs that take keys without an edit control (a DOS box, Paintbrush's text tool,
+           Terminal): [PVMon] KeyboardApps=WINOA386 TERMINAL ... by module of the active window */
+        HWND a = GetActiveWindow();
+        if (a) {
+            char path[128], mod[16], list[128], *base, *p, *k; int n;
+            HINSTANCE inst = (HINSTANCE)GetWindowWord(a, GWW_HINSTANCE);
+            if (inst && GetModuleFileName(inst, path, sizeof(path))) {
+                base = path;
+                for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
+                for (n = 0; base[n] && base[n] != '.' && n < 15; n++) mod[n] = base[n];
+                mod[n] = 0;
+                GetProfileString("PVMon", "KeyboardApps", "", list, sizeof(list));
+                for (k = list; *k; ) {
+                    char *e = k;
+                    while (*e && *e != ' ' && *e != ',') e++;
+                    if ((int)(e - k) == lstrlen(mod) && lstrcmpi_n(k, mod, (int)(e - k))) { want = 1; break; }
+                    k = e; while (*k == ' ' || *k == ',') k++;
+                }
+            }
+        }
+    }
     if (want != g_lastKbd) { g_lastKbd = want; dbg(want ? "PVK 1" : "PVK 0"); }
 }
 
@@ -872,6 +894,13 @@ static void publish_layout(void)
        actually ended up. Owned windows go into their owner's column too: Windows usually centres
        a dialog on its owner, but some applications place theirs in screen coordinates, and a
        dialog left in the shell column would show through on the desktop. */
+    for (i = 0; i < g_nWnds; i++)
+        if (g_wnds[i].kind == 'S' && IsZoomed(g_wnds[i].hwnd)) {
+            /* the shell maximised (a double-tap on its caption) would span the whole 2560-column
+               screen; "maximised" for the shell means its column */
+            ShowWindow(g_wnds[i].hwnd, SW_RESTORE);
+            arrange_shell();
+        }
     for (i = 0; i < g_nWnds; i++)
         if (g_wnds[i].kind == 'A' || g_wnds[i].kind == 'I') {
             slot = slot_of(g_wnds[i].hwnd);
