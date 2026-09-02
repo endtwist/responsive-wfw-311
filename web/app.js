@@ -1381,7 +1381,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 
 /* Errors and a heartbeat go to the dev server: phones have no console to read. */
 let frames = 0, lastBeat = 0, lastIc = 0, lastBeatAt = 0;
-let logEndpointGone = false;                          // declared before the first report() call (TDZ)
+var logEndpointGone = false;                          // var: hoisted, report() runs during module evaluation before this line
 function report(kind, detail) {
   if (logEndpointGone) return;                          // production has no dev server: stop after the first 404
   try { fetch("/__log", { method: "POST", body: `${kind} ${detail}`, keepalive: true }).then(r => { if (r.status === 404) logEndpointGone = true; }).catch(() => {}); } catch (e) {}
