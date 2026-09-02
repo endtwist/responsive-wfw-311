@@ -24,19 +24,24 @@ const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, f: 0x21, 
 
 /* The tour table. `text`: a tap into the client area must make the guest ask for the keyboard
    (PVK 1: an Edit/ComboBox/tty control or a [PVMon] KeyboardApps module). `dialog`: how to get
-   one owned dialog cheaply. `timeout`: how long its main window may take to appear. */
+   one owned dialog cheaply. `timeout`: how long its main window may take to appear. `fixed`: a
+   fixed-layout program (no WS_THICKFRAME: the hook keeps it in its column but deliberately never
+   resizes it), so a frame wider than the phone and a host scale below 1:1 are reported as
+   information, not failures. Until PVW carries the hook's own flag these are named by title;
+   WINVER and Network Setup are fixed too but not toured. */
+const FIXED_TITLES = /^(Character Map|Solitaire|The Microsoft Hearts|Object Packager|Task List|About |Network Setup)/;
 export const APPS = [
   { name: "NOTEPAD",  cmd: "NOTEPAD.EXE",  title: /^Notepad/,        text: true,  dialog: "alt-f-o" },
   { name: "WRITE",    cmd: "WRITE.EXE",    title: /^Write/,          dialog: "alt-f-o" },
   { name: "CALC",     cmd: "CALC.EXE",     title: /^Calculator/ },
   { name: "CLOCK",    cmd: "CLOCK.EXE",    title: /^Clock/ },
-  { name: "CHARMAP",  cmd: "CHARMAP.EXE",  title: /^Character Map/ },
+  { name: "CHARMAP",  cmd: "CHARMAP.EXE",  title: /^Character Map/, fixed: true },
   { name: "CARDFILE", cmd: "CARDFILE.EXE", title: /^Cardfile/,       text: true },
   { name: "CALENDAR", cmd: "CALENDAR.EXE", title: /^Calendar/ },
   { name: "PBRUSH",   cmd: "PBRUSH.EXE",   title: /^Paintbrush/,     dialog: "pbrush" },
-  { name: "SOL",      cmd: "SOL.EXE",      title: /^Solitaire/ },
+  { name: "SOL",      cmd: "SOL.EXE",      title: /^Solitaire/, fixed: true },
   { name: "WINMINE",  cmd: "WINMINE.EXE",  title: /^Minesweeper/ },
-  { name: "MSHEARTS", cmd: "MSHEARTS.EXE", title: /Hearts/,          dialog: "launch" },
+  { name: "MSHEARTS", cmd: "MSHEARTS.EXE", title: /Hearts/,          dialog: "launch", fixed: true },
   { name: "WINFILE",  cmd: "WINFILE.EXE",  title: /^File Manager/ },
   { name: "CONTROL",  cmd: "CONTROL.EXE",  title: /^Control Panel/ },
   { name: "PRINTMAN", cmd: "PRINTMAN.EXE", title: /^Print Manager/ },
@@ -45,9 +50,9 @@ export const APPS = [
   { name: "MPLAYER",  cmd: "MPLAYER.EXE",  title: /^Media Player/ },
   { name: "RECORDER", cmd: "RECORDER.EXE", title: /^Recorder/ },
   { name: "TERMINAL", cmd: "TERMINAL.EXE", title: /^Terminal/,       text: true },
-  { name: "PACKAGER", cmd: "PACKAGER.EXE", title: /^Object Packager/ },
+  { name: "PACKAGER", cmd: "PACKAGER.EXE", title: /^Object Packager/, fixed: true },
   { name: "WINHELP",  cmd: "WINHELP.EXE",  title: /Help/ },
-  { name: "TASKMAN",  keys: "ctrl-esc",    title: /^Task List/ },
+  { name: "TASKMAN",  keys: "ctrl-esc",    title: /^Task List/, fixed: true },
   { name: "DOSPRMPT", cmd: "DOSPRMPT.PIF", title: /^MS-DOS/,         text: true, timeout: 40000 },
 ];
 
@@ -80,7 +85,7 @@ function makeClock() {
  * node too. Mirrors the parsing in app.js. */
 export function trackGuest(emulator) {
   const st = { shell: { w: SHELL_W, h: 0, cap: 18, ver: 0 }, layers: [], dock: [], kbd: 0, kbdSeq: 0, desktopReady: false,
-               pubSeq: 0, log: [], runs: [] };
+               pubSeq: 0, log: [], runs: [], hb: 0 };
   let pending = null, pendingDock = null;
   emulator.bus.register("pv-debug", line => {
     st.log.push(line); if (st.log.length > 200) st.log.shift();
@@ -90,6 +95,7 @@ export function trackGuest(emulator) {
     if (m) { st.kbd = +m[1]; st.kbdSeq++; return; }
     if (/^PVA/.test(line)) { st.desktopReady = true; return; }
     if (/^pvmon: run /.test(line)) { st.runs.push(line); return; }
+    if (/^PVH /.test(line)) { st.hb++; return; }         // PVMON heartbeat, about once a second
     if (/^PVB /.test(line)) { pending = []; pendingDock = []; return; }
     m = /^PV([WOTXS]) (-?\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
     if (m && pending) {
@@ -188,8 +194,9 @@ export async function tour(env, opts = {}) {
   };
 
   /* Closing: PVMON posts WM_CLOSE; a "save changes?" box gets an N; Alt+F4 is the fallback. */
-  const closeApp = async (slot, row) => {
-    const gone = () => !winOf(slot);
+  const closeApp = async (slot, row, title) => {
+    // gone from its slot and not still published under any slot (a box PVMON re-slotted)
+    const gone = () => !winOf(slot) && !(title && st.layers.some(x => x.kind === "W" && x.title === title));
     const wait = async ms => {
       const start = performance.now();
       while (performance.now() - start < ms) {
@@ -202,11 +209,44 @@ export async function tour(env, opts = {}) {
     };
     bus("pv-command", [CMD_CLOSE, slot]);
     if (await wait(8000)) { row.close = "pass"; return true; }
-    bus("pv-command", [CMD_ACTIVATE, slot]); await sleep(300);
-    await chord(SC.alt, SC.f4);
+    await chord(SC.alt, SC.f4);                 // no CMD_ACTIVATE first: SetActiveWindow on a dying task blocks PVMON
     if (await wait(8000)) { row.close = "pass:alt-f4"; return true; }
-    row.close = "fail";
+    row.close = "fail" + (title && st.layers.some(x => x.kind === "W" && x.title === title) ? ":still-published" : "");
     return false;
+  };
+
+  /* Anything on the desktop besides the shell is in the way of the next launch: a message box the
+     last program left behind (Print Manager's "has been turned off" box is 924 wide, off the phone,
+     so only the keyboard reaches it), a stray menu, a program that did not close. Front-most first:
+     Enter (a #32770 message box's default button), then Esc, then CMD_CLOSE (N to a save prompt),
+     then Alt+F4, each followed by a wait for a layout without it. Returns what was dismissed. */
+  const dismissStrays = async (row, key = "stray") => {
+    const removed = [];
+    for (let round = 0; round < 8; round++) {
+      const strays = st.layers.filter(L => L.kind !== "S");
+      if (!strays.length) break;
+      const L = strays[strays.length - 1];
+      const tag = `${L.kind}${L.slot}:${(L.title || "?").slice(0, 24)}`;
+      const gone = () => !st.layers.some(x => x.kind === L.kind && x.slot === L.slot && x.title === L.title);
+      let how = null;
+      for (const step of ["enter", "esc", "close", "alt-f4"]) {
+        if (step === "enter") await press(SC.enter);
+        else if (step === "esc") await press(SC.esc);
+        else if (step === "close") { if (!(L.kind === "W" && L.slot >= 0)) continue; bus("pv-command", [CMD_CLOSE, L.slot]); }
+        else await chord(SC.alt, SC.f4);
+        const start = performance.now();
+        while (performance.now() - start < 2500 && !gone()) {
+          if (L.kind === "W" && step !== "enter" && dialogsOf(L.slot).length) await press(SC.n);
+          await sleep(100);
+        }
+        if (gone()) { how = step; break; }
+      }
+      removed.push(`${tag}/${how || "stuck"}`);
+      if (!how) break;
+      await sleep(300);
+    }
+    if (removed.length && row) row[key] = (row[key] ? row[key] + "|" : "") + removed.join("|").replace(/\s+/g, "_");
+    return removed;
   };
 
   /* ---- preamble */
@@ -227,9 +267,8 @@ export async function tour(env, opts = {}) {
   const preexisting = st.layers.filter(L => L.kind !== "S").map(L => `${L.kind}${L.slot}:${L.title}`);
   let cleaned = "none";
   if (preexisting.length) {
-    for (const L of st.layers.filter(l => l.kind === "O" || l.kind === "T")) await press(SC.esc);
-    for (const L of st.layers.filter(l => l.kind === "W")) await closeApp(L.slot, {});
-    cleaned = (await until(() => !st.layers.some(l => l.kind === "W" || l.kind === "O"), 10000)) ? "ok" : "fail:" + st.layers.filter(l => l.kind !== "S").map(l => l.kind + l.slot).join("|");
+    const removed = await dismissStrays(null);
+    cleaned = st.layers.some(l => l.kind !== "S") ? "fail:" + removed.join("|") : "ok:" + removed.join("|");
   }
   const mips0 = await mips();
   post(`TOUR-BEGIN apps=${apps.length} shell=${st.shell.w}x${st.shell.h} pvmon=v${st.shell.ver} mips=${mips0.toFixed(1)} clock=${clock.driven} dom=${!!env.dom} preexisting=${preexisting.length ? preexisting.join("|") : "-"} cleaned=${cleaned} ua=${env.ua}`);
@@ -242,8 +281,20 @@ export async function tour(env, opts = {}) {
     rows.push(row);
     if (dead) { row.launch = "skip"; continue; }
     try {
+      if (st.layers.some(L => L.kind !== "S")) await dismissStrays(row);       // left by the last program
       const before = new Set(st.layers.filter(L => L.kind === "W").map(L => L.slot));
-      const pubBefore = st.pubSeq;
+      const pubBefore = st.pubSeq, hbBefore = st.hb;
+      /* PVMON must be polling (PVH about once a second) or CMD_RUN is never read. A stalled PVMON
+         (seen after Print Manager's box was closed while PVMON was blocked in an inter-task call)
+         resumed when Task List was opened, so that is the nudge; without a heartbeat afterwards the
+         app is skipped at once instead of waiting 15 s for nothing. */
+      const beat = async ms => { const h = st.hb; await until(() => st.hb !== h, ms, 100); return st.hb !== h; };
+      if (!(await beat(2500))) {                    // Ctrl+Esc apps need PVMON too: it publishes the window
+        await chord(SC.ctrl, SC.esc); await sleep(1500); await press(SC.esc); await sleep(500);
+        const ok = await beat(3000);
+        row.stall = "pvmon:no-heartbeat," + (ok ? "recovered-by-ctrl-esc" : "still-silent");
+        if (!ok) { row.launch = "skip:pvmon-stalled"; row.alive = (await alive()) ? "pass" : "fail"; row.t = Math.round(performance.now() - ta); post("TOUR " + fmtRow(row)); continue; }
+      }
       /* launch */
       if (app.keys === "ctrl-esc") await chord(SC.ctrl, SC.esc);
       else bus("pv-command-string", [CMD_RUN, app.cmd]);
@@ -263,19 +314,28 @@ export async function tour(env, opts = {}) {
         const x = st.layers.find(l => l.kind === "X");
         // "pvmon: run FOO.EXE -> N": WinExec's return, below 32 is an error (2 = file not found)
         const we = /-> (\d+)$/.exec(st.runs[st.runs.length - 1] || "");
-        row.launch = x ? "fail:noslot" : we && +we[1] < 32 ? `fail:winexec=${we[1]}` : "fail:timeout";
+        // something else on the desktop (a box the program itself put up, a leftover) is the likely
+        // reason: name it rather than let every later launch time out behind it
+        const blockers = st.layers.filter(l => l.kind !== "S").map(l => `${l.kind}${l.slot}:${(l.title || "?").slice(0, 24)}`);
+        row.launch = x ? "fail:noslot" : we && +we[1] < 32 ? `fail:winexec=${we[1]}` : blockers.length ? "fail:blocked-by=" + blockers.join("|").replace(/\s+/g, "_") : "fail:timeout";
+        // the command channel as the guest left it: cmd still set = PVMON never took it; a string
+        // left behind = it took the command but not the text
+        try { const v = emulator.v86.cpu.devices.vga; row.chan = `info:cmd=${v.pv_cmd},str=${v.pv_cmd_str.length},pvh=${st.hb - hbBefore},run=${(st.runs[st.runs.length - 1] || "-").replace(/^pvmon: run /, "").replace(/\s+/g, "_")}`; } catch (e) {}
         row.alive = (await alive()) ? "pass" : "fail";
         if (row.alive === "fail") dead = true;
-        // whatever did appear is closed so the next app starts clean
-        for (const l of st.layers) if (l.kind === "O" && !before.has(l.slot)) await press(SC.esc);
+        if (blockers.length) await dismissStrays(row);       // so the next app starts clean
+        row.t = Math.round(performance.now() - ta);
+        post("TOUR " + fmtRow(row));                          // timed-out rows are logged too
         continue;
       }
       row.launch = "pass";
       row.title = L.title;
       const born = { ...L };
       row.rect = `${born.wx},${born.wy},${born.ww},${born.wh}`;
-      /* the invariant, on the first report of the window */
-      row.fit = born.ww <= SHELL_W && born.wh <= st.shell.h ? "pass" : `fail:${born.ww}x${born.wh}>${SHELL_W}x${st.shell.h}`;
+      /* the invariant, on the first report of the window; fixed-layout programs are information */
+      const fixed = !!app.fixed || FIXED_TITLES.test(born.title);
+      const soft = fixed ? "info:fixed" : "fail";
+      row.fit = born.ww <= SHELL_W && born.wh <= st.shell.h ? "pass" : `${soft}:${born.ww}x${born.wh}>${SHELL_W}x${st.shell.h}`;
       const sx = SLOT_W * (born.slot + 1);
       row.slot = born.wx >= sx && born.wx + born.ww <= sx + SLOT_W && born.wy >= 0 && born.wy + born.wh <= Math.max(st.shell.h, 970)
         ? "pass" : `fail:slot${born.slot}@${born.wx},${born.wy}`;
@@ -283,7 +343,7 @@ export async function tour(env, opts = {}) {
       if (env.dom) {
         let h = await until(() => hostLayer("W", L.slot), 1500, 50);
         if (!h && env.present) { env.present(); await sleep(80); h = hostLayer("W", L.slot); }
-        row.scale = !h ? "fail:nolayer" : h.s >= 0.999 ? "pass" : `fail:${h.s.toFixed(3)}`;
+        row.scale = !h ? "fail:nolayer" : h.s >= 0.999 ? "pass" : `${soft}:${h.s.toFixed(3)}`;
       } else row.scale = "-";
       await sleep(600);                                           // let it paint and settle
       /* a dialog the program opened on its own (Hearts' welcome box, an error) */
@@ -324,15 +384,17 @@ export async function tour(env, opts = {}) {
       }
       /* the window after all that: still inside the frame? */
       const now = winOf(L.slot);
-      if (now && row.fit === "pass" && (now.ww > SHELL_W || now.wh > st.shell.h)) row.fit = `fail:grew:${now.ww}x${now.wh}`;
+      if (now && row.fit === "pass" && (now.ww > SHELL_W || now.wh > st.shell.h)) row.fit = `${soft}:grew:${now.ww}x${now.wh}`;
       /* close and confirm the guest survived */
-      await closeApp(L.slot, row);
+      await closeApp(L.slot, row, L.title);
       if (env.dom) {
         const drawn = () => { if (env.present && typeof document !== "undefined" && document.hidden) env.present(); return hostLayer("W", L.slot); };
         row.layer = (await until(() => !drawn(), 2000, 100)) ? "pass" : "fail:still-drawn";
       }
       row.alive = (await alive()) ? "pass" : "fail";
       if (row.alive === "fail") dead = true;
+      await sleep(300);
+      if (st.layers.some(l => l.kind !== "S")) await dismissStrays(row);   // a box it left behind
       if (app.name === "DOSPRMPT") await sleep(1500);            // the DOS VM tears down slowly
     } catch (e) {
       row.error = "fail:" + (e && e.message || e);
@@ -344,7 +406,7 @@ export async function tour(env, opts = {}) {
   let pass = 0, fail = 0, skip = 0;
   for (const r of rows) for (const [k, v] of Object.entries(r)) {
     if (k === "app" || k === "t" || k === "tLaunch" || k === "rect" || k === "title") continue;
-    if (v === "pass" || /^pass:/.test(v)) pass++; else if (/^fail/.test(v)) fail++; else if (v === "skip") skip++;
+    if (v === "pass" || /^pass:/.test(v)) pass++; else if (/^fail/.test(v)) fail++; else if (/^skip/.test(v)) skip++;
   }
   const result = { rows, pass, fail, skip, dead, seconds: Math.round((performance.now() - t0) / 1000), mips: [mips0, mips1],
                    pvmon: st.shell.ver, shell: st.shell, ua: env.ua, dom: !!env.dom, clock: clock.driven };
@@ -354,7 +416,7 @@ export async function tour(env, opts = {}) {
 }
 
 export function fmtRow(r) {
-  const order = ["launch", "match", "fit", "slot", "scale", "tap", "kbd", "focus", "launchdlg", "dlg", "dlg1", "dlgfit", "dlgsep", "dlgpix", "dlgclose", "close", "layer", "alive", "error"];
+  const order = ["launch", "match", "fit", "slot", "scale", "tap", "kbd", "focus", "launchdlg", "dlg", "dlg1", "dlgfit", "dlgsep", "dlgpix", "dlgclose", "close", "layer", "alive", "stray", "stall", "chan", "error"];
   const parts = [r.app.padEnd(8)];
   for (const k of order) if (r[k] !== undefined) parts.push(`${k}=${r[k]}`);
   if (r.t !== undefined) parts.push(`t=${r.t}`);
@@ -451,6 +513,7 @@ export async function run(opts = {}) {
   const p = new URLSearchParams(location.search);
   if (p.get("apps") && !opts.apps) opts.apps = p.get("apps").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
   if (p.get("pixels") && opts.pixels === undefined) opts.pixels = true;
+  if (p.get("skip") && !opts.skip) opts.skip = p.get("skip").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
   if (p.get("lenient") && opts.strictDialogs === undefined) opts.strictDialogs = false;
   const t0 = performance.now();
   while (!window.emulator || !window.emulator.v86) { if (performance.now() - t0 > 60000) throw new Error("no emulator"); await new Promise(r => setTimeout(r, 200)); }

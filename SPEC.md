@@ -1446,6 +1446,16 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
 - Keybar: keys fire on tap release (touchstart passive) so the bar pans; `keyboardShift()` subtracts the bar height; a stale focused `#kbd` (keyboard dismissed by its own key) is blurred on touchstart so the next tap's focus is fresh.
 - Owned dialogs: the strip-fill mask smeared vertical streaks over the owner (Sound Recorder + Open). Removed. An O layer that still overlaps its owner in guest space is drawn coincident with its copy (transient-style, owner's client scale/position); one placed clear of the owner by the hook goes below the owner on the host too when there is room.
 - Image `work-phone-20260902-133432` (PVMON v22, PVHOOK invariant) + snapshot; Sound Recorder 407x241 with Open below it composites as one image; Program Manager 3 icons across.
+- Follow-up 2 (same day, after the merge with PVMON v22): Print Manager with the spooler off puts up
+  a 924-wide "Print Manager has been turned off" message box as its only window; it is off the phone,
+  so no tap reaches it, and every later launch timed out behind it. The tour now dismisses anything
+  that is not the shell before each launch and after each close — front-most first: Enter (a
+  message box's default button), Esc, CMD_CLOSE (N to a save prompt), Alt+F4, each followed by a
+  wait for a layout without it — and records it in the row (`stray=W0:Print_Manager/enter`). A
+  launch that times out while something else is on the desktop is reported as
+  `launch=fail:blocked-by=<layers>` and the desktop is cleared before the next app, so one stuck box
+  costs one row, not the rest of the run. `close` also checks that no window with the program's
+  title is still published anywhere (`fail:still-published`).
 
 ### 2026-09-02 — keyboard bar: density, Chrome-iOS autofill row, pan above the bar
 - Phone (Chrome iOS) showed three stacked rows: our bar (~56 px), Chrome's autofill accessory
@@ -1555,3 +1565,23 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   `bootretry=1`, `status=restored running=true`. A local snapshot is never saved before
   `desktopReady` (`state not saved: desktop not ready`, seen on the failed page's pagehide) or
   within 30 s of a WATCHDOG bundle while the screen has not changed since.
+- Follow-up 3 (same day): fixed-layout programs (no WS_THICKFRAME — Character Map, Solitaire,
+  Hearts, Object Packager, Task List, WINVER, Network Setup) are deliberately never resized by the
+  hook, so a frame wider than 352 or a host scale below 1:1 is reported for them as
+  `info:fixed:…`, not `fail`. Named by title / app-table `fixed:` until PVW carries the hook's flag.
+- Follow-up 4 (same day) — the real cause of the post-PRINTMAN cascade, found with the tour's own
+  diagnostics (`chan=cmd=5,str=11,pvh=0`): after Print Manager's "turned off" box (re-parked to slot 1
+  by PVMON while slot 0 still held the just-closed Control Panel) the tour's close fallback sent
+  CMD_ACTIVATE for slot 0 and then Alt+F4; PVMON stopped polling entirely — no PVH heartbeat, no
+  publish, CMD_RUN left unread in the register — until Ctrl+Esc opened Task List, when it resumed.
+  Consistent with PVMON blocked in an inter-task SendMessage (SetActiveWindow/BringWindowToTop on a
+  window whose task is exiting). Tour side: no CMD_ACTIVATE before Alt+F4 any more; before each
+  launch the tour waits for a heartbeat, nudges a silent PVMON with Ctrl+Esc/Esc, and marks the app
+  `launch=skip:pvmon-stalled` (`stall=pvmon:no-heartbeat,…` in the row) if it stays silent, so a
+  stalled guest costs seconds, not 15 s per remaining app. Timed-out rows are now posted to the log
+  too (they were only in the table before). Guest side (PVMON owner): CMD_ACTIVATE/CMD_CLOSE on a
+  slot whose window belongs to an exiting task should not block the poll — Print Manager with the
+  spooler off is the reproduction (`node tools/tour.mjs --apps CONTROL,PRINTMAN,CLIPBRD --log`).
+- `--skip A,B` (headless) / `?skip=A,B` (page) leave apps out; with `--skip PRINTMAN` the other 22
+  complete headless and in the pane (Print Manager with the spooler off still stalls PVMON; see
+  follow-up 4 — a guest fix, after which the skip goes away).

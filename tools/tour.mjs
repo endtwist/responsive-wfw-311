@@ -9,6 +9,7 @@
  *   node tools/tour.mjs                      # everything
  *   node tools/tour.mjs --apps NOTEPAD,CALC  # a subset
  *   node tools/tour.mjs --lenient            # dialog/owner overlap is informational (before Fix 2)
+ *   node tools/tour.mjs --skip PRINTMAN      # leave out apps (PRINTMAN stalls PVMON, see SPEC)
  *   node tools/tour.mjs --log                # echo the guest's protocol lines
  */
 import fs from "node:fs";
@@ -92,6 +93,7 @@ console.error(`desktop ready in ${Math.round(performance.now() - t0)} ms; shell 
 const opts = {};
 if (val("--apps")) opts.apps = val("--apps").split(",").map(s => s.trim().toUpperCase());
 if (flag("--lenient")) opts.strictDialogs = false;
+if (val("--skip")) opts.skip = val("--skip").split(",").map(s => s.trim().toUpperCase());
 const result = await tour(env, opts);
 console.log("\n" + table(result));
 if (val("--json")) fs.writeFileSync(val("--json"), JSON.stringify(result, null, 1));
