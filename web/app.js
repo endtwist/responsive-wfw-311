@@ -1734,7 +1734,9 @@ function installTouch() {
     }
     if (performance.now() < kbdSuppressedUntil && why !== "kbtest") { kbdLog("tap: suppressed after hide"); return; }
     focusKeyboard(`${why} "${title.slice(0, 20)}"`);
-    if (why === "title") speculativeRelease();
+    // A known keyboard app (title match) keeps the keyboard until the guest says PVK 0: Write's
+    // text area is not an Edit control, so the guest never says PVK 1 for it, and releasing on the
+    // guest's silence showed the keyboard for 700 ms and took it down again.
   };
   const up = (ev) => {
     window.pvPhase = "up";
