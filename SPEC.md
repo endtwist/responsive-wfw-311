@@ -2279,3 +2279,18 @@ FakeScreen's cost list gains "programs that intersect with the screen metrics". 
 `work-phone-20260902-182351.img` + `boot-20260902-182351.state.gz` (PVMON v35). Checks:
 `node v86/tests/pv/banked-vga.mjs` 77/77; `node tools/tour.mjs --apps PBRUSH,NOTEPAD,SOL` pass=26
 fail=2, the two pre-existing geometry checks (PBRUSH `fit 640x424>352x760`, Notepad `dlgfit 604x318`).
+
+### 2026-09-02 — menu bars wider than the viewport pan
+- A W layer whose window is wider than the viewport (Paintbrush, 640) keeps its chrome at the
+  desktop chrome scale, so only ~344 of its 632 guest px of menu bar fit. The menu strip is now a
+  window onto the full bar: `menuPan[key]` (guest px, clamped to `[0, ww − 2·inset.l − menuVis]`)
+  is the strip's source x in `drawWindow`; a one-finger horizontal drag that starts on the menu
+  row pans it (`chromeDrag.pan = "menu"`, no guest drag), a tap there is a click mapped through the
+  offset (`hitTest`/`mapThrough` add it for the menu rows), and a popup that hangs off the chrome
+  is anchored at chrome scale through the same offset so it opens under the item that was tapped.
+  The pan resets when the layer is placed afresh or goes away. No host cue is drawn (there is no
+  guest pixel for one); the caption strip is left as it was (cropped around its centre).
+- Pane (mobile preset, Paintbrush 640x892, menuVis 344, menuMax 288): a drag left on the menu row
+  -> pan 288 (clamped), the strip shows "…ns Help"; tap on Help -> `T 953,83 192x108 #32768` placed
+  at host x=26 under the Help item (shot); Esc; drag right -> pan 0; tap File -> the File menu at
+  `T 644,83` placed at x=4.

@@ -456,6 +456,10 @@ let desktopReady = false;
 let pendingLayers = null, pendingDock = null;
 const layerPos = {};                 // layer key -> host position, moved by dragging
 const layerZoom = {};                // layer key -> { z, px, py }: pinch zoom and pan of the client area
+/* layer key -> guest px: how far the menu-bar strip is panned. A window wider than the viewport
+   keeps its chrome at the desktop chrome scale (readable), so its menu bar does not fit: the strip
+   is a window onto the full-width bar that one finger pans sideways. Reset with the placement. */
+const menuPan = {};
 
 const pvLog = [];
 /* Watchdog bookkeeping: PVMON's heartbeat (`PVH <tick>`, once a second once the guest ships it),
@@ -512,6 +516,7 @@ emulator.bus.register("pv-debug", line => {
     layers = pendingLayers; dock = pendingDock; pendingLayers = pendingDock = null;
     const live = new Set(layers.map(layerKey));
     for (const k of Object.keys(layerPos)) if (!live.has(k)) delete layerPos[k];
+    for (const k of Object.keys(menuPan)) if (!live.has(k)) delete menuPan[k];
     for (const k of Object.keys(layerZoom)) if (!live.has(k)) delete layerZoom[k];
   }
 });
@@ -1112,10 +1117,14 @@ function placeLayers(src) {
       const owner = col >= 1 ? bySlot[col - 1] : null;
       if (centred) { x = Math.round((vw - hw) / 2); y = Math.round((vh - hh) / 2); }
       else if (owner) {
-        x = Math.round(owner.x + owner.hl + (L.wx - owner.gx) * owner.s);
-        y = L.wy < owner.gy
-          ? Math.round(owner.y + (L.wy - owner.wy) * c)                   // hangs off the chrome
-          : Math.round(owner.y + owner.ht + (L.wy - owner.gy) * owner.s);
+        if (L.wy < owner.gy) {                                            // hangs off the chrome (a menu)
+          // chrome scale, through the menu strip's pan, so it hangs off the item that opened it
+          x = Math.round(owner.x + owner.hl + (L.wx - owner.wx - owner.inset.l - (owner.mpan || 0)) * c);
+          y = Math.round(owner.y + (L.wy - owner.wy) * c);
+        } else {
+          x = Math.round(owner.x + owner.hl + (L.wx - owner.gx) * owner.s);
+          y = Math.round(owner.y + owner.ht + (L.wy - owner.gy) * owner.s);
+        }
       } else { x = Math.round(view.ox + L.wx * c); y = Math.round((L.wy - view.y) * c); }
       /* Shown as far as possible: anchored where it popped up, shifted up/left so the whole of it
          fits when it can. A popup taller or wider than the viewport (a long View menu, a combo
@@ -1174,6 +1183,7 @@ function placeLayers(src) {
     const box = Math.max(12, shell.cap);                     // a caption box is square
     const hl = Math.round(inset.l * c), ht = Math.round(inset.t * c), hb = Math.round(inset.b * c);
     const hr = Math.round(inset.r * c);
+    let menuVis = 0, menuMax = 0;                      // guest px of menu bar that fit, and the pan limit
     const availW = vw - hl - hr;                       // edge to edge: a layer may fill the width
     const availH = vh - ht - hb;
     const s = Math.min(c, availW / Math.max(1, L.gw), availH / Math.max(1, L.gh));
@@ -1181,6 +1191,7 @@ function placeLayers(src) {
     const hw = cw + hl + hr, hh = ch + ht + hb;
     let p = layerPos[key];
     if (!p) {
+      delete menuPan[key];                             // a fresh placement starts with the menu bar at its left end
       const owner = L.kind === "O" ? bySlot[L.slot] : null;
       /* Default placement, no cascade: a new layer fills the width (x = 0 when it is as wide as
          the viewport, centred when it is narrower) and sits just under the shell's caption strip,
@@ -1215,7 +1226,13 @@ function placeLayers(src) {
     const vis = { w: Math.min(L.gw, cw / zs), h: Math.min(L.gh, ch / zs) };   // guest px visible
     zp.px = Math.max(0, Math.min(L.gw - vis.w, zp.px));
     zp.py = Math.max(0, Math.min(L.gh - vis.h, zp.py));
-    const w = { ...L, src: L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb, hr,
+    if (menuRow > 0) {
+      menuVis = Math.min(L.ww - 2 * inset.l, Math.round((hw - 2 * hl) / c));
+      menuMax = Math.max(0, L.ww - 2 * inset.l - menuVis);
+      if (menuPan[key] === undefined) menuPan[key] = 0;
+      menuPan[key] = Math.max(0, Math.min(menuMax, menuPan[key]));
+    }
+    const w = { ...L, src: L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb, hr, menuVis, menuMax, mpan: menuPan[key] || 0,
                 zs, px: zp.px, py: zp.py, vw: vis.w, vh: vis.h };
     if (L.kind === "W") bySlot[L.slot] = w;
     out.push(w);
@@ -1251,8 +1268,8 @@ function hitTest(px, py) {
         return { kind: "chrome", win: w, x: Math.round(w.wx + w.ww - (w.hw - dx) / w.c), y: Math.round(w.wy + dy / w.c) };
       return { kind: "drag", win: w };
     }
-    if (dy < w.ht)                                    // menu row is drawn from the left
-      return { kind: "chrome", win: w, x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
+    if (dy < w.ht)                                    // menu row: drawn from its pan offset
+      return { kind: "chrome", menu: true, win: w, x: Math.round(w.wx + dx / w.c + (w.mpan || 0)), y: Math.round(w.wy + dy / w.c) };
     return { kind: "drag", win: w };                  // the frame itself drags, like the caption
   }
   return { kind: "desktop",
@@ -1311,7 +1328,8 @@ function drawWindow(g, src, w) {
   if (menuRow > 0 && menuH > 0) {
     const innerW = w.hw - 2 * hl;                     // between the side borders, never over them
     const mwG = Math.min(w.ww - 2 * inset.l, Math.round(innerW / c)), mwH = Math.round(mwG * c);
-    blit(g, src, w.wx + inset.l, w.wy + capRow, mwG, menuRow, w.x + hl, w.y + capH, mwH, menuH);
+    const mp = w.mpan || 0;                           // panned: the strip is a window onto the full-width bar
+    blit(g, src, w.wx + inset.l + mp, w.wy + capRow, mwG, menuRow, w.x + hl, w.y + capH, mwH, menuH);
     // a child dialog whose top overlaps the menu bar leaves its caption in this strip: fill it with
     // the menu bar's own colour (sampled at the strip's left end)
     const mx0 = w.wx + inset.l, my0 = w.wy + capRow;
@@ -1776,6 +1794,7 @@ let pressLayer = null;
 function mapThrough(w, px, py) {
   const dx = px - w.x, dy = py - w.y;
   if (w.transient || w.shellCopy) return { x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
+  if (dy < w.ht) return { x: Math.round(w.wx + dx / w.c + (w.mpan || 0)), y: Math.round(w.wy + dy / w.c) };   // chrome (menu rows) through the pan
   return { x: Math.round(w.gx + w.px + (dx - w.hl) / w.zs), y: Math.round(w.gy + w.py + (dy - w.ht) / w.zs) };
 }
 /* A desktop hit that lands inside a shell-owned dialog (drawn in the desktop column, not as a
@@ -1799,6 +1818,12 @@ let chromeDrag = null;
 function pressStart(ev) {
   const { px, py } = hostPoint(ev);
   const h = hitTest(px, py);
+  if (h.kind === "chrome" && h.menu && h.win.menuMax > 0) {
+    chromeDrag = { key: h.win.key, pan: "menu", base: h.win.mpan || 0, startX: px, startY: py, moved: false,
+                   guest: { x: h.x, y: h.y }, timer: 0, toggled: false, fitW: false, fitH: true, c: h.win.c, max: h.win.menuMax };
+    diag(`menu pan armed ${h.win.title} pan=${chromeDrag.base}/${chromeDrag.max}`);
+    return "drag";
+  }
   if (h.kind === "drag") {
     const p = layerPos[h.win.key];
     chromeDrag = { key: h.win.key, dx: px - p.x, dy: py - p.y, startX: px, startY: py, moved: false,
@@ -1847,6 +1872,7 @@ function dragMove(ev) {
   if (Math.hypot(px - chromeDrag.startX, py - chromeDrag.startY) > 6) chromeDrag.moved = true;
   if (!chromeDrag.moved) return true;
   const mx = chromeDrag.fitW ? 0 : Math.round(px - chromeDrag.startX), my = chromeDrag.fitH ? 0 : Math.round(py - chromeDrag.startY);
+  if (chromeDrag.pan === "menu") { menuPan[chromeDrag.key] = Math.round(Math.max(0, Math.min(chromeDrag.max, chromeDrag.base - (px - chromeDrag.startX) / chromeDrag.c))); return true; }
   if (chromeDrag.pan === "T") layerPos[chromeDrag.key] = { dx: chromeDrag.base.dx + mx, dy: chromeDrag.base.dy + my };
   else if (chromeDrag.pan === "O") {
     const b = chromeDrag.bounds;
