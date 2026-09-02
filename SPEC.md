@@ -988,3 +988,12 @@ so dialog layouts (MS Sans Serif) stay as they are. Not done yet. Also: two-fing
 report (`PVK`) for the soft keyboard, per-app maximise height (`[PVMon] MaxHeight.PBRUSH=480`),
 owned windows parked in the owner's column, fixed guest layout in both phone orientations, and the
 dev server now listens on the LAN (`http://<mac-ip>:8311/solitaire`) for real-device testing.
+
+**2026-09-01 (late night) — thumb-sized chrome, natively.** Correction to the entry above: the
+driver's RC carries two bitmap sets, `OBM_*` (used at 120 dpi, files in `RES31/`) and `OBM_96_*`
+(`RES96/`); the first attempt scaled the wrong one. With `RES31X2/` (2x, `tools/scalebmp.py`) built
+in (`tools/build-driver.sh res=192`) and the system font replaced by MS Sans Serif 18 pt / 29 px
+wrapped as `PVSYS.FON` (`tools/mkfon.py`, SYSTEM.INI `fonts.fon`), SM_CYCAPTION went from 28 to
+54 and menus from ~26 to ~52 guest pixels: on a 375-wide phone the caption boxes are ~45 CSS px,
+Apple's 44 pt. Everything is Windows' own drawing. Costs: Program Manager's menu wraps to two rows
+at 448 columns (Help lands on the second row); icon titles keep their own smaller font.

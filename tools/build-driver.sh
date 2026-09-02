@@ -20,7 +20,13 @@ rsync -a --delete --exclude OBJ "$REPO/guest/driver/port/" "$ROOT/DRV/"
 # captions, scroll bars and check boxes from these, so this is how the chrome gets thumb-sized
 # with nothing but Windows' own pixels. config.bin/fonts.bin stay the RES96 ones.
 RESSET=96; for a in "$@"; do case $a in res=*) RESSET=${a#*=};; esac; done
-if [ "$RESSET" != 96 ]; then cp "$REPO/guest/driver/port/RES$RESSET/"*.BMP "$ROOT/DRV/RES96/"; echo "using RES$RESSET bitmaps"; fi
+# The RC carries two sets: OBM_* (used at 120 dpi) are the bitmaps in RES31/, OBM_96_* (96 dpi) in
+# RES96/. res=192 swaps both for their 2x versions (RES31X2/, RES192/).
+if [ "$RESSET" != 96 ]; then
+  cp "$REPO/guest/driver/port/RES$RESSET/"*.BMP "$ROOT/DRV/RES96/"
+  [ -d "$REPO/guest/driver/port/RES31X2" ] && cp "$REPO/guest/driver/port/RES31X2/"*.BMP "$ROOT/DRV/RES31/"
+  echo "using RES$RESSET / RES31X2 bitmaps" >&2
+fi
 find "$ROOT/DRV" -type f ! -path '*/OBJ/*' \( -iname '*.asm' -o -iname '*.inc' -o -iname '*.mac' -o -iname '*.blt' -o -iname '*.var' \
   -o -iname '*.mak' -o -iname 'makefile' -o -iname '*.def' -o -iname '*.rc' -o -iname '*.rcv' -o -iname '*.h' -o -iname 'lnkcmd*' -o -iname '*.pub' \) \
   -exec perl -pi -e 's/\r?\n/\r\n/' {} +
