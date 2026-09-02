@@ -828,17 +828,31 @@ function installTouch() {
   const queue = fn => (chain = chain.then(fn).catch(() => {}));
   let pressTimer = 0, longFired = false, dragging = false, consumed = null, pressActive = false;
 
+  /* One press = one pipeline: place the pointer, (maybe) press, follow the finger, release.
+     Moves are never queued one by one: a slow guest (a phone runs the emulator at a fraction of
+     desktop speed) would fall seconds behind a 0.4 s drag and the next gesture would queue up
+     behind it. Instead the latest finger position is kept and a single loop steers towards it,
+     one guest round-trip at a time; the release waits for the loop to catch up. */
+  let latest = null, followLoop = null;
+  const follow = async () => {
+    let steered = null;
+    while (pressActive || (latest && (!steered || steered.x !== latest.x || steered.y !== latest.y))) {
+      const t = latest;
+      if (t && (!steered || steered.x !== t.x || steered.y !== t.y)) { await steerTo(t); steered = t; }
+      else await sleep(16);
+      if (!pressActive && steered && latest && steered.x === latest.x && steered.y === latest.y) break;
+    }
+  };
+
   const down = ev => {
     window.pvPhase = "down";
     consumed = pressStart(ev);
     if (consumed) { diag(`down consumed=${consumed}`); return; }
     const pt = canvasPoint(ev, true);
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}`); }
-    longFired = false; dragging = false; pressActive = true;
+    longFired = false; dragging = false; pressActive = true; latest = null;
     queue(async () => {
       await placePointer(pt);
-      // The finger may already be up by the time the pointer has landed (a quick tap): arming the
-      // long-press timer then would fire a right-click after every tap, which is what happened.
       if (!pressActive || dragging) return;
       pressTimer = setTimeout(() => queue(async () => {     // long press is the right button
         if (!pressActive || dragging) return;
@@ -850,14 +864,17 @@ function installTouch() {
   const move = ev => {
     window.pvPhase = "move";
     if (dragMove(ev)) return;
-    if (consumed) return;
+    if (consumed || longFired) return;
     clearTimeout(pressTimer);
-    const pt = canvasPoint(ev);
-    queue(async () => {
-      if (longFired) return;
-      if (!dragging) { dragging = true; button(true, false); await sleep(30); }
-      await steerTo(pt);
-    });
+    latest = canvasPoint(ev);
+    if (!dragging) {
+      dragging = true;
+      queue(async () => {                       // after the pointer has been placed: press, then follow
+        button(true, false); await sleep(30);
+        followLoop = follow();
+        await followLoop;
+      });
+    }
   };
   const up = () => {
     window.pvPhase = "up";
@@ -866,22 +883,10 @@ function installTouch() {
     clearTimeout(pressTimer);
     if (consumed) { consumed = null; chromeDrag = null; return; }
     queue(async () => {
-      if (dragging) { button(false, false); dragging = false; return; }
+      if (dragging) { button(false, false); dragging = false; diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
       if (longFired) { longFired = false; return; }
       button(true, false); await sleep(60); button(false, false);   // tap is a left click
     });
-  };
-
-  // Two fingers scroll whatever is under them: each SCROLL_STEP of travel is a line message to
-  // the guest window under the midpoint, so lists, documents and pictures scroll natively.
-  const SCROLL_STEP = 24;
-  let twoFinger = null;
-  const mid = t => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
-  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-  const layerUnder = m => {
-    const r = c.getBoundingClientRect();
-    const h = hitTest(m.x - r.left, m.y - r.top);
-    return h.win && !h.win.transient && !h.win.shellCopy ? h.win : null;
   };
 
   c.addEventListener("touchstart", ev => {
