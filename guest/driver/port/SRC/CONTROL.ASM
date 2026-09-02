@@ -124,6 +124,7 @@ COLOR_TBL_SIZE	equ	100H
 ; must stay positive: Escape()'s nEscape is a signed int in Win16.
 PV_QUERY_MODE	equ	4A00h		;out: cur w,h, host w,h, dpi, generation (6 words)
 PV_REMODE	equ	4A01h		;re-mode the adapter to the host's request, live
+PV_SETMODE	equ	4A02h		;in: two words, an explicit size the guest wants
 
 PV_DISPI_INDEX	equ	01CEh
 PV_DISPI_DATA	equ	01CFh
@@ -164,6 +165,8 @@ WriteAux <'Ctrl'>
 	je	pv_do_query
 	cmp	si,PV_REMODE
 	je	pv_do_remode
+	cmp	si,PV_SETMODE
+	je	pv_do_setmode
 	jmp	short pv_not_ours
 
 pv_do_query:
@@ -201,6 +204,15 @@ pv_do_query:
 
 pv_do_remode:
 	call	pv_remode		;ax = 1 if the mode changed
+	jmp	pv_escape_done
+
+pv_do_setmode:
+	les	di,lp_in_data
+	mov	bx,es:[di]		;width the guest is asking for
+	mov	cx,es:[di + 2]		;height
+	and	bx,not 7
+	and	cx,not 1
+	call	pv_apply_mode
 	jmp	pv_escape_done
 
 pv_not_ours:
@@ -334,7 +346,6 @@ pv_remode	PROC	NEAR
 	push	bx
 	push	cx
 	push	dx
-	push	es
 
 	mov	dx,PV_DISPI_INDEX	;what does the host want?
 	mov	ax,PV_R_HOST_XRES
@@ -350,21 +361,45 @@ pv_remode	PROC	NEAR
 	in	ax,dx
 	and	ax,not 1
 	mov	cx,ax
+	call	pv_apply_mode
+	pop	dx
+	pop	cx
+	pop	bx
+	ret
+pv_remode	ENDP
+
+;-----------------------------------------------------------------------;
+; pv_apply_mode
+;
+;	BX = width, CX = height. Programs the adapter and updates the driver's
+;	state and GDI's copy of the screen BITMAP. Returns AX = 1 if it changed.
+;
+;	Split out from pv_remode so the guest can ask for a size of its own
+;	through PV_SETMODE: the companion utility widens the screen while a
+;	dialog too big for a phone-sized desktop is on screen, and puts it back
+;	afterwards.
+;-----------------------------------------------------------------------;
+
+pv_apply_mode	PROC	NEAR
+	push	bx
+	push	cx
+	push	dx
+	push	es
 
 	cmp	bx,320			;refuse anything the framebuffer cannot hold
-	jb	pv_remode_no
+	jb	pv_apply_no
 	cmp	bx,PV_PITCH
-	ja	pv_remode_no
+	ja	pv_apply_no
 	cmp	cx,200
-	jb	pv_remode_no
+	jb	pv_apply_no
 	cmp	cx,1600
-	ja	pv_remode_no
+	ja	pv_apply_no
 	cmp	bx,VScreen_Width	;already there?
-	jne	pv_remode_go
+	jne	pv_apply_go
 	cmp	cx,VScreen_Height
-	je	pv_remode_no
+	je	pv_apply_no
 
-pv_remode_go:
+pv_apply_go:
 	mov	VScreen_Width,bx
 	mov	VScreen_Height,cx
 	call	pv_program_adapter
@@ -392,17 +427,17 @@ pv_remode_go:
 	mov	cursor_ydraw,ax
 @@:
 	mov	ax,1
-	jmp	short pv_remode_done
+	jmp	short pv_apply_done
 
-pv_remode_no:
+pv_apply_no:
 	xor	ax,ax
-pv_remode_done:
+pv_apply_done:
 	pop	es
 	pop	dx
 	pop	cx
 	pop	bx
 	ret
-pv_remode	ENDP
+pv_apply_mode	ENDP
 
 assumes ds,nothing
 

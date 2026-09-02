@@ -13,7 +13,13 @@ const IMAGE = params.get("hda") || "../image/work-live.img";
  * The emulated mode tracks the viewport rather than snapping to fixed breakpoints. Windows 3.x
  * needs room, so on small screens the emulated pixel scale shrinks instead of the mode.
  */
+/* Windows needs roughly 640 columns for its fixed-size dialogs, but holding the emulated width
+   there on a phone shrinks every emulated pixel to well under a point, which is what made the
+   screen unreadable. The desktop itself is fine much smaller, so phones get a lower resolution,
+   which makes icons, hit areas and text all physically larger with the whole screen still
+   visible; PVMON widens the screen on its own for the moment a dialog is actually up. */
 const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
+const PHONE_W = 448;              // comfort width on a narrow screen
 
 function viewport() {
   const vv = window.visualViewport;
@@ -31,11 +37,12 @@ const ZOOM_MIN = 0.5, ZOOM_MAX = 6;
 
 function computeMode() {
   const [vw, vh] = viewport();
-  let zoom = Math.max(1, MIN_W / vw, MIN_H / vh);
-  zoom = Math.min(zoom, MAX_W / vw, MAX_H / vh);
-  const w = Math.max(MIN_W, Math.min(MAX_W, Math.floor(vw * zoom / 8) * 8));
-  const h = Math.max(MIN_H, Math.min(MAX_H, Math.floor(vh * zoom / 2) * 2));
-  return { w, h, zoom };
+  const floorW = vw < 600 ? PHONE_W : MIN_W;      // a phone gets fewer, larger pixels
+  let scale = Math.max(1, floorW / vw, MIN_H / vh);
+  scale = Math.min(scale, MAX_W / vw, MAX_H / vh);
+  const w = Math.max(floorW, Math.min(MAX_W, Math.floor(vw * scale / 8) * 8));
+  const h = Math.max(MIN_H, Math.min(MAX_H, Math.floor(vh * scale / 2) * 2));
+  return { w, h, zoom: scale };
 }
 
 const initial = computeMode();

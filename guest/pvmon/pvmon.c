@@ -31,6 +31,15 @@
 /* Private display-driver escapes (see guest/driver/port/SRC/CONTROL.ASM) */
 #define PV_QUERY_MODE 0x4A00   /* out: cur w,h, host w,h, dpi, generation */
 #define PV_REMODE     0x4A01   /* re-mode the adapter live; 1 if the mode changed */
+#define PV_SETMODE    0x4A02   /* in: two words, an explicit size the guest wants */
+
+/* Windows 3.x dialogs are fixed-size templates laid out for a 640-column screen, so a phone-sized
+   desktop cuts their buttons off: the common File Open dialog needs about 620 pixels at 120 dpi.
+   That is what stops the resolution simply being lowered to make everything bigger. Since a
+   re-mode now costs about a second and nothing else, the screen can instead be widened only while
+   a dialog is actually up, and put back afterwards. */
+#define DIALOG_MIN_W  640
+#define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
 #define POLL_MS       250
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -154,7 +163,11 @@ static void arrange_shell(void)
 static unsigned g_lastGen;
 static unsigned g_wantW, g_wantH, g_stable;
 static BOOL g_restarting;
-static BOOL g_live;            /* WIN.INI [PVMon] Live=1 -> try the Phase 3 live re-mode */
+static BOOL g_live;
+static BOOL g_dlgWiden;            /* WIN.INI [PVMon] DialogWiden */
+static BOOL g_widened;             /* screen is currently widened for a dialog */
+static unsigned g_hostW, g_hostH;  /* the size the host actually asked for */
+static int g_noDialog;            /* WIN.INI [PVMon] Live=1 -> try the Phase 3 live re-mode */
 static unsigned g_doneW, g_doneH;  /* mode the live path has already applied */
 
 /* ------------------------------------------------------------------ Phase 3 step 3b
@@ -423,6 +436,31 @@ static void patch_user_metrics(unsigned w, unsigned h)
    The driver updates its own surface state and GDI's copy of the screen BITMAP. GDI's
    cached device caps and USER's screen metrics are still the old size at this point, so
    the shell is expected to keep drawing at the old geometry until 3b/3c land. */
+/* Is a standard dialog on screen? Its window class is the one USER registers for dialogs. */
+static BOOL g_setW;                /* next live_remode uses an explicit size */
+static BOOL g_sawDialog;
+BOOL CALLBACK __export FindDialog(HWND hwnd, LPARAM lParam)
+{
+    char cls[16];
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    if (GetClassName(hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0) {
+        g_sawDialog = TRUE;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL dialog_open(void)
+{
+    FARPROC proc;
+    g_sawDialog = FALSE;
+    proc = MakeProcInstance((FARPROC)FindDialog, g_hInst);
+    if (!proc) return FALSE;
+    EnumWindows((WNDENUMPROC)proc, 0L);
+    FreeProcInstance(proc);
+    return g_sawDialog;
+}
+
 static BOOL live_remode(unsigned w, unsigned h)
 {
     HDC hdc;
@@ -437,7 +475,13 @@ static BOOL live_remode(unsigned w, unsigned h)
     g_prevW = GetSystemMetrics(SM_CXSCREEN);
     g_prevH = GetSystemMetrics(SM_CYSCREEN);
     ShowCursor(FALSE);
-    r = Escape(hdc, PV_REMODE, 0, NULL, NULL);
+    if (g_setW) {                            /* an explicit size, not the host's request */
+        WORD want[2];
+        want[0] = (WORD)w; want[1] = (WORD)h;
+        r = Escape(hdc, PV_SETMODE, sizeof(want), (LPCSTR)(LPSTR)want, NULL);
+    } else {
+        r = Escape(hdc, PV_REMODE, 0, NULL, NULL);
+    }
     ReleaseDC(NULL, hdc);
     dbgnum("pvmon: live re-mode returned", (unsigned)r, 0);
     if (r <= 0) { ShowCursor(TRUE); return FALSE; }
@@ -461,6 +505,33 @@ static BOOL adapter_present(void)
     return rd(R_DEBUG) == 0x5056;
 }
 
+/* Widen for a dialog that will not fit, and go back once it is gone. */
+static void check_dialog(void)
+{
+    unsigned curW = GetSystemMetrics(SM_CXSCREEN), curH = GetSystemMetrics(SM_CYSCREEN);
+    if (dialog_open()) {
+        g_noDialog = 0;
+        if (!g_widened && curW < DIALOG_MIN_W && curH) {
+            unsigned w = DIALOG_MIN_W;
+            unsigned h = (unsigned)((DWORD)curH * DIALOG_MIN_W / curW) & ~1u;
+            if (h > 1600) h = 1600;
+            g_setW = TRUE;
+            if (live_remode(w, h)) { g_widened = TRUE; dbgnum("pvmon: widened for a dialog", w, h); }
+            g_setW = FALSE;
+        }
+        return;
+    }
+    if (!g_widened) return;
+    if (++g_noDialog < UNDIALOG_POLLS) return;      /* let a closing dialog settle */
+    g_setW = TRUE;
+    if (live_remode(g_hostW, g_hostH)) {
+        g_widened = FALSE;
+        dbgnum("pvmon: back to", g_hostW, g_hostH);
+    }
+    g_setW = FALSE;
+    g_noDialog = 0;
+}
+
 static void poll(HWND hwnd)
 {
     unsigned gen, w, h, curW, curH;
@@ -469,6 +540,9 @@ static void poll(HWND hwnd)
     w = rd(R_HOST_XRES) & ~7u;
     h = rd(R_HOST_YRES) & ~1u;
     if (w < 320 || h < 200) return;
+    g_hostW = w; g_hostH = h;
+    if (g_live && g_dlgWiden) check_dialog();
+    if (g_widened) return;                    /* leave the dialog room alone while it is up */
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
@@ -502,6 +576,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         HDC hdc; TEXTMETRIC tm; char buf[80];
         g_lastGen = rd(R_GEN);
         g_live = GetProfileInt("PVMon", "Live", 0) != 0;
+        g_dlgWiden = GetProfileInt("PVMon", "DialogWiden", 1) != 0;
         if (g_live) { dbg("pvmon: live re-mode enabled"); find_user_state(); }
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);

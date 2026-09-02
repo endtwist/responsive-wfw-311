@@ -772,7 +772,7 @@ With it patched, Program Manager fills a 640x1180 portrait screen top to bottom,
 landscape one, across live re-modes in both directions. Stretch tier 1 is now genuinely complete
 rather than complete-except-for-height.
 
-**2026-09-01 (night) — legibility on phones: magnification with panning.**
+**2026-09-01 (night) — legibility on phones, first attempt (superseded by the next entry).**
 Reported from an actual iPhone: everything is too small to read. The cause was the mode rule in
 2.8. Holding the emulated width at 640 so Windows stays usable means that on a 375-point phone
 every emulated pixel is scaled *down* to 0.59 of a point, and 640 columns of 1993 user interface
@@ -789,3 +789,43 @@ page now treats magnification as a first-class control rather than fitting by de
 - Touch pointing stays pixel-exact while magnified and panned: a tap at guest (300,260) with the
   view scrolled by (120,200) lands at exactly (300,260), because the mapping is taken from the
   canvas's rectangle, which already accounts for zoom and scroll.
+
+**2026-09-01 (night) — legibility on phones, properly: fewer pixels, and widen only for dialogs.**
+The magnification above was a workaround, and shipping it as the phone default was wrong: it
+lands you zoomed in on a scrolling page. It also came with the claim that you cannot have both a
+readable screen and the whole desktop, which was not true, just unmeasured.
+
+**What actually sets the floor.** Everything in this interface is sized in pixels, so the way to
+make icons, hit areas and text all larger is to run *fewer* pixels, not to magnify. The limit is
+that Windows 3.x dialogs are fixed-size templates. Measured at 120 dpi on a 375-point viewport:
+
+| Emulated width | Run dialog | File Open dialog |
+|---|---|---|
+| 400 | buttons cut off | cut off |
+| 480 | buttons clipped | cut off |
+| 560 | fits | cut off (needs ~620) |
+| 640 | fits | fits |
+
+Dropping to 96 dpi shrinks dialogs by a fifth but shrinks the text with them, so the readable
+text size at the resulting floor is about the same. DPI trades icon size against text size; it
+does not move the constraint.
+
+**The fix.** A re-mode now costs about a second and nothing else, so the screen does not have to
+be sized for the worst case all the time. Phones run at **448 wide** where everything is 43%
+larger than at 640 and the whole desktop is visible with no scrolling, and `PVMON` widens the
+screen to 640 for exactly as long as a dialog is on it:
+
+- The driver gained `PV_SETMODE` (0x4A02), which takes an explicit size, so the guest can ask for
+  a mode rather than only accepting the host's. `pv_remode` and the new escape share one
+  `pv_apply_mode`.
+- `PVMON` polls for a visible window of class `#32770`, widens when one appears, and goes back
+  four polls after the last one closes, so a closing dialog does not cause a flicker.
+- Verified end to end on a phone viewport: 448x970 normally, 640x1384 while the Run dialog is up
+  with all four buttons visible, and 448x970 again afterwards.
+
+Magnification stays as a control (pinch, two-finger pan, and buttons), but the default on every
+device is now fit-to-screen. Off by default via `WIN.INI [PVMon] DialogWiden=0` if it is not
+wanted.
+
+Also fixed: `zoom` was declared after the code path that first calls `fitCanvas`, so a real
+browser hit a temporal-dead-zone `ReferenceError` on load. It is now declared before first use.
