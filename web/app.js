@@ -474,7 +474,10 @@ document.addEventListener("focusout", () => setTimeout(updateKeybar, 50));
    end of a tap, by which time PVMON has usually reported the new focus. */
 let wantKeyboard = false, keyboardHeld = false;
 function keyboardUp() {
-  if (params.get("keybar") === "1") return true;                 // preview the bar on a desktop const k = $("kbd"); return !!(k && document.activeElement === k && window.visualViewport && window.visualViewport.height < window.innerHeight - 100); }
+  if (params.get("keybar") === "1") return true;                 // preview the bar on a desktop
+  const k = $("kbd");
+  return !!(k && document.activeElement === k && window.visualViewport && window.visualViewport.height < window.innerHeight - 100);
+}
 /* With the keyboard up, the layer that has the focus is shifted so it sits above it. */
 function keyboardShift() {
   if (!keyboardUp()) return 0;
