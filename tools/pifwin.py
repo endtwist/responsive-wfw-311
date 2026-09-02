@@ -16,6 +16,9 @@ while p + 22 <= len(d):
         # clear fFullScreen, set fALTENTERdis: no way back to full screen from inside the box
         new = (flags & ~0x8) | 0x100
         struct.pack_into("<I", d, off + 16, new)
+        # low priorities: a DOS session at the default foreground priority (100) starves Windows,
+        # and on a phone the emulator is slow to begin with; 20/10 keeps the desktop responsive
+        struct.pack_into("<HH", d, off + 4, 20, 10)
         print(f"{sys.argv[2]}: 386 flags {flags:#x} -> {new:#x} (windowed, Alt+Enter disabled)")
     if nxt == 0xFFFF: break
     p = nxt
