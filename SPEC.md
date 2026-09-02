@@ -1501,3 +1501,19 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   in 3.1 and there is no per-menu font, so the only native lever is a narrower system font (which
   would shrink every caption too). Left as is.
 - `node tools/tour.mjs --apps PRINTMAN,WINFILE`: pass=12 fail=0 (PRINTMAN rect 640,0,352,225).
+
+### 2026-09-02 — oversized popups and dialogs pan
+- Win3.1 never scrolls a popup menu, a drop-down or the switcher, and a dialog cannot scroll either;
+  on a phone whatever does not fit was simply clipped. A `T` layer, an owned dialog, or a dialog
+  drawn coincident with its owner that is wider or taller than the viewport is now panned by one
+  finger anywhere on it (`pressStart` -> `chromeDrag.pan`), clamped so the clipped edge can be
+  brought exactly into view and no further; an axis that fits does not move; a finger that does not
+  travel is still a click at the pixel under it (`chromeDrag.guest`). Coincident dialogs pan their
+  *owner* layer (bounded by the dialog's edges) so the dialog and its copy in the owner's capture
+  stay one image. Initial placement: anchored where it popped up, shifted up/left so the whole
+  popup fits when it can; when it cannot, it starts at its top/left edge. Trace: `pan start …`.
+- Geometry note: at chrome scale `c <= min(vw/352, vh/480)` a menu up to 480 guest rows always
+  fits, so the case that occurs on the phone is the wide coincident dialog (Notepad's Open box,
+  604 guest px -> 643 host px on a 375 px phone) and combo drop-downs longer than the column.
+  Pane (375x812): Open box x 1 -> -268 (= 375-643, exact clamp) and back to 0, owner moved with it,
+  tap on it clicked. File Manager's View menu at 375x400 shifts up to y=43 so its 357 px fit.
