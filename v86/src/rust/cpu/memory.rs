@@ -14,9 +14,10 @@ mod ext {
 
 use crate::cpu::apic;
 use crate::cpu::cpu::{
-    handle_irqs, reg128, APIC_MEM_ADDRESS, APIC_MEM_SIZE, IOAPIC_MEM_ADDRESS, IOAPIC_MEM_SIZE,
+    handle_irqs, reg128, APIC_MEM_ADDRESS, APIC_MEM_SIZE, FLAG_VM, IOAPIC_MEM_ADDRESS,
+    IOAPIC_MEM_SIZE,
 };
-use crate::cpu::global_pointers::memory_size;
+use crate::cpu::global_pointers::{cpl, cr, flags, memory_size, protected_mode};
 use crate::cpu::ioapic;
 use crate::cpu::vga;
 use crate::jit;
@@ -263,10 +264,92 @@ pub unsafe fn memcpy_into_svga_lfb(src_addr: u32, dst_addr: u32, count: u32) {
     )
 }
 
+// responsive-wfw311: fast path for the paravirtual adapter's 256-colour planar ("unchained")
+// A000 window, the mode the PVDISP.DRV display driver draws in. vga.js mirrors the relevant VGA
+// state here (pv_planar_set) whenever it changes, and only for the common case: write mode 0, no
+// rotate, ALU copy, set/reset off, bit mask 0xFF, with or without the V7 fore-latch fill. Then a
+// CPU byte write to the window becomes four plane-byte stores done here instead of a call into
+// JS (vga_memory_write -> planar_write_at), which cost a wasm->JS transition per pixel group.
+// Everything else (other write modes, reads, the hypervisor's text-store accesses) still goes to
+// JS, whose emulation stays the reference.
+#[allow(non_upper_case_globals)]
+static mut pv_planar_enabled: u32 = 0;
+#[allow(non_upper_case_globals)]
+static mut pv_planar_bank: u32 = 0;
+#[allow(non_upper_case_globals)]
+static mut pv_planar_mask: u32 = 0xF;
+#[allow(non_upper_case_globals)]
+static mut pv_planar_fore: u32 = 0;
+#[allow(non_upper_case_globals)]
+static mut pv_planar_fore_dword: u32 = 0;
+#[allow(non_upper_case_globals)]
+static mut pv_planar_count: u32 = 0;
+
+#[no_mangle]
+pub fn pv_planar_set(enabled: u32, bank_offset: u32, mask: u32, fore: u32, fore_dword: u32) {
+    unsafe {
+        pv_planar_enabled = enabled;
+        pv_planar_bank = bank_offset & !0x3FFFF;
+        pv_planar_mask = mask & 0xF;
+        pv_planar_fore = fore;
+        pv_planar_fore_dword = fore_dword;
+    }
+}
+
+/// number of A000 byte writes taken by the fast path (profiling)
+#[no_mangle]
+pub fn pv_planar_stat() -> u32 { unsafe { pv_planar_count } }
+
+#[inline]
+unsafe fn pv_planar_fast(addr: u32) -> bool {
+    pv_planar_enabled != 0
+        && addr >= 0xA0000
+        && addr < 0xC0000
+        // the same test as vga.js pv_hypervisor_access: ring 0 or V86 mode with paging on is
+        // WIN386's VDD or a DOS VM, whose accesses go to the text store in JS
+        && !(*protected_mode
+            && (*cr & 0x80000000u32 as i32) != 0
+            && (*cpl == 0 || (*flags & FLAG_VM) != 0))
+}
+
+#[inline]
+unsafe fn pv_planar_write(off: u32, value: i32) {
+    let base = pv_planar_bank + off * 4;
+    if base + 3 >= vga_memory_size {
+        return;
+    }
+    pv_planar_count += 1;
+    let dword = if pv_planar_fore != 0 {
+        pv_planar_fore_dword
+    }
+    else {
+        let v = (value & 0xFF) as u32;
+        v | v << 8 | v << 16 | v << 24
+    };
+    let p = vga_mem8.offset(base as isize);
+    let mask = pv_planar_mask;
+    if mask & 1 != 0 {
+        *p = dword as u8;
+    }
+    if mask & 2 != 0 {
+        *p.offset(1) = (dword >> 8) as u8;
+    }
+    if mask & 4 != 0 {
+        *p.offset(2) = (dword >> 16) as u8;
+    }
+    if mask & 8 != 0 {
+        *p.offset(3) = (dword >> 24) as u8;
+    }
+    vga::mark_dirty(VGA_LFB_ADDRESS + base);
+}
+
 pub unsafe fn mmap_write8(addr: u32, value: i32) {
     if in_svga_lfb(addr) {
         vga::mark_dirty(addr);
         *vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) = value as u8
+    }
+    else if pv_planar_fast(addr) {
+        pv_planar_write(addr - 0xA0000, value)
     }
     else {
         ext::mmap_write8(addr, value)
@@ -280,6 +363,12 @@ pub unsafe fn mmap_write16(addr: u32, value: i32) {
             value as u16,
         )
     }
+    else if pv_planar_fast(addr) {
+        // the window is byte-addressed pixel groups; a word write is two byte writes (cpu.js
+        // mmap_write16 splits the same way)
+        pv_planar_write(addr - 0xA0000, value & 0xFF);
+        pv_planar_write(addr + 1 - 0xA0000, value >> 8 & 0xFF)
+    }
     else {
         ext::mmap_write16(addr, value)
     }
@@ -291,6 +380,11 @@ pub unsafe fn mmap_write32(addr: u32, value: i32) {
             vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *mut i32,
             value,
         )
+    }
+    else if pv_planar_fast(addr) {
+        for i in 0..4 {
+            pv_planar_write(addr + i - 0xA0000, value >> (8 * i) & 0xFF);
+        }
     }
     else if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
         apic::write32(addr - APIC_MEM_ADDRESS, value as u32);

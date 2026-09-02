@@ -809,11 +809,36 @@ pub unsafe fn iret(is_16: bool) {
     handle_irqs();
 }
 
+// responsive-wfw311: exception statistics for the redraw profiler (tools/bench): index 0..31 counts
+// faults delivered with an error code (#GP, #PF, #SS, #NP, #TS) by vector, 32 counts every other
+// non-software interrupt (hardware IRQs, #UD, #DE ...).
+#[allow(non_upper_case_globals)]
+pub static mut pv_exc_count: [u32; 33] = [0; 33];
+#[no_mangle]
+pub fn pv_exc_stat(i: u32) -> u32 {
+    unsafe {
+        if i < 33 {
+            pv_exc_count[i as usize]
+        }
+        else {
+            0
+        }
+    }
+}
+
 pub unsafe fn call_interrupt_vector(
     interrupt_nr: i32,
     is_software_int: bool,
     error_code: Option<i32>,
 ) {
+    if !is_software_int {
+        if error_code.is_some() && interrupt_nr < 32 {
+            pv_exc_count[interrupt_nr as usize] += 1;
+        }
+        else {
+            pv_exc_count[32] += 1;
+        }
+    }
     if *protected_mode {
         if vm86_mode() && *cr.offset(4) & CR4_VME != 0 {
             panic!("Unimplemented: VME");

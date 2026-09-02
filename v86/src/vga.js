@@ -415,7 +415,10 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     }, this);
     bus.register("pv-set-dpi", function(dpi) { this.pv_host_dpi = dpi | 0; }, this);
 
-    io.register_write(0x1CE, this, undefined, this.port1CE_write);
+    // PV: a 32-bit write to 0x1CE is an atomic index+data pair (index in the low word, data in the
+    // high word) that leaves the index register alone, so interrupt-time code (MoveCursor) and the
+    // bank switches in blits need no cli/sti around index/data sequences.
+    io.register_write(0x1CE, this, undefined, this.port1CE_write, this.port1CE_write32);
     io.register_read(0x1CE, this, undefined, this.port1CE_read);
 
     io.register_write(0x1CF, this, undefined, this.port1CF_write);
@@ -424,6 +427,13 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
 
     const vga_offset = cpu.svga_allocate_memory(this.vga_memory_size) >>> 0;
     this.svga_memory = view(Uint8Array, cpu.wasm_memory, vga_offset, this.vga_memory_size);
+    // PV: the view() above is a Proxy that allocates a typed array per element access (about 250 ns
+    // each); the unchained planar path touches four plane bytes per pixel write, so it uses a plain
+    // Uint8Array over the same bytes, re-created only when the wasm memory has grown (svga_mem()).
+    this.svga_memory_offset = vga_offset;
+    this.svga_mem_plain = null;
+    this.pv_planar_disabled = false;  // set to keep every A000 write in JS (A/B testing)
+    this.pv_planar_sync();
 
     this.diff_addr_min = this.vga_memory_size;
     this.diff_addr_max = 0;
@@ -640,6 +650,7 @@ VGAScreen.prototype.set_state = function(state)
         this.update_cursor();
     }
     this.complete_redraw();
+    this.pv_planar_sync();
 };
 
 VGAScreen.prototype.vga_memory_read = function(addr)
@@ -797,7 +808,35 @@ VGAScreen.prototype.vga_memory_write = function(addr, value)
  */
 VGAScreen.prototype.svga_unchained_read = function(off)
 {
-    return this.planar_read_at(this.svga_memory, (this.svga_read_bank_offset & ~0x3FFFF) + off * 4);
+    return this.planar_read_at(this.svga_mem(), (this.svga_read_bank_offset & ~0x3FFFF) + off * 4);
+};
+
+/**
+ * PV: tell the rust side (memory.rs pv_planar_*) whether A000 byte writes may be handled there,
+ * and with what bank, map mask and fore-latch data. Only the common planar case qualifies:
+ * 8 bpp SVGA, chain-4 off, write mode 0, no rotate, ALU copy, set/reset off, bit mask 0xFF;
+ * anything else keeps coming to vga_memory_write. Called from every port write that can change
+ * one of these, and after a state restore.
+ */
+VGAScreen.prototype.pv_planar_sync = function()
+{
+    if(!this.cpu.pv_planar_set) return;
+    const fast = this.svga_enabled && this.svga_bpp === 8 && !(this.sequencer_memory_mode & 0x8) &&
+        (this.planar_mode & 3) === 0 && this.planar_rotate_reg === 0 && this.planar_setreset_enable === 0 &&
+        this.planar_bitmap === 0xFF && !this.pv_planar_disabled;
+    this.cpu.pv_planar_set(fast ? 1 : 0, this.svga_bank_offset >>> 0, this.plane_write_bm & 0xF,
+        (this.v7_seq[0xFE] & 0x08) ? 1 : 0, this.v7_fore_latch_dword() >>> 0);
+};
+
+/** Plain (non-Proxy) Uint8Array over the SVGA frame buffer, refreshed after wasm memory growth. */
+VGAScreen.prototype.svga_mem = function()
+{
+    let m = this.svga_mem_plain;
+    if(m === null || m.buffer !== this.cpu.wasm_memory.buffer)
+    {
+        m = this.svga_mem_plain = new Uint8Array(this.cpu.wasm_memory.buffer, this.svga_memory_offset, this.vga_memory_size);
+    }
+    return m;
 };
 
 /**
@@ -859,10 +898,10 @@ VGAScreen.prototype.v7_fore_latch_dword = function()
 VGAScreen.prototype.svga_unchained_write = function(off, value)
 {
     const base = (this.svga_bank_offset & ~0x3FFFF) + off * 4;
-    if(base + 3 >= this.svga_memory.length) return;
+    if(base + 3 >= this.vga_memory_size) return;
     if(base < this.js_dirty_min) this.js_dirty_min = base;
     if(base + 3 > this.js_dirty_max) this.js_dirty_max = base + 3;
-    this.planar_write_at(this.svga_memory, base, value);
+    this.planar_write_at(this.svga_mem(), base, value);
 };
 
 /** Planar (chain-4 off) write of one CPU byte through the write-mode pipeline to the four plane bytes at `base` of `mem`. */
@@ -1671,6 +1710,7 @@ VGAScreen.prototype.port3C0_write = function(value)
                         // Commit the deferred VBE disable (see port1CF_write case 4)
                         this.svga_enabled = false;
                         this.svga_bank_offset = 0; this.svga_read_bank_offset = 0;
+                        this.pv_planar_sync();
                     }
 
                     const is_graphical = (value & 0x1) !== 0;
@@ -1845,6 +1885,7 @@ VGAScreen.prototype.port3C5_write = function(value)
             }
             dbg_log("3C5 / sequencer write " + h(this.sequencer_index) + ": " + h(value), LOG_VGA);
     }
+    this.pv_planar_sync();
 };
 
 VGAScreen.prototype.port3C5_read = function()
@@ -2058,6 +2099,7 @@ VGAScreen.prototype.port3CF_write = function(value)
         default:
             dbg_log("3CF / graphics write " + h(this.graphics_index) + ": " + h(value), LOG_VGA);
     }
+    this.pv_planar_sync();
 };
 
 VGAScreen.prototype.port3CF_read = function()
@@ -2405,6 +2447,15 @@ VGAScreen.prototype.port1CE_write = function(value)
     this.dispi_index = value;
 };
 
+/** PV: atomic DISPI write, index in bits 0-15 and data in bits 16-31; the index register is not changed. */
+VGAScreen.prototype.port1CE_write32 = function(value)
+{
+    const saved = this.dispi_index;
+    this.dispi_index = value & 0xFFFF;
+    this.port1CF_write(value >>> 16);
+    this.dispi_index = saved;
+};
+
 VGAScreen.prototype.port1CF_write = function(value)
 {
     dbg_log("1CF / dispi write " + h(this.dispi_index) + ": " + h(value), LOG_VGA);
@@ -2596,6 +2647,7 @@ VGAScreen.prototype.port1CF_write = function(value)
     }
 
     this.update_layers();
+    this.pv_planar_sync();
 };
 
 VGAScreen.prototype.port1CF_read = function()

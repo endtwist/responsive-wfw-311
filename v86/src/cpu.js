@@ -417,6 +417,10 @@ CPU.prototype.wasm_patch = function()
     this.svga_fill_pixel_buffer = get_import("svga_fill_pixel_buffer");
     this.svga_mark_dirty = get_import("svga_mark_dirty");
     this.svga_dirty_range = get_import("svga_dirty_range");
+    // PV: mirror of the planar write state for the rust A000 fast path (memory.rs); optional so
+    // that an older wasm (?wasm=v86-base.wasm A/B) still loads, with every A000 write in JS
+    this.pv_planar_set = get_optional_import("pv_planar_set");
+    this.pv_planar_stat = get_optional_import("pv_planar_stat");
 
     this.get_pic_addr_master = get_import("get_pic_addr_master");
     this.get_pic_addr_slave = get_import("get_pic_addr_slave");

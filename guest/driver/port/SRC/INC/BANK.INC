@@ -6,6 +6,15 @@
 ; and WRITE_BANK (0x19) registers, both in 64K units:
 ;     read bank  = pv_src_bank*4 + pv_page
 ;     write bank = pv_dst_bank*4 + pv_page
+;
+; Each register is written with a single 32-bit OUT to the DISPI index port
+; (index in the low word, data in the high word); the adapter applies the pair
+; atomically and leaves the index register alone. MoveCursor, which runs at
+; interrupt time and writes its own DISPI registers the same way, therefore
+; cannot slip between an index write and its data write, and no cli/sti is
+; needed here: at ring 3 under WIN386 each of those was a #GP trap into the
+; VMM (~450 ring-0 instructions), two per bank switch, which dominated repaint
+; time on the emulator. A register whose value is unchanged is not written.
 .286
         public  bank_select
         public  set_bank
@@ -13,6 +22,7 @@
         public  far_set_bank_select
         public  pv_apply_banks
         public  pv_page, pv_src_bank, pv_dst_bank
+        public  pv_hw_read_bank, pv_hw_write_bank
 
 PV_DISPI_INDEX  equ     01CEh
 PV_DISPI_DATA   equ     01CFh
@@ -26,44 +36,52 @@ bank_select         db      0FFh        ;last 64K bank set through set_bank*
 pv_page             db      0           ;shared 64K page within 256K (0..3)
 pv_src_bank         db      0           ;256K bank for reads
 pv_dst_bank         db      0           ;256K bank for writes
+pv_hw_read_bank     db      0FFh        ;READ_BANK as last programmed (0FFh: unknown)
+pv_hw_write_bank    db      0FFh        ;WRITE_BANK as last programmed (0FFh: unknown)
 sEnd    Data
 
 sBegin  Code
 	assumes cs,Code
 
-;--- pv_apply_banks: program the adapter from the shadows. Preserves everything.
-;    Interrupts are held off across the index/data pairs: MoveCursor runs at
-;    interrupt time and touches the same DISPI index register.
+;--- pv_apply_banks: program the adapter from the shadows. Preserves everything
+;    (including the high half of EAX, which the 32-bit OUT sequence uses).
 pv_apply_banks proc near
         push    ds
-        push    ax
-        push    bx
+        db      66h
+        push    ax                      ;push eax
         push    dx
         mov     ax,DGROUP
         mov     ds,ax
-        EnterCrit
         mov     dx,PV_DISPI_INDEX
-        mov     ax,PV_REG_READ_BANK
-        out     dx,ax
-        inc     dx
         mov     al,ds:[pv_src_bank]
         shl     al,2
         or      al,ds:[pv_page]
+        cmp     al,ds:[pv_hw_read_bank]
+        je      @F
+        mov     ds:[pv_hw_read_bank],al
         xor     ah,ah
-        out     dx,ax
-        dec     dx
-        mov     ax,PV_REG_WRITE_BANK
-        out     dx,ax
-        inc     dx
-        mov     al,ds:[pv_dst_bank]
+        push    ax                      ;data: high word of EAX
+        push    PV_REG_READ_BANK        ;index: low word of EAX
+        db      66h
+        pop     ax                      ;pop eax
+        db      66h
+        out     dx,ax                   ;out dx,eax
+@@:     mov     al,ds:[pv_dst_bank]
         shl     al,2
         or      al,ds:[pv_page]
+        cmp     al,ds:[pv_hw_write_bank]
+        je      @F
+        mov     ds:[pv_hw_write_bank],al
         xor     ah,ah
-        out     dx,ax
-        LeaveCrit b
-        pop     dx
-        pop     bx
+        push    ax
+        push    PV_REG_WRITE_BANK
+        db      66h
         pop     ax
+        db      66h
+        out     dx,ax
+@@:     pop     dx
+        db      66h
+        pop     ax                      ;pop eax
         pop     ds
         ret
 pv_apply_banks endp

@@ -199,25 +199,23 @@ cBegin
 	LeaveCrit a
 
 	push	dx				;tell the host the new pointer position
-	push	bx
-	mov	dx,PV_DISPI_INDEX
-	in	ax,dx				;this runs at interrupt time: whoever we
-	mov	bx,ax				; interrupted may be between an index
-	mov	ax,PV_R_CURSOR_X		; write and its data write, so leave the
-	out	dx,ax				; index as we found it
-	inc	dx
-	mov	ax,abs_x
+	db	66h
+	push	ax				;push eax
+	mov	dx,PV_DISPI_INDEX		;this runs at interrupt time, so each
+	push	abs_x				; register is written with one 32-bit OUT
+	push	PV_R_CURSOR_X			; (index low, data high), which the adapter
+	db	66h				; applies atomically without touching the
+	pop	ax				; index register: whoever we interrupted may
+	db	66h				; be between an index write and its data
+	out	dx,ax				; write (see BANK.INC)
+	push	abs_y
+	push	PV_R_CURSOR_Y
+	db	66h
+	pop	ax
+	db	66h
 	out	dx,ax
-	dec	dx
-	mov	ax,PV_R_CURSOR_Y
-	out	dx,ax
-	inc	dx
-	mov	ax,abs_y
-	out	dx,ax
-	dec	dx
-	mov	ax,bx
-	out	dx,ax
-	pop	bx
+	db	66h
+	pop	ax				;pop eax
 	pop	dx
 
 	test	cursor_flags,YES_CURSOR 	;if NULL cursor data, done
