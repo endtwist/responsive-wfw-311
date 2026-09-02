@@ -1698,3 +1698,7 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   mouse=PVMOUSE.DRV sound=1 load=PVMON.EXE live=1 shellw=352 shellh=760 spooler=no printer=PSCRIPT
   out=work-phone.img` then a new boot snapshot (`?mkstate=1`). Only WIN.INI keys changed
   (`[windows] device`, `[devices]`, `[PrinterPorts]`); no new files in `image/changes/`.
+- Follow-up 5 (same day): the tour's fixed-layout set now mirrors `[PVMon] KeepSize` in
+  build-image.sh (SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER) plus
+  message-box-only launches (PRINTMAN with the spooler off). PVW carries no fixed-layout flag yet,
+  so the set is hardcoded; a trailing token on PVW/PVO would replace it.
