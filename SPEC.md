@@ -1059,3 +1059,13 @@ size once per window) makes the DOS window a phone's width, so its text is shown
 horizontal scroll bar (WinOldAp does not switch fonts on its own; a smaller DOSAPP.FON face would
 give all 80 columns). The emulator itself slows sharply while a DOS VM runs (phone: 64 -> 11-37
 MIPS), which is the remaining lag.
+
+**2026-09-02 — absolute pointing device.** PVMON-driven `SetCursorPos` depends on PVMON's timer,
+which a busy Win16 system (WinOldAp starting, a DOS VM running) starves for a second or more, so
+everything routed through PVMON lagged. `PVMOUSE.DRV` (guest/mouse/port, the DDK PS/2 driver;
+`tools/build-mouse.sh`) fixes this at the root: the host posts the wanted position, normalised
+0..65535, in adapter registers 1Dh/1Eh (flag 1Fh) and sends any PS/2 packet; the interrupt
+handler reports `SF_ABSOLUTE` and USER puts the pointer there at interrupt time. Confirmation
+9-11 ms, exact to the pixel (aim at pixel centres: USER truncates norm*cx/65536), independent of
+what applications are doing. SetCursorPos remains the fallback after three missed reports.
+Regression on the restored snapshot: tap, three back-to-back drags, desktop tap all exact.
