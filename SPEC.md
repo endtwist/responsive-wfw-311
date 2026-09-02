@@ -1770,3 +1770,48 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   should accept a window spanning slot n and n+1 when both are its own.
 - Tour after this batch: TERMINAL launch/close/kbd pass, WINFILE pass; CHARMAP `fit`/`slot` are the
   fixed-layout/double-slot cases above.
+
+### 2026-09-02 — Paintbrush in one slot, KeepSize vs fixed layout, maximise a no-op for both, icon labels, Exit Windows from the icon (PVMON v32)
+Phone reports, all guest-side (PVMON v32, PVHOOK.DLL, WIN.INI); reproduced and verified headless
+(`node` + v86 from `image/current.json`, driving the bus and reading the 8bpp framebuffer, since
+no Browser-pane tab was free).
+- **Two kinds of "keep the size" now.** *Fixed layout* = a `#32770` main window or one without
+  `WS_THICKFRAME`: never resized, kept in its column, two slots when wider than 640 (Character Map
+  `PVW 1 1280 0 785 278` unchanged). *KeepSize* (`[PVMon] KeepSize`, thick frame: SOL MSHEARTS
+  WINMINE PACKAGER PBRUSH...) = not shrunk to the phone's 352 or `DefaultSize`, but still clamped to
+  **one 640 slot and the shell height** at birth, at `HCBT_ACTIVATE`, in `WM_WINDOWPOSCHANGING` and
+  by PVMON's `park()` (hook `WinInfo.keep`, `max_w_for()`; PVMON `fixed_layout()` / `keep_size()`,
+  KeepSize list read once at start and on `CMD_SHELLSIZE`). Paintbrush sized itself to half the
+  2560 screen (`PVW 0 640 0 1280 892`, two slots, host scale 0.31); it gets `Size.PBRUSH=640x424`:
+  toolbox cells are 28 px wide at a 632 client (two columns of `0.044 x client width`) and
+  `(client - palette) / 9` tall, measured 35 @510, 31 @453, 25 @396 by shrinking the window from
+  the keyboard -> square at ~424. Now `PVW 0 640 0 640 424`, one slot, host scale 0.55.
+- **Maximise is a no-op for fixed-layout and KeepSize windows** (Solitaire, Hearts, Minesweeper,
+  Calculator, Character Map, Sound Recorder, Media Player, Task List...): `WM_GETMINMAXINFO`
+  answers `ptMaxSize` = the normal rectangle's size (capped 2x640 / 640 x frame) and
+  `ptMaxPosition` = its position, so `SW_MAXIMIZE` changes nothing visible and restore puts back
+  the same. The phone's Solitaire: the hook already gave the natural size, but PVMON's `park()`
+  treated any zoomed window wider than 352 as "the hook missed it" and restored + sized it to
+  `352x598` (cards clipped, restore box with nothing to do); `park()` now judges zoomed windows by
+  the same per-kind limits and only clamps when they are exceeded. Verified: SOL `593x471` through
+  Alt+Space X, Alt+Space R, `CMD_RESTORE`, X again, `CMD_RESTORE` from zoomed; layer list intact each
+  time. (The "layer vanished after CMD_RESTORE" report did not reproduce; the sequence above is
+  the one the phone did.) Hook records are also forgotten at `HCBT_CREATEWND`/`HCBT_DESTROYWND`, so a
+  recycled handle cannot answer with the previous program's kind.
+- **Icon labels inside the column.** USER's icon title (class `#32772`) is measured
+  (`icon_label_w`: owned by the icon, else centred under it) and the icon is kept at least
+  `(label - icon)/2 + 2` from either column edge, whether PVMON placed it or the user dropped it
+  there (`pvmon: icon label <w> wide, icon <x> -> <nx>`); a user-dragged icon is otherwise still
+  left alone. With IconSpacing 100 and a 32 px icon the first cell moves 34 -> 36. The phone's
+  `x≈5` icon ("rogram / anager") was a dragged icon PVMON honoured; now it is pushed back to 36.
+- **Exit Windows always reported.** The hook's `hook_kind` dropped any dialog whose owner is
+  iconic — including the shell's unowned Exit Windows box (adopted owner: the iconic Program
+  Manager) when it is opened from the icon's menu, which is how the phone does it; the shell is
+  now the exception (both in the hook and in PVMON's `FindApp`), and PVMON centres a shell dialog
+  in the column when the shell is an icon. The hook also forces the dialog into its list on
+  `HCBT_SETFOCUS` (WM_INITDIALOG's focus lands before the dialog is visible), not only on
+  `HCBT_ACTIVATE`. Verified: icon tapped -> `C` -> `PVO -1 0 224 370 150 Exit Windows` in the hook's
+  list and PVMON's; restored shell Alt+F4 -> same.
+- Testing note: with every window minimised, Alt+Space goes to whichever icon is active — a
+  keyboard-driven "Exit Windows from the icon" test closed Character Map and restored Paintbrush
+  instead; tap the shell's icon (absolute pointer) first.

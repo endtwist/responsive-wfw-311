@@ -16,8 +16,13 @@
  *   - any resize, by the program or the user: WM_WINDOWPOSCHANGING clamps cx/cy; owned windows
  *     are kept inside their owner's column.
  *   - fixed-layout programs (dialog-template main windows such as Task List and Sound Recorder,
- *     and the modules in [PVMon] KeepSize: the games, Calculator, Clock...) draw a layout of their
- *     own size and are never resized, only kept inside the frame; maximise leaves them as they are.
+ *     and any window without WS_THICKFRAME: Network Setup, Character Map) draw a layout of their
+ *     own size and are never resized, only kept inside the frame; wider than a column they take
+ *     two (PVMON). Maximise changes nothing for them (see clamp_minmax).
+ *   - [PVMon] KeepSize modules with a thick frame (the games, Paintbrush, Packager) are not
+ *     shrunk to the phone's width or DefaultSize, but a program that merely sizes itself to the
+ *     2560-column screen (Paintbrush: 1280x892) is still clamped to one 640 slot and the shell
+ *     height; maximise is a no-op for them too.
  *
  * PVMON loads this DLL, installs the hooks, and tells it the shell column's runtime height
  * (PvHookSetShell); it keeps its own poll-time parking as the fallback for anything created before
@@ -142,9 +147,17 @@ static BOOL transient_class(const char FAR *cls)
 
 /* What we know about a top-level window, learned at birth (or on first sight) so the
    per-message hook never has to read WIN.INI. */
-typedef struct { HWND hwnd; BOOL fixed; int maxH; } WinInfo;
+typedef struct { HWND hwnd; BOOL fixed; BOOL keep; int maxH; } WinInfo;
 #define MAX_INFO 24
 static WinInfo g_info[MAX_INFO];
+/* Window handles are recycled: a record learned for one program's window must not answer for
+   the next program that gets the handle (Solitaire born with a closed Notepad's handle would be
+   "resizable" and clamped to 352). Forgotten at creation and destruction. */
+static void forget(HWND hwnd)
+{
+    int i;
+    for (i = 0; i < MAX_INFO; i++) if (g_info[i].hwnd == hwnd) g_info[i].hwnd = NULL;
+}
 
 /* Windows being destroyed. PVMON's poll touches every top-level window (GetWindowText,
    SetWindowPos: cross-task SendMessages inside USER); one sent to a window whose task is on its
@@ -185,25 +198,33 @@ static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst, DWORD styl
         /* Windows sends WM_GETMINMAXINFO from inside CreateWindow, before the window's instance
            is known; do not remember an answer given without it (only the class is known) */
         if (!style) style = GetWindowLong(hwnd, GWL_STYLE);
-        tmp.hwnd = NULL; tmp.fixed = lstrcmp(cls, "#32770") == 0 || !(style & WS_THICKFRAME); tmp.maxH = 0;
+        tmp.hwnd = NULL; tmp.fixed = lstrcmp(cls, "#32770") == 0 || !(style & WS_THICKFRAME); tmp.keep = FALSE; tmp.maxH = 0;
         return &tmp;
     }
     wi->hwnd = hwnd;
     /* A program whose main window is a dialog template (Task List, Sound Recorder, Character
-       Map, WinVer...) laid its controls out for one size and never re-lays them; so did the
-       modules listed in KeepSize (the games, Calculator, Clock, Paintbrush's toolbox...). */
-    /* A window without WS_THICKFRAME cannot be resized by the user, so its program never lays out
-       to a new size either (Windows Setup's Network Setup: clamped, its text and list were simply
-       cut off). Only user-resizable windows reflow and are clamped; the rest keep their natural
-       size and the host scales them to the phone. */
+       Map, WinVer...) laid its controls out for one size and never re-lays them. A window without
+       WS_THICKFRAME cannot be resized by the user, so its program never lays out to a new size
+       either (Windows Setup's Network Setup: clamped, its text and list were simply cut off).
+       These are fixed: never resized, the host scales them. */
     if (!style) style = GetWindowLong(hwnd, GWL_STYLE);
-    wi->fixed = lstrcmp(cls, "#32770") == 0 || !(style & WS_THICKFRAME) || in_list("KeepSize", mod);
+    wi->fixed = lstrcmp(cls, "#32770") == 0 || !(style & WS_THICKFRAME);
+    /* A resizable window of a KeepSize module (the games, Paintbrush, Packager) draws a layout of
+       its own size too: it is not shrunk to the phone or DefaultSize, but it is still held to one
+       640 slot and the frame height (Paintbrush opens at half the 2560-column screen). */
+    wi->keep = !wi->fixed && in_list("KeepSize", mod);
     wsprintf(key, "MaxHeight.%s", (LPSTR)mod);
     h = GetProfileInt("PVMon", key, 0);
     wi->maxH = (h > 100) ? h : 0;
-    wsprintf(line, "pvhook: %s class %s %s", (LPSTR)mod, (LPSTR)cls, (LPSTR)(wi->fixed ? "fixed layout" : "resizable"));
+    wsprintf(line, "pvhook: %s class %s %s", (LPSTR)mod, (LPSTR)cls, (LPSTR)(wi->fixed ? "fixed layout" : wi->keep ? "keep size" : "resizable"));
     pv_dbg(line);
     return wi;
+}
+
+/* The widest a resizable window may be: the phone's width, or one slot for a KeepSize module. */
+static int max_w_for(const WinInfo FAR *wi)
+{
+    return (wi && wi->keep) ? SLOT_W : shell_w();
 }
 
 /* The frame a top-level window must fit: the shell column for the shell and anything owned by a
@@ -287,7 +308,13 @@ static char hook_kind(HWND h, HWND skip, char FAR *cls, HWND FAR *owner)
     if (transient_class(cls)) return 'T';
     if (lstrcmp(cls, "Progman") == 0) return 'S';
     *owner = dialog_owner(h, cls);
-    if (*owner && IsIconic(*owner)) return 0;
+    if (*owner && IsIconic(*owner)) {
+        /* a dialog of an iconic program has nothing to be drawn over; the shell's (Exit Windows
+           from the minimised Program Manager's icon menu) lives in the desktop column and is
+           reported: leaving it out was the "PVO -1 line missing" case */
+        char oc[16];
+        if (GetClassName(*owner, oc, sizeof(oc)) <= 0 || lstrcmp(oc, "Progman") != 0) return 0;
+    }
     if (IsIconic(h)) return 'I';
     if (*owner && IsWindow(*owner) && IsWindowVisible(*owner)) return 'O';
     return 'A';
@@ -460,15 +487,15 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
                     SetWindowPos(h, NULL, colX, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
             }
             if (!wi->fixed) {
-                RECT rc; int maxH = frame_h_for(wi, FALSE), w, ht;
+                RECT rc; int maxH = frame_h_for(wi, FALSE), maxW = max_w_for(wi), w, ht;
                 GetWindowRect(h, &rc);
                 w = rc.right - rc.left; ht = rc.bottom - rc.top;
-                if (w > shell_w() || ht > maxH) {
+                if (w > maxW || ht > maxH) {
                     char line[80];
                     wsprintf(line, "pvhook: %s sized itself %dx%d, clamped to %dx%d", (LPSTR)cls, w, ht,
-                             w > shell_w() ? shell_w() : w, ht > maxH ? maxH : ht);
+                             w > maxW ? maxW : w, ht > maxH ? maxH : ht);
                     pv_dbg(line);
-                    SetWindowPos(h, NULL, rc.left, rc.top, w > shell_w() ? shell_w() : w, ht > maxH ? maxH : ht,
+                    SetWindowPos(h, NULL, rc.left, rc.top, w > maxW ? maxW : w, ht > maxH ? maxH : ht,
                                  SWP_NOZORDER | SWP_NOACTIVATE);
                 }
             }
@@ -482,7 +509,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             if (lstrcmpi(mod, "USER") == 0) fix_msgbox(h);        /* a MessageBox */
         }
     }
-    if (code == HCBT_DESTROYWND && wParam && !(GetWindowLong((HWND)wParam, GWL_STYLE) & WS_CHILD)) mark_dead((HWND)wParam);
+    if (code == HCBT_DESTROYWND && wParam && !(GetWindowLong((HWND)wParam, GWL_STYLE) & WS_CHILD)) { mark_dead((HWND)wParam); forget((HWND)wParam); }
     if ((code == HCBT_ACTIVATE || code == HCBT_DESTROYWND || code == HCBT_SETFOCUS) && shell_w()) {
         char cls[24];
         HWND h = (HWND)wParam;
@@ -500,12 +527,15 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
                 if (rc.left < SLOT_W || rc.right > colX + SLOT_W || rc.top < 0)
                     SetWindowPos(h, NULL, colX, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
             }
-            g_force = (code == HCBT_ACTIVATE) ? h : NULL;
+            /* A dialog being activated, or taking the focus (WM_INITDIALOG, before it is shown), is
+               not yet marked visible: report it anyway, it is on its way up. Publishing only at
+               activation left the last list without Exit Windows when the focus landed after. */
+            g_force = (code != HCBT_DESTROYWND) ? h : NULL;
             hook_publish(code == HCBT_DESTROYWND ? h : NULL);
             g_force = NULL;
         }
     }
-    if (code == HCBT_CREATEWND) unmark_dead((HWND)wParam);
+    if (code == HCBT_CREATEWND) { unmark_dead((HWND)wParam); forget((HWND)wParam); }
     if (code == HCBT_CREATEWND) {
         HWND hwnd = (HWND)wParam;
         LPCBT_CREATEWND cbt = (LPCBT_CREATEWND)lParam;
@@ -542,13 +572,13 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
         wsprintf(key, "Size.%s", (LPSTR)mod);
         if (GetProfileString("PVMon", key, "", val, sizeof(val)) && parse_size(val, &w, &h)) {
             cs->cx = w; cs->cy = h;
-        } else if (!wi->fixed &&
+        } else if (!wi->fixed && !wi->keep &&
                    GetProfileString("PVMon", "DefaultSize", "", val, sizeof(val)) && parse_size(val, &w, &h)) {
             if (cs->cx == CW_USEDEFAULT || cs->cx > w) cs->cx = w;
             if (cs->cy == CW_USEDEFAULT || cs->cy > h) cs->cy = h;
         }
         if (!wi->fixed && cs->cx != CW_USEDEFAULT) {              /* the invariant, at birth */
-            if (cs->cx > shell_w()) cs->cx = shell_w();
+            if (cs->cx > max_w_for(wi)) cs->cx = max_w_for(wi);
             if (cs->cy > frame_h_for(wi, FALSE)) cs->cy = frame_h_for(wi, FALSE);
         }
         cs->x = SLOT_W; cs->y = 0;
@@ -559,8 +589,12 @@ pass:
 
 /* Maximise means "fill the column": the window really is zoomed, so the maximise box turns into
    the restore box and toggles back, but the zoomed rectangle is the phone frame at the top of the
-   window's own column, never the whole screen. Fixed-layout programs keep their size and are only
-   moved to the top of the column. */
+   window's own column, never the whole screen. For fixed-layout and KeepSize programs (Solitaire,
+   Hearts, Minesweeper, Calculator, Character Map, Sound Recorder, Media Player, Task List...)
+   maximise is a no-op: the zoomed rectangle is the window's own normal rectangle, size and
+   position, so nothing visible changes and restore puts back the same. (Before, the zoomed size
+   was the normal size but at the top of the column, and PVMON's park then "restored" a zoomed
+   Solitaire wider than the phone to 352: clipped cards, and the restore box had nothing to do.) */
 static void clamp_minmax(HWND hwnd, MINMAXINFO FAR *mmi)
 {
     char cls[24];
@@ -577,16 +611,21 @@ static void clamp_minmax(HWND hwnd, MINMAXINFO FAR *mmi)
     if (!isShell && GetWindowPlacement(hwnd, &wp) && wp.rcNormalPosition.left >= SLOT_W)
         colX = (wp.rcNormalPosition.left / SLOT_W) * SLOT_W;   /* the column it lives in, even when iconic */
     if (isShell) { colX = 0; w = shell_w(); h = frame_h_for(NULL, TRUE); }
-    else if (wi->fixed) {
+    else if (wi->fixed || wi->keep) {
+        int maxW = wi->fixed ? 2 * SLOT_W : SLOT_W, maxH = wi->fixed ? GetSystemMetrics(SM_CYSCREEN) : frame_h_for(wi, FALSE);
         w = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
         h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
         if (w < 100 || h < 60) return;                 /* still being built (Minesweeper sizes itself later) */
-        if (w > SLOT_W) w = SLOT_W;
-        if (h > GetSystemMetrics(SM_CYSCREEN)) h = GetSystemMetrics(SM_CYSCREEN);
-    } else { w = shell_w(); h = frame_h_for(wi, FALSE); }
+        if (w > maxW) w = maxW;
+        if (h > maxH) h = maxH;
+        mmi->ptMaxSize.x = w; mmi->ptMaxSize.y = h;
+        mmi->ptMaxPosition.x = wp.rcNormalPosition.left; mmi->ptMaxPosition.y = wp.rcNormalPosition.top;
+        if (wi->keep) { mmi->ptMaxTrackSize.x = maxW; mmi->ptMaxTrackSize.y = maxH; }   /* drag-sizing stays in the slot */
+        return;
+    }
+    else { w = shell_w(); h = frame_h_for(wi, FALSE); }
     mmi->ptMaxSize.x = w; mmi->ptMaxSize.y = h;
     mmi->ptMaxPosition.x = colX; mmi->ptMaxPosition.y = 0;
-    if (!isShell && wi->fixed) return;                           /* the user may still drag-size these */
     mmi->ptMaxTrackSize.x = w; mmi->ptMaxTrackSize.y = h;
 }
 
@@ -648,16 +687,16 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
     }
     {
         WinInfo *wi = learn(hwnd, cls, NULL, 0);
-        int maxH;
+        int maxH, maxW;
         if (wi->fixed) return;                                   /* never resized, only kept in its column */
-        maxH = frame_h_for(wi, FALSE);
-        if (wp->cx > shell_w() || wp->cy > maxH) {
+        maxH = frame_h_for(wi, FALSE); maxW = max_w_for(wi);
+        if (wp->cx > maxW || wp->cy > maxH) {
             char line[80];
             wsprintf(line, "pvhook: clamp %s %dx%d -> %dx%d", (LPSTR)cls, wp->cx, wp->cy,
-                     wp->cx > shell_w() ? shell_w() : wp->cx, wp->cy > maxH ? maxH : wp->cy);
+                     wp->cx > maxW ? maxW : wp->cx, wp->cy > maxH ? maxH : wp->cy);
             pv_dbg(line);
         }
-        if (wp->cx > shell_w()) wp->cx = shell_w();
+        if (wp->cx > maxW) wp->cx = maxW;
         if (wp->cy > maxH) wp->cy = maxH;
     }
 }
