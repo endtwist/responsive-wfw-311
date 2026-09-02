@@ -23,6 +23,12 @@ function viewport() {
   return [w, h];
 }
 
+// Default to fitting the whole screen, on every device. Starting a phone magnified means
+// landing in a view that is zoomed in and scrolls around, which is disorienting; magnification
+// is a control you reach for, not a place to begin.
+let zoom = 1;
+const ZOOM_MIN = 0.5, ZOOM_MAX = 6;
+
 function computeMode() {
   const [vw, vh] = viewport();
   let zoom = Math.max(1, MIN_W / vw, MIN_H / vh);
@@ -168,11 +174,8 @@ window.addEventListener("resize", pump);
  * so fitting the whole desktop on screen shrinks every emulated pixel to well under a point and
  * the result is unreadable. Magnification is therefore a first-class control rather than an
  * afterthought: the canvas is drawn at `fit * zoom`, and anything larger than the viewport is
- * pannable. Phones start magnified, because seeing all of a desktop you cannot read is the
- * wrong default. The 120 dpi font set (chosen by PVDPI at boot) does the rest.
+ * pannable. The 120 dpi font set that PVDPI selects at phone widths does the rest.
  */
-let zoom = viewport()[0] < 600 ? 1.7 : 1;
-const ZOOM_MIN = 0.5, ZOOM_MAX = 6;
 
 function fitScale(c) {
   const [vw, vh] = viewport();
