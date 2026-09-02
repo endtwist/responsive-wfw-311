@@ -1275,7 +1275,19 @@ function drawWindow(g, src, w) {
   }
   blit(g, src, w.gx + w.px, w.gy + w.py, w.vw, w.vh, w.x + hl, w.y + ht,
        Math.round(w.vw * w.zs), Math.round(w.vh * w.zs));
-  if (holes.length) g.restore();
+  if (holes.length) {
+    g.restore();
+    /* The hole is filled with one solid colour sampled from the owner's client next to it (its
+       background), not with a stretched strip (streaks) and not left open (the desktop showed
+       through where the child's own layer is smaller than the hole). */
+    const cx0 = w.gx + w.px, cy0 = w.gy + w.py;
+    for (const h of holes) {
+      const sx = h.x - 1 >= cx0 ? h.x - 1 : Math.min(h.x + h.w, cx0 + w.vw - 1);
+      const sy = h.y - 1 >= cy0 ? h.y - 1 : Math.min(h.y + h.h, cy0 + w.vh - 1);
+      g.fillStyle = sampleColour(src, sx, sy);
+      g.fillRect(w.x + hl + (h.x - cx0) * w.zs, w.y + ht + (h.y - cy0) * w.zs, h.w * w.zs, h.h * w.zs);
+    }
+  }
 }
 /* Owned (PVO) and transient (PVT) windows that overlap layer `w`'s client area in guest screen
    space, as guest rects clipped to the visible part of the client. Only children that are drawn as
@@ -1373,6 +1385,14 @@ function present() {
 
 /* drawImage throws on an empty source rectangle; a window can legitimately have one (a zero-size
    client while it is being created), and one throw must never take the render loop down. */
+let sampleCanvas = null;
+function sampleColour(src, x, y) {
+  if (!sampleCanvas) { sampleCanvas = document.createElement("canvas"); sampleCanvas.width = sampleCanvas.height = 1; }
+  const sg = sampleCanvas.getContext("2d", { willReadFrequently: true });
+  sg.drawImage(src, x, y, 1, 1, 0, 0, 1, 1);
+  const d = sg.getImageData(0, 0, 1, 1).data;
+  return `rgb(${d[0]},${d[1]},${d[2]})`;
+}
 function blit(g, src, sx, sy, sw, sh, dx, dy, dw, dh) {
   if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
   g.drawImage(src, sx, sy, sw, sh, dx, dy, dw, dh);
