@@ -14,6 +14,8 @@
  *   key:0x21  chord:alt,x  keys:alt-space,x   PS/2 scancodes; names: alt ctrl shift space enter esc tab f o n x r
  *   text:hello              keyboard_send_text
  *   dump                    print every layer (kind slot x,y,w,h client) once
+ *   pix:x,y,w,h             colour histogram of a frame buffer rectangle (painted vs empty)
+ *   png:x,y,w,h,file        the rectangle as a PNG (8 bpp through the DAC palette)
  *   cursor:1000,500         absolute pointer to x,y and print where the guest says it landed
  *   tap                     tap the middle of the current window's client area (absolute pointer)
  *   close                   CMD_CLOSE the current slot, wait for it to go (N to a save box)
@@ -142,6 +144,19 @@ for (const s of steps) {
     for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) { const c = mem[off + (y + j) * pitch + x + i]; hist.set(c, (hist.get(c) || 0) + 1); }
     const top = [...hist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([c, n]) => `${c}:${(100 * n / (w * h)).toFixed(0)}%`);
     console.log(`${ts()} pix ${x},${y} ${w}x${h}: ${hist.size} colours, top ${top.join(" ")} (bpp ${v.svga_bpp} pitch ${pitch})`);
+  }
+  else if (op === "png") {
+    /* the frame buffer rectangle as a PNG (8 bpp through the DAC palette), for looking at a game */
+    const [x, y, w, h, file] = arg.split(","); const X = +x, Y = +y, W = +w, H = +h;
+    const v = emulator.v86.cpu.devices.vga, pitch = v.svga_pitch_px(), mem = v.svga_memory, off = v.svga_offset || 0, pal = v.vga256_palette;
+    const raw = Buffer.alloc((W * 3 + 1) * H);
+    for (let j = 0; j < H; j++) { raw[j * (W * 3 + 1)] = 0; for (let i = 0; i < W; i++) { const c = pal[mem[off + (Y + j) * pitch + X + i]]; const o = j * (W * 3 + 1) + 1 + i * 3; raw[o] = c & 255; raw[o + 1] = (c >> 8) & 255; raw[o + 2] = (c >> 16) & 255; } }
+    const crcT = new Int32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcT[n] = c; }
+    const crc = b => { let c = -1; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ -1) >>> 0; };
+    const chunk = (tag, body) => { const len = Buffer.alloc(4); len.writeUInt32BE(body.length); const tb = Buffer.concat([Buffer.from(tag), body]); const cc = Buffer.alloc(4); cc.writeUInt32BE(crc(tb)); return Buffer.concat([len, tb, cc]); };
+    const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4); ihdr[8] = 8; ihdr[9] = 2;
+    fs.writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]));
+    console.log(`${ts()} png ${X},${Y} ${W}x${H} -> ${file}`);
   }
   else if (op === "dump") { console.log(`${ts()} layers:`); dump(); }
   else if (op === "cursor") { const [x, y] = arg.split(",").map(Number); const c = await place(x, y); console.log(`${ts()} cursor asked ${x},${y} -> ${c ? c.x + "," + c.y : "no report"}`); }

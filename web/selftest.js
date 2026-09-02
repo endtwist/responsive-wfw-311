@@ -56,6 +56,8 @@ export const APPS = [
   { name: "WINHELP",  cmd: "WINHELP.EXE",  title: /Help/ },
   { name: "TASKMAN",  keys: "ctrl-esc",    title: /^Task List/, fixed: true },
   { name: "DOSPRMPT", cmd: "DOSPRMPT.PIF", title: /^MS-DOS/,         text: true, timeout: 40000 },
+  { name: "SKI",      cmd: "C:\\GAMES\\SKI.EXE",  title: /^SkiFree/ },                 // image/changes/games (games=1)
+  // { name: "JEZZ",  cmd: "C:\\GAMES\\JEZZ.EXE", title: /^JezzBall/, fixed: true },   // once JEZZ.EXE is in changes/games
 ];
 
 /* ------------------------------------------------------------------------------ time

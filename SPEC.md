@@ -1946,3 +1946,50 @@ and do not pursue the desktop-rect or tracking-table fakes: the first blanks eve
 second would cap every window at the frame. Diff kept to new functions plus switches:
 `apply_fake_screen`/`keep_cursor_free`/`g_realW,H` in pvmon.c, `g_hookClamp`/`real_h`/`PvHookSetReal`
 in pvhook.c, `fakescreen=`/`hookclamp=` in build-image.sh, `tools/probe.mjs`.
+
+### 2026-09-02 — games: SkiFree installed, JezzBall prepared (agent, worktree)
+- **SkiFree** (`SKI.EXE`, 88848 bytes, 12 Sep 1991, NE Win16 `file`: "NE for MS Windows 3.x", module
+  name `Ski`, "Copyright 1991 Microsoft, Version 1.0" on its title screen). Source: the author's own
+  page, https://ski.ihoc.net/ ("The Most Officialest SkiFree Home Page", Chris Pirih), Download
+  section: "For historical interest, you could download the original 16-bit SkiFree 1.0 that
+  shipped as part of the Windows Entertainment Pack in 1991" → https://ski.ihoc.net/ski.zip
+  (29931 bytes, sha256 `2d3da30c…39eca`; SKI.EXE sha256 `0b97b99f…515c2`). The page states no
+  formal licence: the author (who wrote it before Microsoft licensed it from him) offers the 16-bit
+  original and his own 32-bit rebuilds for free download; it is included here on that basis and
+  the page text is the record. Staged as `image/changes/games/SKI.EXE` → `C:\GAMES\SKI.EXE`.
+- **build-image.sh `games=1`** (default): `changes/games/*` → `C:\GAMES` (`mmd`), and the Games
+  group gets one item per known game through the new **`tools/grpadd.py`**: the PMCC .GRP format
+  is rewritten (header, `rgiItems`, ITEMDATA per item, checksum = word sum 0), the icon is the
+  executable's first RT_GROUP_ICON's 32x32 16-colour member converted to the group's device format
+  (verified against Solitaire's entry: 12-byte CURSORSHAPE header `10 00 10 00 20 00 20 00 04 00
+  04 01`, AND mask 128 bytes top-down, XOR 512 bytes = per row 4 planes x 4 bytes, top-down,
+  plane value = standard 16-colour palette index). Idempotent (an item with the same command is
+  replaced), `--list` dumps a group. `PVMon.Size.SKI=352x<shellh>`: SkiFree's main window is
+  resizable and draws its slope in whatever client it gets, so it fills the phone frame (`PVW 0
+  640 0 352 760 644 44 344 712 SkiFree`, one slot, scale 1). `JEZZ` added to `KeepSize`.
+- **Host** (`web/app.js`, table edits only): `/skifree`, `/ski`, `/jezzball`, `/jezz` in `APPS`
+  (`C:\GAMES\SKI.EXE` / `C:\GAMES\JEZZ.EXE`: WinExec takes the full path); `SkiFree` and `JezzBall`
+  are `drag` surfaces in `SURFACE_POLICY` (the skier follows the pointer, a one-finger move must
+  not scroll) and in `NO_KEYBOARD` (a tap never summons the keyboard). SkiFree's keyboard controls
+  (numpad, F2 restart, F3 pause, F fast) are reachable through the keybar only.
+- **Verified headless** (no pane tab free): cold boot of `work-phone-20260902-165401` +
+  `boot-20260902-165401.state.gz` (saved by `tools/probe.mjs --state none --save`), then from the
+  snapshot: `run:C:\GAMES\SKI.EXE` → window born 352x760 in slot 0; pointer at 700,300 → the skier
+  faces left, 960,300 → faces right, 820,700 → he skis: `Dist 969m Speed 18m/s`, trees and a lift
+  in the frame (`shots/ski-*.png`, made with the new `png:x,y,w,h,file` probe step: the 8 bpp
+  frame buffer through the DAC palette). `node tools/tour.mjs --apps SKI`: launch/fit/slot/tap/
+  close/alive all pass (SKI added to `web/selftest.js` APPS; the JEZZ line is there, commented).
+  The Games group shows the SkiFree item with its own icon (`grpadd.py --list` on the image's
+  GAMES.GRP: Solitaire, Minesweeper, Hearts, SkiFree at (246,0)).
+- **JezzBall** (Microsoft Entertainment Pack 4, 1992): commercial and copyrighted, so not fetched.
+  Not on any input here: the base image has no `JEZZ*` (strings scan 0 hits), there is no
+  `image/floppies/` and no other install media under `image/`. Everything else is in place:
+  drop `JEZZ.EXE` (+ `JEZZ.HLP`) into `image/changes/games/` and rebuild — the files land in
+  `C:\GAMES`, `grpadd.py` adds the "JezzBall" item with its icon, `KeepSize` holds its fixed
+  playfield at natural size (host scales it), `/jezzball` launches it, the pointer policy is set.
+  Then uncomment the JEZZ tour line and check the title regex (`^JezzBall`) against the real
+  caption. Controls: left click starts a wall, right click toggles its orientation — on the phone
+  the right button is the long press (`LONG_PRESS_MS` 500: a held finger on a drag surface fires
+  right down/up in the gesture's timer, `web/app.js` `installTouch`), so hold to flip, tap to build.
+  The headless tour only sends the left button (`mouse-click [down,false,false]`); the long-press
+  → right-button path is exercised by the pane/phone, not by `tour.mjs`.

@@ -477,6 +477,7 @@ const APPS = {
   charmap: "CHARMAP.EXE", pifedit: "PIFEDIT.EXE", setup: "SETUP.EXE", winver: "WINVER.EXE",
   chat: "WINCHAT.EXE", mail: "MSMAIL.EXE", schedule: "SCHDPLUS.EXE", help: "WINHELP.EXE",
   soundrecorder: "SOUNDREC.EXE", soundrec: "SOUNDREC.EXE", mediaplayer: "MPLAYER.EXE",
+  skifree: "C:\\GAMES\\SKI.EXE", ski: "C:\\GAMES\\SKI.EXE", jezzball: "C:\\GAMES\\JEZZ.EXE", jezz: "C:\\GAMES\\JEZZ.EXE",
 };
 let launched = false;
 function launchFromUrl() {
@@ -885,7 +886,7 @@ const SURFACE_POLICY = [
   [/^File Manager/, "scroll"], [/^Control Panel/, "scroll"], [/^Print Manager/, "scroll"], [/^Task List/, "scroll"],
   [/^Calendar\b/, "scroll"], [/^Character Map/, "scroll"], [/^Media Player/, "scroll"], [/^Clipboard/, "scroll"],
   [/^Solitaire/, "drag"], [/^Paintbrush/, "drag"], [/^Minesweeper/, "drag"], [/^Hearts/, "drag"], [/MS-DOS/, "drag"],
-  [/^Terminal/, "drag"], [/^Reversi/, "drag"],
+  [/^Terminal/, "drag"], [/^Reversi/, "drag"], [/^SkiFree/, "drag"], [/^JezzBall/, "drag"],
 ];
 /* CMD_SCROLL's slot field for the shell: PVMON routes it to Program Manager's active MDI group
    window (WM_VSCROLL/WM_HSCROLL). Slot numbers 0..MAX_SLOTS-1 are application columns. */
@@ -905,7 +906,7 @@ function surfacePolicy(L) {
 }
 /* Programs that never take text: a tap there does not even try the keyboard speculatively, so the
    keyboard does not pop up for the guest to send away again on every card. */
-const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi)\b/;
+const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi|SkiFree|JezzBall)\b/;
 const KEYBOARD_TITLES = /MS-DOS|^Notepad\b|^Write\b|^Terminal\b|^Cardfile\b|^Calendar\b|^Calculator\b/;
 
 /* The shell column's height follows the visible viewport (browser toolbars come and go), so the
