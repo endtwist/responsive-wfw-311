@@ -1322,8 +1322,8 @@ in `shots/devicelog.txt`); "phone" items below are what still needs the real dev
   the pre-PVA paint itself could not be caught because the hidden pane has no rAF and the local
   restore completes in ~3 s — phone item (the page should open on the last desktop, not black).
 - **PWA.** `web/manifest.webmanifest` (standalone/fullscreen, portrait, start_url `/`),
-  `apple-mobile-web-app-*` meta, icons `web/icon-192.png`/`icon-512.png` from `tools/mkicon.mjs`
-  (the four-pane flag as VGA pixel art). The service worker is registered only over https and not
+  `apple-mobile-web-app-*` meta, icons `web/icon-192.png`/`icon-512.png` (originally hand-drawn by
+  `tools/mkicon.mjs`; since 2026-09-02 the guest's own flag icon, see below). The service worker is registered only over https and not
   on localhost, with scope `/` (the dev server sends `Service-Worker-Allowed: /` for `/web/sw.js`;
   the https deploy must too, or serve sw.js from the root — the registration falls back to the
   default scope otherwise). `sw.js`: network-first, per-asset precache that tolerates 404s, never
@@ -1468,3 +1468,20 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   (`getBoundingClientRect`), which sits at the bottom of the visual viewport, i.e. on top of the
   browser's row. `updateKeybar` logs `keybar bar=x,y WxH vv=offset+height/innerHeight scale shift
   guestRoom=<px above the bar> mode=` whenever the geometry changes, for the parked phone.
+### 2026-09-02 — PWA icons are the guest's own Windows flag
+- The hand-drawn pixel-art flag (`tools/mkicon.mjs`, removed) is replaced by the genuine 32x32
+  16-colour Windows logo icon from the disk image: `C:\WINDOWS\PROGMAN.EXE` RT_ICON **18** (the
+  16-colour member of RT_GROUP_ICON 31944, first entry — the "Microsoft Windows" flag in Program
+  Manager's icon browser). `USER.EXE` RT_ICON 3 (group 32647) and `WINVER.EXE` RT_ICON 2 are
+  byte-identical copies. `SHELL.DLL` RT_BITMAP 130 is the opaque 64x64 About-box logo (not used).
+- `tools/ne-icons.py`: lists NE resources; extracts RT_ICON (DIB fragment + AND mask → RGBA PNG)
+  and RT_BITMAP (incl. BI_RLE4/RLE8); `icon` writes one id with `--scale N` (nearest-neighbour
+  integer), `--pad W H`, `--bg RRGGBB`. PNGs are written by hand (zlib), no Pillow needed.
+- Outputs, all integer scales so the pixels stay crisp: `web/icon-192.png` (x6, transparent),
+  `web/icon-512.png` (x16, transparent), `web/icon-512-maskable.png` (x12 centred on desktop grey
+  `#C0C0C0`, inside the 80 % safe zone), `web/apple-touch-icon.png` 180x180 (x5 + 10 px pad on
+  `#C0C0C0`; iOS ignores alpha), `web/favicon.png` 32x32 (the icon as-is). `index.html` links
+  the touch icon and both favicons; the manifest's maskable entry points at the grey variant;
+  `sw.js` precache bumped to v5 with the new files.
+- Reproduce: `mcopy -i image/wfw311-base.img@@16384 ::/WINDOWS/PROGMAN.EXE .` then
+  `python3 tools/ne-icons.py icon PROGMAN.EXE 18 web/icon-512.png --scale 16`.

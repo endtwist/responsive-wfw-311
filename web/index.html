@@ -3,14 +3,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#000">
-<!-- Installable: standalone, portrait, full-screen on an iOS home screen. The icon is the Windows
-     logo drawn as guest-style pixels (tools/mkicon.mjs). -->
+<!-- Installable: standalone, portrait, full-screen on an iOS home screen. The icon is the guest's
+     own Windows flag: PROGMAN.EXE RT_ICON 18 (32x32, 16 colours), extracted with tools/ne-icons.py
+     and scaled nearest-neighbour; the touch icon sits on desktop grey since iOS drops alpha. -->
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Windows 3.11">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <title>Responsive Windows for Workgroups 3.11</title>
 <style>
