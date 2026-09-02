@@ -952,12 +952,14 @@ function installTouch() {
     // A quick second tap near the first is a double-click: Windows 3.1 only pairs clicks a few
     // pixels apart, and fingers do not repeat to the pixel, so the second tap reuses the first
     // tap's exact point.
+    // Only a tap (no drag) primes a double-click; a stroke in Paintbrush that starts near where the
+    // previous stroke began must not be snapped onto it.
     const now = performance.now();
-    if (lastTap && now - lastTap.t < 400) {
+    if (lastTap && !lastTap.dragged && now - lastTap.t < 400) {
       const { px, py } = hostPoint(ev);
-      if (Math.hypot(px - lastTap.px, py - lastTap.py) < 24) pt = lastTap.pt;
+      if (Math.hypot(px - lastTap.px, py - lastTap.py) < 16) pt = lastTap.pt;
     }
-    { const { px, py } = hostPoint(ev); lastTap = { t: now, px, py, pt }; }
+    { const { px, py } = hostPoint(ev); lastTap = { t: now, px, py, pt, dragged: false }; }
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}`); }
     const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0 };
     pressActive = true;
@@ -980,6 +982,7 @@ function installTouch() {
     G.latest = canvasPoint(ev);
     if (!G.dragging) {
       G.dragging = true;
+      if (lastTap) lastTap.dragged = true;
       queue(async () => {                       // after the pointer has been placed: press, then follow
         button(true, false); await sleep(30);
         await follow(G);
