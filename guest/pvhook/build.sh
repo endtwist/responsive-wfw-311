@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"; mkdir -p build; cp pvhook.c build/
 W=$(cd ../.. && pwd)/tools/watcom.sh
-( cd build && $W wcc -bt=windows -ms -zW -zu -zc -ox -zq -i=/watcom/h -i=/watcom/h/win pvhook.c \
+( cd build && $W wcc -bt=windows -bd -ms -zW -zu -zc -ox -zq -i=/watcom/h -i=/watcom/h/win pvhook.c \
   && { [ -f pvhook.o ] && mv pvhook.o pvhook.obj || true; } \
   && $W wlink system windows_dll name PVHOOK.DLL option heapsize=1024 file pvhook.obj \
        export PvCbtProc,PvHookInstall,PvHookRemove,WEP \
