@@ -300,12 +300,17 @@ async function bootFail(why) {
                    vp: fullViewport(), hidden: document.hidden, ua: navigator.userAgent };
   report("BOOTFAIL", JSON.stringify(bundle));
   if (boot.retry) { status("boot failed twice; see log"); return; }      // loop guard: one automatic retry
-  try { await clearState(); } catch (e) {}
-  try { const db = await idb(); await new Promise(res => { const tx = db.transaction("state", "readwrite"); tx.objectStore("state").delete(FRAME_KEY); tx.oncomplete = tx.onerror = res; }); } catch (e) {}
+  try { await withTimeout(clearLocalSnapshot(), 3000); } catch (e) {}
   const u = new URL(location.href);
   u.searchParams.delete("bootfailtest"); u.searchParams.set("bootretry", "1");
   status("restarting from the shipped snapshot");
   location.replace(u.toString());
+}
+function withTimeout(p, ms) { return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout " + ms + " ms")), ms))]); }
+async function clearLocalSnapshot() {
+  await clearState();
+  const db = await idb();
+  await new Promise(res => { const tx = db.transaction("state", "readwrite"); tx.objectStore("state").delete(FRAME_KEY); tx.oncomplete = tx.onerror = res; });
 }
 setTimeout(() => { let running = false; try { running = !!(emulator.is_running && emulator.is_running()); } catch (e) {} if (!running) bootFail("emulator not running 15 s after load"); }, 15000);
 setTimeout(() => { if (restored && !desktopReady) bootFail("snapshot restored but no desktop after 40 s"); }, 40000);
@@ -321,7 +326,11 @@ emulator.add_listener("emulator-ready", async () => {
      real boot. After any restore PVMON is asked to describe the layout again, since the host has
      no memory of it. */
   if (params.get("reset")) {
-    try { await new Promise(r => { const d = indexedDB.deleteDatabase(DB); d.onsuccess = d.onerror = d.onblocked = r; }); } catch (e) {}
+    /* Not deleteDatabase: with the page's own connection open (first frame, remote/selftest) the
+       delete request blocked and never resolved on iOS Chrome, so the boot hung at "loading" with
+       zero instructions. Clear the records instead, and never wait more than 3 s for IndexedDB. */
+    try { await withTimeout(clearLocalSnapshot(), 3000); } catch (e) { boot.errors.push("reset: " + (e && e.message)); }
+    bootStep("reset");
   }
   let snap = params.get("fresh") || params.get("reset") || boot.retry ? null : await loadState();
   if (snap) { boot.path = "local"; boot.localBytes = snap.byteLength; bootStep(`local snapshot ${snap.byteLength}`); }
