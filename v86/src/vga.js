@@ -378,11 +378,18 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.pv_generation = 0;
     this.pv_cmd = 0;          // PV: host -> guest command (0x1A) and argument (0x1B); the guest clears the command to acknowledge
     this.pv_cmd_arg = 0;
+    this.pv_cmd_str = [];     // PV: bytes of a command string, popped one per read of 0x1C (0 = end)
     this.pv_cursor_x = 0;
     this.pv_cursor_y = 0;
     this.pv_debug_line = "";
     bus.register("pv-request-mode", function(data) { this.pv_request_mode(data[0], data[1]); }, this);
     bus.register("pv-command", function(data) { this.pv_cmd_arg = data[1] & 0xFFFF; this.pv_cmd = data[0] & 0xFFFF; }, this);
+    bus.register("pv-command-string", function(data) {
+        // data: [cmd, string]; the string is delivered through 0x1C, then the command is raised
+        this.pv_cmd_str = Array.from(String(data[1])).map(ch => ch.charCodeAt(0) & 0xFF);
+        this.pv_cmd_arg = 0;
+        this.pv_cmd = data[0] & 0xFFFF;
+    }, this);
     bus.register("pv-set-dpi", function(dpi) { this.pv_host_dpi = dpi | 0; }, this);
 
     io.register_write(0x1CE, this, undefined, this.port1CE_write);
@@ -2602,6 +2609,8 @@ VGAScreen.prototype.svga_register_read = function(n)
             return this.pv_cmd;
         case 0x1B:
             return this.pv_cmd_arg;
+        case 0x1C:
+            return this.pv_cmd_str.length ? this.pv_cmd_str.shift() : 0;
 
         case 8:
             // x offset

@@ -128,6 +128,30 @@ async function loadState() {
     return await blob.arrayBuffer();
   } catch (e) { return null; }
 }
+let restored = false;
+async function loadShippedState() {
+  try {
+    const r = await fetch(`../image/boot.state.gz?v=${encodeURIComponent(IMAGE)}`);
+    if (!r.ok) return null;
+    let blob = await r.blob();
+    if (typeof DecompressionStream === "function" && !/gzip/.test(r.headers.get("content-encoding") || "")) {
+      blob = await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).blob();
+    }
+    return await blob.arrayBuffer();
+  } catch (e) { return null; }
+}
+/* Producing the shipped snapshot: visit with ?fresh=1&mkstate=1, and once the desktop has been
+   arranged the state is gzipped and posted to the dev server, which writes image/boot.state.gz. */
+async function uploadBootState() {
+  try {
+    await new Promise(r => setTimeout(r, 4000));                  // let the desktop settle
+    const raw = await emulator.save_state();
+    let blob = new Blob([raw]);
+    blob = await new Response(blob.stream().pipeThrough(new CompressionStream("gzip"))).blob();
+    const r = await fetch("/__state", { method: "POST", body: blob });
+    status("boot snapshot: " + await r.text());
+  } catch (e) { status("snapshot failed: " + e.message); }
+}
 async function clearState() {
   const db = await idb();
   await new Promise(res => {
@@ -157,16 +181,23 @@ function status(msg) { $("status").textContent = msg; }
 emulator.add_listener("emulator-ready", async () => {
   emulator.bus.send("pv-set-dpi", dpi);
   requestMode(true);
-  const snap = params.get("fresh") ? null : await loadState();
+  /* Order of preference: the visitor's own snapshot (saved on hide), then the shipped boot
+     snapshot (the desktop already up, so a cold visit takes seconds instead of a minute), then a
+     real boot. After any restore PVMON is asked to describe the layout again, since the host has
+     no memory of it. */
+  let snap = params.get("fresh") ? null : await loadState();
+  if (!snap && !params.get("fresh") && !params.get("mkstate")) snap = await loadShippedState();
   if (snap) {
     try {
       await emulator.restore_state(snap);
       status("restored");
+      restored = true;
     } catch (e) { status("restore failed, cold boot"); }
   } else {
     status("booting");
   }
   emulator.run();
+  if (restored) setTimeout(() => sendCommand(CMD_REPUBLISH, 0), 300);
 });
 
 emulator.add_listener("screen-set-size", s => {
@@ -204,7 +235,12 @@ emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
   let m = /^PVD (\d+) (\d+)(?: (\d+))?/.exec(line);
   if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18 }; return; }
-  if (/^PVA/.test(line)) { desktopReady = true; return; }
+  if (/^PVA/.test(line)) {
+    desktopReady = true;
+    if (params.get("mkstate") && !restored) { uploadBootState(); return; }
+    launchFromUrl();
+    return;
+  }
   if (/^PVB /.test(line)) { pendingLayers = []; pendingDock = []; return; }
   m = /^PV([WOTX]) (-?\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
   if (m && pendingLayers) {
@@ -223,9 +259,31 @@ emulator.bus.register("pv-debug", line => {
   }
 });
 
+/* Applications by URL: /solitaire opens Solitaire. The path (or ?run=) names an entry in this
+   table; the command line is handed to the guest the moment the desktop is ready. */
+const APPS = {
+  solitaire: "SOL.EXE", sol: "SOL.EXE", hearts: "MSHEARTS.EXE", minesweeper: "WINMINE.EXE",
+  paintbrush: "PBRUSH.EXE", paint: "PBRUSH.EXE", write: "WRITE.EXE", notepad: "NOTEPAD.EXE",
+  calc: "CALC.EXE", calculator: "CALC.EXE", clock: "CLOCK.EXE", cardfile: "CARDFILE.EXE",
+  calendar: "CALENDAR.EXE", terminal: "TERMINAL.EXE", recorder: "RECORDER.EXE",
+  filemanager: "WINFILE.EXE", files: "WINFILE.EXE", controlpanel: "CONTROL.EXE",
+  charmap: "CHARMAP.EXE", pifedit: "PIFEDIT.EXE", setup: "SETUP.EXE", winver: "WINVER.EXE",
+  chat: "WINCHAT.EXE", mail: "MSMAIL.EXE", schedule: "SCHDPLUS.EXE", help: "WINHELP.EXE",
+};
+let launched = false;
+function launchFromUrl() {
+  if (launched) return;
+  launched = true;
+  const q = new URLSearchParams(location.search).get("run");
+  const seg = location.pathname.split("/").filter(Boolean).pop() || "";
+  const key = (q || (/^[a-z]+$/i.test(seg) && !/\./.test(seg) ? seg : "")).toLowerCase();
+  const cmd = APPS[key] || (q && /^[A-Z0-9_.\\: -]+$/i.test(q) ? q : null);
+  if (cmd) emulator.bus.send("pv-command-string", [CMD_RUN, cmd]);
+}
+
 function layerKey(L) { return L.kind === "W" ? "s" + L.slot : L.kind + ":" + L.title; }
 function sendCommand(cmd, slot) { emulator.bus.send("pv-command", [cmd, slot]); }
-const CMD_ACTIVATE = 1, CMD_RESTORE = 2, CMD_CLOSE = 3, CMD_MINIMIZE = 4;
+const CMD_ACTIVATE = 1, CMD_RESTORE = 2, CMD_CLOSE = 3, CMD_MINIMIZE = 4, CMD_RUN = 5, CMD_REPUBLISH = 6;
 
 /* The desktop view: which slice of the guest screen is the background, and at what scale. */
 let view = { x: 0, y: 0, w: 0, h: 0, scale: 1, ox: 0 };

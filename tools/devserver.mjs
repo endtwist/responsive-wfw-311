@@ -30,6 +30,19 @@ http.createServer((req, res) => {
     });
     return;
   }
+  // Boot snapshot from the browser: POST the gzipped v86 state, it becomes image/boot.state.gz,
+  // which the page restores on a cold visit so the desktop is up in seconds instead of a minute.
+  if (url === "/__state" && req.method === "POST") {
+    const chunks = [];
+    req.on("data", c => chunks.push(c));
+    req.on("end", () => {
+      const out = path.join(root, "image", "boot.state.gz");
+      fs.writeFileSync(out, Buffer.concat(chunks));
+      res.writeHead(200, { "Access-Control-Allow-Origin": "*" });
+      res.end("boot.state.gz " + fs.statSync(out).size);
+    });
+    return;
+  }
   if (url === "/__stats") {
     if (req.method === "DELETE") { stats.bytes = 0; stats.byPath = {}; }
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -39,6 +52,8 @@ http.createServer((req, res) => {
   let file = path.normalize(path.join(root, url));
   if (!file.startsWith(root)) { res.writeHead(403); return res.end(); }
   if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, "index.html");
+  // Clean application paths: /solitaire, /hearts ... are the page, which reads the last segment.
+  if (!fs.existsSync(file) && /^\/[a-z]+\/?$/i.test(url)) file = path.join(root, "web", "index.html");
   if (!fs.existsSync(file)) { res.writeHead(404); return res.end("404 " + url); }
   const size = fs.statSync(file).size;
   const headers = { "Content-Type": mime[path.extname(file)] || "application/octet-stream",

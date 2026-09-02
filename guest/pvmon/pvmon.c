@@ -29,6 +29,7 @@
 #define R_GEN       0x17
 #define R_CMD       0x1A   /* host -> guest command, 0 = none; guest writes 0 to acknowledge */
 #define R_CMDARG    0x1B
+#define R_CMDSTR    0x1C   /* command string, one byte per read, 0 at the end */
 
 /* Private display-driver escapes (see guest/driver/port/SRC/CONTROL.ASM) */
 #define PV_QUERY_MODE 0x4A00   /* out: cur w,h, host w,h, dpi, generation */
@@ -800,6 +801,8 @@ static void publish_layout(void)
 #define CMD_RESTORE  2
 #define CMD_CLOSE    3
 #define CMD_MINIMIZE 4
+#define CMD_RUN      5     /* WinExec the string in R_CMDSTR (a command line) */
+#define CMD_REPUBLISH 6    /* host restored a snapshot: tell it everything again */
 
 static void run_host_command(void)
 {
@@ -808,6 +811,27 @@ static void run_host_command(void)
     if (!cmd) return;
     arg = rd(R_CMDARG);
     wr(R_CMD, 0);
+    if (cmd == CMD_REPUBLISH) {
+        char b[64];
+        wsprintf(b, "PVD %u %u %d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION));
+        dbg(b);
+        dbg("PVA");
+        g_lastPub[0] = 0;
+        return;
+    }
+    if (cmd == CMD_RUN) {
+        char cmdline[128];
+        int n = 0;
+        unsigned b;
+        while (n < (int)sizeof(cmdline) - 1 && (b = rd(R_CMDSTR) & 0xFF) != 0) cmdline[n++] = (char)b;
+        cmdline[n] = 0;
+        if (n) {
+            char out[160];
+            wsprintf(out, "pvmon: run %s -> %u", (LPSTR)cmdline, WinExec(cmdline, SW_SHOWNORMAL));
+            dbg(out);
+        }
+        return;
+    }
     if (arg >= MAX_SLOTS) return;
     hwnd = g_slotWnd[arg];
     if (!hwnd || !IsWindow(hwnd)) return;
