@@ -714,6 +714,18 @@ function steerTo(pt) {
   return steering;
 }
 
+/* A press goes to an exact point: PVMON puts the pointer there with SetCursorPos, and the driver's
+   report of the new position is the cue that it has landed. Relative steering is kept for the
+   motion of a drag, where it is the right tool. */
+const CMD_SETPOS = 9;
+async function placePointer(pt) {
+  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+  const seq = cursorSeq, t0 = performance.now();
+  emulator.bus.send("pv-command-string", [CMD_SETPOS, `${Math.round(pt.x)},${Math.round(pt.y)}`]);
+  while (cursorSeq === seq && performance.now() - t0 < 350) await sleep(8);
+  if (guestCursor && (Math.abs(guestCursor.x - pt.x) > 1 || Math.abs(guestCursor.y - pt.y) > 1)) await steerTo(pt);
+}
+
 function button(down, right) { emulator.bus.send("mouse-click", [down && !right, false, down && right]); }
 
 /* A press is resolved against the composited layers: a title bar drags that window about, a dock
@@ -771,7 +783,7 @@ function installTouch() {
     const pt = canvasPoint(ev);
     longFired = false; dragging = false;
     queue(async () => {
-      await steerTo(pt);
+      await placePointer(pt);
       pressTimer = setTimeout(() => queue(async () => {     // long press is the right button
         longFired = true;
         button(true, true); await sleep(60); button(false, true);

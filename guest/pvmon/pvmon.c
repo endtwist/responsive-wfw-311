@@ -44,7 +44,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define POLL_MS       100
+#define POLL_MS       40     /* also the latency of host commands, so keep it short */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
 #define IDT_POLL      1
 #define IDT_ARRANGE   2
@@ -797,6 +797,22 @@ static void publish_layout(void)
             slot = slot_of(g_wnds[i].hwnd);
             if (slot >= 0 && g_wnds[i].kind == 'A') park(g_wnds[i].hwnd, slot);
         }
+    /* Windows arranges minimised icons along the bottom of the 970-row screen, but the visible
+       shell column is only as tall as the phone shows, so icons are moved up into the free row
+       at the bottom of the column. Windows keeps drawing them; only where changes. */
+    {
+        int n = 0;
+        for (i = 0; i < g_nWnds; i++) {
+            RECT rc;
+            if (g_wnds[i].kind != 'I' && !(g_wnds[i].kind == 'S' && IsIconic(g_wnds[i].hwnd))) continue;
+            GetWindowRect(g_wnds[i].hwnd, &rc);
+            if (rc.bottom > (int)g_shellH || rc.left >= (int)g_shellW) {
+                int x = 8 + n * 96, y = (int)g_shellH - ICON_ROW + 4;
+                SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            }
+            n++;
+        }
+    }
     for (i = 0; i < g_nWnds; i++)
         if (g_wnds[i].kind == 'O') {
             RECT rc, orc;
@@ -868,6 +884,7 @@ static void publish_layout(void)
 #define CMD_REPUBLISH 6    /* host restored a snapshot: tell it everything again */
 #define CMD_SCROLL   7     /* arg: slot | direction << 8 (1 up, 2 down, 3 left, 4 right), lines in bits 12+ */
 #define CMD_SHELLSIZE 8    /* arg: shell column height; the host knows the real viewport, we do not */
+#define CMD_SETPOS   9     /* string "x,y": put the pointer there (absolute, for a tap) */
 
 static void run_host_command(void)
 {
@@ -921,6 +938,18 @@ static void run_host_command(void)
         if (!lines) lines = 3;
         for (k = 0; k < lines; k++) SendMessage(target, msg, sb, 0L);
         SendMessage(target, msg, SB_ENDSCROLL, 0L);
+        return;
+    }
+    if (cmd == CMD_SETPOS) {
+        /* A tap wants the pointer exactly at one point. Steering a relative PS/2 mouse there
+           overshoots whenever the guest is busy; SetCursorPos does not. The driver reports the
+           new position through MoveCursor, which is the host's cue to press the button. */
+        char buf[24]; int n = 0, x = 0, y = 0; unsigned b;
+        while (n < (int)sizeof(buf) - 1 && (b = rd(R_CMDSTR) & 0xFF) != 0) buf[n++] = (char)b;
+        buf[n] = 0;
+        for (n = 0; buf[n] && buf[n] != ','; n++) x = x * 10 + (buf[n] - '0');
+        if (buf[n] == ',') for (n++; buf[n]; n++) y = y * 10 + (buf[n] - '0');
+        SetCursorPos(x, y);
         return;
     }
     if (cmd == CMD_RUN) {
