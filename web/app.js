@@ -265,6 +265,8 @@ const emulator = new V86({
   autostart: false,
 });
 window.emulator = emulator;
+if (params.get("selftest")) import("./selftest.js").then(m => m.run());              // app tour (PLAN.md Fix 5)
+if (params.get("remote")) import("./remote.js").then(m => m.run(params.get("remote"))); // parked-phone remote control
 
 function status(msg) { $("status").textContent = msg; }
 

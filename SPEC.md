@@ -1200,6 +1200,57 @@ iOS keyboard (needs a gesture map or a hardware keyboard).
   `pv_text_mem` (16K), the VDD's traffic never reaches `svga_memory`. No driver or image rebuild
   needed: vga.js is loaded as a source module.
 
+### 2026-09-02 — the phone tests itself: app tour (Fix 5) and remote control
+- `web/selftest.js` (ES module, draws nothing): opens every stock app (NOTEPAD, WRITE, CALC, CLOCK,
+  CHARMAP, CARDFILE, CALENDAR, PBRUSH, SOL, WINMINE, MSHEARTS, WINFILE, CONTROL, PRINTMAN, CLIPBRD,
+  SOUNDREC, MPLAYER, RECORDER, TERMINAL, PACKAGER, WINHELP, TASKMAN via Ctrl+Esc, DOSPRMPT.PIF) and
+  per app checks: `launch` (PVW within 15 s, 40 s for the DOS box), `fit` (window ≤ 352 × shell
+  height, also re-checked after the dialog), `slot` (born inside its 640-wide column), `scale` (the
+  host layer's client scale `placed[].s` ≥ 1), `tap` (synthetic TouchEvents on `#pres` through
+  app.js's real handlers; node: the absolute pointer), `kbd` (guest asks for the keyboard, PVK 1;
+  asserted for NOTEPAD, CARDFILE, TERMINAL, DOSPRMPT, informational elsewhere), `focus` (DOM
+  evidence only: `activeElement===#kbd`, visualViewport height; informational because a synthetic
+  touch never grants focus on iOS), one dialog where cheap (`dlg` appeared, `dlg1` exactly one PVO,
+  `dlgfit`, `dlgsep` dialog rect does not intersect the owner rect — Fix 2's acceptance, `?lenient=1`
+  makes it informational, `dlgpix` with `?pixels=1`: the composite on `#pres` inside the owner layer
+  and outside the dialog layer must not contain a 120 px run of the dialog's caption colour,
+  `dlgclose` after Esc), `close` (CMD_CLOSE, a "save changes?" box gets N, Alt+F4 fallback), `layer`
+  (host layer gone), `alive` (instruction counter advancing). Dialogs: Notepad/Write Alt+F,O;
+  Paintbrush a stroke then Alt+F,X (save prompt) then Esc; Hearts' welcome box (Enter). Waits are
+  resolved from a Worker heartbeat so a hidden tab's throttled timers cannot stall the tour; in a
+  hidden tab `pvPresent()` is called by hand (with requestAnimationFrame stubbed for the call so no
+  second render loop is left behind). Output: `TOUR-BEGIN …`, one `TOUR <app> check=pass|fail|info…`
+  line per app and `TOUR-END pass=N fail=M …` posted to `/__log` (shots/devicelog.txt), plus
+  `window.tourResult`. Options: `?apps=NOTEPAD,CALC`, `?pixels=1`, `?lenient=1`.
+- Three ways to run it:
+  1. Phone: `http://192.168.4.62:8311/?selftest=1` (app.js loader:
+     `if (params.get("selftest")) import("./selftest.js").then(m => m.run());`), read the TOUR lines
+     in shots/devicelog.txt.
+  2. Pane (mobile preset, own tab, own server `node tools/devserver.mjs 8330 .`): with the loader in
+     place `?selftest=1`, or by hand from the console `import("/web/selftest.js").then(m => m.run())`.
+  3. Headless: `node tools/tour.mjs [--apps A,B] [--lenient] [--log] [--json out.json]` boots v86 in
+     node from image/current.json (image + boot snapshot, restored then CMD_REPUBLISH), runs the same
+     tour over the bus (no DOM: scale/focus/pixel checks skipped, taps via PVMOUSE absolute
+     registers), prints the table and exits 1 on any failure. Needs `v86/build/v86.wasm`,
+     `v86/bios/*.bin` and the image files present locally (all gitignored). ~4 min for all apps.
+- Remote control (`web/remote.js`, loader `if (params.get("remote")) import("./remote.js").then(m => m.run(params.get("remote")));`):
+  park the phone on `http://192.168.4.62:8311/solitaire?remote=phone&diag=1`. The page long-polls
+  `GET /__cmd?device=phone` (held up to 25 s, JSON command or 204; the poll doubles as presence),
+  runs the command and posts `{id, ok, value|error, t}` to `POST /__result?device=phone`, which the
+  server stores in `shots/results/<device>/<id>.json` and appends to the device log. Commands
+  (`POST /__cmd?device=phone` with `{type, ...}`): `ping`, `eval {src}` (async function body; `emulator`,
+  `pvState`, `pvPresent`, `sleep`, `tap`, `keys`, `type` in scope), `shot` (PNG of `#pres` to
+  `/__shot`), `tour {opts}`, `reload {query}`, `tap {x,y}` (real DOM TouchEvents), `type {text}`
+  (`keyboard_send_text`), `keys {codes}` (PS/2 scancodes). Commands older than 60 s are dropped by
+  the server and refused by the page. `GET /__devices` lists devices with last-seen; `GET
+  /__result?device=&id=` long-polls one result. Wake: `navigator.wakeLock('screen')` requested on
+  load, on the first touch and on every visibilitychange; without it a muted looping 16×16 inline
+  MP4 (1 px, near-transparent element) is played; which one is active is logged (`remote phone wake …`).
+  CLI: `node tools/remote.mjs [--server http://host:8311] [--timeout s] <device> <type> [args]`, e.g.
+  `node tools/remote.mjs phone tour`, `… phone shot`, `… phone eval 'return pvState().layers'`,
+  `… phone tap 200 400`, `… phone keys 0x38 0x21 0xa1 0xb8`, `… --devices`. Exit 0 ok, 1 failed
+  (or a tour with failures), 2 no answer.
+
 ### 2026-09-02 — host pass: keyboard in the gesture, audio unlock, placement, scroll policy, watchdog, PWA
 Verified in the pane (mobile preset, synthetic TouchEvents through the real handlers, `?diag=1` trace
 in `shots/devicelog.txt`); "phone" items below are what still needs the real device.
