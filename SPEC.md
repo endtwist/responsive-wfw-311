@@ -1118,3 +1118,16 @@ Printer" on port `C:\PRINT.PRN`, spooler off: Write prints, PVMON ships the file
 form feed = new page; verified rendering) and downloads it. PSCRIPT.DRV still spins the guest
 (~150 MIPS, ring 3, low-memory segment) as soon as the Print dialog creates the printer DC; kept
 off. Ghostscript wasm path ready for PostScript jobs (`locateFile` on the CDN) once PSCRIPT works.
+
+**2026-09-02 — tearing root cause (agent, verified live).** `set_page` in the Phase 2 port of
+VGAUTIL.ASM did `pushf … pop ax / pop ds / push dx / shr dl,2 / popf`, so `popf` restored the
+just-pushed DX instead of the saved flags: `set_banko`'s carry (read vs write bank) became bit 0 of
+the 64K bank number, and every screen-source blit starting on an odd 64K bank (16 rows at pitch
+4096) programmed the WRITE bank and read its first rows through a stale READ bank — Solitaire's
+save-under captured frame/desktop grey and painted it back. Found by monkey-patching vga.js A000
+accesses per row with the guest stack, hot-patching the 27 bytes in guest RAM to confirm. Fixed
+(76d71e4) with a node unit test of the banked VGA emulation (v86/tests/pv/banked-vga.mjs, 43
+checks). Four touch drags now leave a clean tableau. Also this round: DOS box closable (PIF
+fEnableClose), 352 wide, keyboard by module (KeyboardApps=WINOA386 TERMINAL); shell maximise
+clamps to its column; shell-owned dialogs created inside the column by the hook; menu row drawn
+between the side borders.
