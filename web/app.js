@@ -1244,6 +1244,13 @@ function drawWindow(g, src, w) {
     const innerW = w.hw - 2 * hl;                     // between the side borders, never over them
     const mwG = Math.min(w.ww - 2 * inset.l, Math.round(innerW / c)), mwH = Math.round(mwG * c);
     blit(g, src, w.wx + inset.l, w.wy + capRow, mwG, menuRow, w.x + hl, w.y + capH, mwH, menuH);
+    // a child dialog whose top overlaps the menu bar leaves its caption in this strip: fill it with
+    // the menu bar's own colour (sampled at the strip's left end)
+    const mx0 = w.wx + inset.l, my0 = w.wy + capRow;
+    for (const h of overlapsOf(w, { x0: mx0, y0: my0, x1: mx0 + mwG, y1: my0 + menuRow })) {
+      g.fillStyle = sampleColour(src, mx0 + 1, h.y);
+      g.fillRect(w.x + hl + (h.x - mx0) * c, w.y + capH + (h.y - my0) * c, h.w * c, h.h * c);
+    }
     if (innerW > mwH)                                 // pad with the menu bar's own background
       blit(g, src, w.wx + inset.l + mwG - 2, w.wy + capRow, 2, menuRow, w.x + hl + mwH, w.y + capH, innerW - mwH, menuH);
   }
@@ -1292,9 +1299,10 @@ function drawWindow(g, src, w) {
 /* Owned (PVO) and transient (PVT) windows that overlap layer `w`'s client area in guest screen
    space, as guest rects clipped to the visible part of the client. Only children that are drawn as
    their own layer count, so nothing is ever masked without a copy on top. */
-function overlapsOf(w) {
+function overlapsOf(w, rect) {
   const out = [];
-  const cx0 = w.gx + w.px, cy0 = w.gy + w.py, cx1 = cx0 + w.vw, cy1 = cy0 + w.vh;
+  const cx0 = rect ? rect.x0 : w.gx + w.px, cy0 = rect ? rect.y0 : w.gy + w.py;
+  const cx1 = rect ? rect.x1 : cx0 + w.vw, cy1 = rect ? rect.y1 : cy0 + w.vh;
   for (const L of layers) {
     if (L === w.src || (L.kind !== "O" && L.kind !== "T")) continue;
     if (L.kind === "O" && L.slot < 0) continue;                 // shell dialogs are not layers
