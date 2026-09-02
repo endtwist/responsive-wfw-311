@@ -34,16 +34,17 @@ function viewport() {
   return [w, h];
 }
 
-// Magnification stays available as a control, but nothing reaches for it on its own.
+// Magnification: `zoom` multiplies the fit scale. On a narrow screen it is driven by how much
+// of the screen the guest says has content on it, so the view frames the content by itself.
 let zoom = 1;
+let autoZoom = true;
 const ZOOM_MIN = 0.5, ZOOM_MAX = 6;
 
 const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
-const PHONE_W = 448;                     // narrow screens get a readable desktop
 
 function computeMode() {
   const [vw, vh] = viewport();
-  const floorW = vw < 600 ? PHONE_W : MIN_W;
+  const floorW = MIN_W;          // always a full-width screen; the host scales the picture
   let scale = Math.max(1, floorW / vw, MIN_H / vh);
   scale = Math.min(scale, MAX_W / vw, MAX_H / vh);
   const w = Math.max(floorW, Math.min(MAX_W, Math.floor(vw * scale / 8) * 8));
@@ -146,20 +147,64 @@ emulator.add_listener("screen-set-size", s => {
   $("mode").textContent = `${s[0]}x${s[1]}`;
   emulator.screen_set_scale(1, 1);
   fitCanvas();
+  // Give the guest a moment to paint the new size, then drop the held frame.
+  clearTimeout(holdTimer);
+  holdTimer = setTimeout(() => { const h = $("hold"); if (h) h.hidden = true; }, 900);
 });
 
 /* The guest reports where it thinks the pointer is, which is what lets a tap become the right
    relative motion for the stock PS/2 mouse driver (SPEC 2.5). */
 let guestCursor = null;
 emulator.bus.register("pv-cursor", xy => { guestCursor = { x: xy[0], y: xy[1] }; });
+
+// PVMON reports the width of the occupied part of the screen. Scale so that fills the viewport.
+let contentW = 0;
+emulator.bus.register("pv-debug", line => {
+  const m = /^PVW (\d+)/.exec(line);
+  if (!m) return;
+  contentW = +m[1];
+  applyAutoZoom();
+});
+
+function applyAutoZoom() {
+  const c = document.querySelector("#screen_container canvas");
+  if (!autoZoom || !c || !c.width || !contentW) return;
+  const [vw] = viewport();
+  const want = (vw / (contentW + 8)) / fitScale(c);      // relative to the fit scale
+  const z = Math.max(1, Math.min(ZOOM_MAX, want));
+  if (Math.abs(z - zoom) < 0.02) return;
+  zoom = z;
+  fitCanvas();
+  const box = $("screen_container");
+  box.scrollLeft = 0; box.scrollTop = 0;                 // content starts at the top left
+}
 window.pvGuestCursor = () => guestCursor;
 
 /* ------------------------------------------------------------------------- mode controller */
+/* A mode change tears down the canvas and the guest repaints from scratch, so the screen goes
+   blank for a moment. Hold the last frame over the top until the new one has been painted, so a
+   resize dissolves into the new size instead of flashing through black. */
+let holdTimer = 0;
+function holdLastFrame() {
+  const c = document.querySelector("#screen_container canvas");
+  const hold = $("hold");
+  if (!c || !c.width || !hold) return;
+  try {
+    hold.width = c.width; hold.height = c.height;
+    hold.getContext("2d").drawImage(c, 0, 0);
+    hold.style.width = c.style.width; hold.style.height = c.style.height;
+    hold.hidden = false;
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => { hold.hidden = true; }, 1400);
+  } catch (e) { hold.hidden = true; }
+}
+
 let lastReq = null;
 function requestMode(force) {
   const { w, h, zoom: scale } = computeMode();
   if (!force && lastReq && Math.abs(lastReq.w - w) < 8 && Math.abs(lastReq.h - h) < 8) return;
   lastReq = { w, h };
+  holdLastFrame();
   emulator.bus.send("pv-request-mode", [w, h]);
   $("zoom").textContent = scale === 1 ? "" : `scale ${scale.toFixed(2)}`;
   fitCanvas();
@@ -208,6 +253,7 @@ function fitCanvas() {
 }
 
 function setZoom(z, anchor) {
+  autoZoom = false;                    // a deliberate zoom takes over from the automatic one
   const c = document.querySelector("#screen_container canvas");
   const box = $("screen_container");
   const before = c ? fitScale(c) * zoom : 1;
@@ -379,7 +425,8 @@ window.addEventListener("pagehide", () => saveState(emulator));
 
 $("zoomin").onclick = () => setZoom(zoom * 1.25);
 $("zoomout").onclick = () => setZoom(zoom / 1.25);
-$("zoomfit").onclick = () => { setZoom(1); const b = $("screen_container"); b.scrollLeft = 0; b.scrollTop = 0; };
+$("zoomfit").onclick = () => { setZoom(1); autoZoom = true; contentW && applyAutoZoom();
+  const b = $("screen_container"); b.scrollLeft = 0; b.scrollTop = 0; };
 $("savebtn").onclick = () => saveState(emulator);
 $("resetbtn").onclick = async () => { await clearState(); location.search = "?fresh=1"; };
 

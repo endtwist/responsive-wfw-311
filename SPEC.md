@@ -894,3 +894,35 @@ fixed layout rather than laying out controls cannot be reflowed this way. **Soli
 arranged as child windows, so there is nothing for PVMON to move. Fixing that needs either a
 per-application rule that gives such programs a wider screen, or leaving them to landscape, where
 a phone gets 864x400 and everything works at a comfortable size anyway.
+
+**2026-09-01 (night) — where the scaling should happen, and the flicker fixes.**
+
+*Flicker.* Reflowing a dialog moved a dozen controls one at a time, and each move repainted the
+dialog. Painting is now suppressed for the dialog (`WM_SETREDRAW`) while the controls move with
+`SWP_NOREDRAW`, then turned back on for a single paint. Two things must **not** be suppressed,
+learned by breaking them: the dialog's own resize, because suppressing it means Windows never
+invalidates the area the shrinking dialog *uncovers* and the old right-hand button column stays
+painted on the desktop behind it; and the erase on the parent's final invalidate, because content
+that moved leaves the area behind it stale. Children still invalidate without erasing, since each
+paints its whole surface. The host also holds the last frame over the canvas across a mode change
+so a resize does not flash through black.
+
+*Where to scale.* A guest window cannot be scaled on its own: everything lands in one framebuffer
+at one scale, and a window only lays out at 640 columns if the screen is 640. Two arrangements
+work, and they differ in what shrinks:
+
+1. **Narrow screen, reflowed dialogs.** The screen is 448, so the desktop is readable, and dialogs
+   are reflowed to fit it. Applications that draw a fixed layout wider than that, Solitaire being
+   the example, cannot be reflowed and stay broken.
+2. **Full 640 screen, host scales the picture.** The guest never re-modes, so nothing relayouts
+   and nothing flashes. PVMON keeps the shell to a 448-column strip and reports how far right the
+   content reaches; the page scales so that much fills the viewport. Solitaire genuinely lays out
+   at 640 and deals correctly, and the host scales it to fit.
+
+Arrangement 2 is what is currently built. Its cost is that the scale applies to the whole picture,
+so opening a wide window scales the shell down with it. Scaling *only* that window would mean
+compositing two scales from one framebuffer, and the pixels behind the window are not in the
+framebuffer to draw underneath it, so a smaller overlay would leave a ring of the window's own
+pixels around itself. The variant that avoids this is to frame the *focused* window: give it the
+whole screen so scaling to fit it is scaling only it, and scale back to the shell strip on return
+to the desktop. That is a small change from what exists and has not been built yet.

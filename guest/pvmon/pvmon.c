@@ -56,6 +56,8 @@ static void dbgnum(const char *s, unsigned a, unsigned b)
 }
 
 static HINSTANCE g_hInst;
+static unsigned g_shellW;          /* WIN.INI [PVMon] ShellWidth: keep the shell this narrow */
+static unsigned g_lastPub;         /* last content width published to the host */
 static unsigned g_fitW, g_fitH;     /* screen the window fixer is fitting to */
 static unsigned g_prevW, g_prevH;   /* screen it is fitting from */
 
@@ -71,12 +73,15 @@ static FARPROC g_repaintProc;
 
 BOOL CALLBACK __export RepaintChild(HWND hwnd, LPARAM lParam)
 {
-    InvalidateRect(hwnd, NULL, TRUE);
+    InvalidateRect(hwnd, NULL, FALSE);
     return TRUE;
 }
 
 static void repaint_tree(HWND hwnd)
 {
+    /* The parent erases, because content that moved leaves the area behind it stale; the
+       controls do not, since each paints its whole surface. Erasing once per window rather than
+       once per control is the difference between a flicker and a flash. */
     InvalidateRect(hwnd, NULL, TRUE);
     if (g_repaintProc) EnumChildWindows(hwnd, (WNDENUMPROC)g_repaintProc, 0L);
     UpdateWindow(hwnd);
@@ -169,6 +174,9 @@ static void arrange_shell(void)
     int cx = GetSystemMetrics(SM_CXSCREEN), cy = GetSystemMetrics(SM_CYSCREEN);
     pm = FindWindow("Progman", NULL);
     if (!pm) return;
+    /* On a narrow display the shell is kept to a comfortable strip rather than the whole screen,
+       so the host can magnify that strip and still show all of it. */
+    if (g_shellW && (unsigned)cx > g_shellW) cx = (int)g_shellW;
     SetWindowPos(pm, NULL, 0, 0, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
     mdi = GetWindow(pm, GW_CHILD);               /* Program Manager's MDI client */
     if (!mdi) return;
@@ -472,6 +480,10 @@ static void patch_user_metrics(unsigned w, unsigned h)
  * normally sit in a column down the right simply end up in a row along the bottom, which is what
  * the same dialog would look like if it had been designed for a narrow screen.
  */
+#ifndef WM_SETREDRAW
+#define WM_SETREDRAW 0x000B
+#endif
+
 #define DLG_MARGIN   8
 #define DLG_GAP      6
 #define MAX_KIDS     40
@@ -518,6 +530,11 @@ static BOOL reflow_dialog(HWND dlg, int screenW)
     org.x = 0; org.y = 0;
     ClientToScreen(dlg, &org);           /* screen position of the dialog's client origin */
 
+    /* Moving a dozen controls one at a time repaints the dialog a dozen times, which is what the
+       flicker is. Turn painting off for the dialog, move everything with SWP_NOREDRAW so no
+       repaints are generated on the way, then turn it back on and paint once. */
+    SendMessage(dlg, WM_SETREDRAW, FALSE, 0L);
+
     /* Anything whose right edge still lands on screen keeps its place. */
     fitBottom = org.y;
     for (i = 0; i < g_nKids; i++) {
@@ -539,13 +556,13 @@ static BOOL reflow_dialog(HWND dlg, int screenW)
             rowH = 0;
         }
         SetWindowPos(g_kids[i].hwnd, NULL, rowX - org.x, rowY - org.y, 0, 0,
-                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOREDRAW);
         rowX += g_kids[i].cx + DLG_GAP;
         if (g_kids[i].cy > rowH) rowH = g_kids[i].cy;
         if (rowX - org.x > widest) widest = rowX - org.x;
         moved++;
     }
-    if (!moved) return FALSE;
+    if (!moved) { SendMessage(dlg, WM_SETREDRAW, TRUE, 0L); return FALSE; }
 
     /* Grow the frame back around the new content: the difference between the window and client
        rectangles is the border and caption we have to add back. */
@@ -553,11 +570,62 @@ static BOOL reflow_dialog(HWND dlg, int screenW)
     newW = widest + DLG_MARGIN + (org.x - dr.left) * 2;
     newH = (rowY + rowH - org.y) + DLG_MARGIN + (org.y - dr.top) + (org.x - dr.left);
     if (newW > avail) newW = avail;
+    SendMessage(dlg, WM_SETREDRAW, TRUE, 0L);
+    /* The dialog's own resize is left to redraw normally: suppressing it means Windows never
+       invalidates the area the dialog uncovers as it shrinks, which leaves the old right-hand
+       column of buttons painted on the desktop behind it. */
     SetWindowPos(dlg, NULL, DLG_MARGIN, dr.top, newW, newH, SWP_NOZORDER | SWP_NOACTIVATE);
-    InvalidateRect(dlg, NULL, TRUE);
+    InvalidateRect(dlg, NULL, TRUE);     /* one erase and one paint, for the whole dialog */
     UpdateWindow(dlg);
     dbgnum("pvmon: reflowed a dialog to", (unsigned)newW, (unsigned)newH);
     return TRUE;
+}
+
+/* How far to the right does the content on screen reach? */
+static unsigned g_needW;
+
+BOOL CALLBACK __export MeasureWindow(HWND hwnd, LPARAM lParam)
+{
+    RECT rc;
+    char cls[24];
+    unsigned w;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return TRUE;
+    if (lstrcmp(cls, "PVMonitor") == 0) return TRUE;      /* our own hidden window */
+    GetWindowRect(hwnd, &rc);
+    w = (unsigned)(rc.right > 0 ? rc.right : 0);
+    if (w > g_needW && w <= 2560) g_needW = w;
+    return TRUE;
+}
+
+static unsigned content_width(void)
+{
+    FARPROC proc;
+    g_needW = 0;
+    proc = MakeProcInstance((FARPROC)MeasureWindow, g_hInst);
+    if (!proc) return 0;
+    EnumWindows((WNDENUMPROC)proc, 0L);
+    FreeProcInstance(proc);
+    return g_needW;
+}
+
+/* Tell the host how much of the screen actually has content on it.
+ *
+ * The screen itself stays a fixed size, so nothing in the guest ever re-modes and nothing
+ * flashes. Instead the host scales what it shows: when only the shell is up it can magnify the
+ * narrow strip the shell occupies, and when something wide like Solitaire is open it scales out
+ * to show all of it. Solitaire genuinely is laid out at the full width -- it is the picture that
+ * is scaled, not the application -- so its table is correct and clicks still land, because the
+ * host maps taps through the same scale. */
+static void publish_content_width(void)
+{
+    unsigned w = content_width();
+    char buf[32];
+    if (!w) w = g_shellW ? g_shellW : (unsigned)GetSystemMetrics(SM_CXSCREEN);
+    if (w == g_lastPub) return;
+    g_lastPub = w;
+    wsprintf(buf, "PVW %u", w);
+    dbg(buf);
 }
 
 /* Find dialogs that overflow the screen and reflow them. */
@@ -635,6 +703,7 @@ static void poll(HWND hwnd)
     if (w < 320 || h < 200) return;
     g_hostW = w; g_hostH = h;
     if (g_dlgReflow) check_dialogs();
+    publish_content_width();
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
@@ -669,6 +738,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         g_lastGen = rd(R_GEN);
         g_live = GetProfileInt("PVMon", "Live", 0) != 0;
         g_dlgReflow = GetProfileInt("PVMon", "DialogReflow", 1) != 0;
+        g_shellW = (unsigned)GetProfileInt("PVMon", "ShellWidth", 0);
         if (g_live) { dbg("pvmon: live re-mode enabled"); find_user_state(); }
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);
