@@ -1774,3 +1774,16 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   slots (Character Map 785 wide at x=640), which the `slot` check accepts for fixed-layout apps.
   Hearts' welcome box: OK is the default button but a no-op with an empty name, so the tour types a
   letter, then Enter.
+
+### 2026-09-02 — wide shell dialogs become layers
+- A shell-owned dialog (`PVO -1`) wider than the column (About Program Manager 505 wide, Run
+  un-reflowed) had its right part, OK included, off the column. In `placeLayers` such a dialog is
+  now its own layer (`shellDialog`): the whole window scaled by `min(c, vw/ww, vh/wh)`, placed over
+  its copy in the column (clamped into the viewport), hit-tested transient-style so every control
+  maps to guest pixels; `presentOnce` covers the copy's in-column part with the desktop row just
+  above the dialog, stretched, so the layer is the only dialog on screen. Dialogs that fit the
+  column are still drawn in the column as before.
+- Pane (mobile preset; the worktree's image still reflows About PM to 336, so the guest's report
+  was replayed through `emulator.emulator_bus` as `PVO -1 8 79 505 680 …`): layer `375x505 at 0,84
+  s=0.743 shellDialog=true`; a tap at the layer point of OK (guest 66,732) -> `down chrome 66,732
+  About Program Manager`, click, dialog closed (`PVB 1`).

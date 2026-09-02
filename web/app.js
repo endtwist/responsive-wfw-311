@@ -1012,7 +1012,21 @@ function placeLayers(src) {
     const key = layerKey(L);
     // A dialog owned by the shell already shows in the desktop column at desktop scale, and
     // PVMON reflows it to fit there; a second copy as a layer would be a double image.
-    if (L.kind === "O" && L.slot < 0) return;
+    if (L.kind === "O" && L.slot < 0) {
+      if (L.ww <= shell.w) return;                     // fits the column: the desktop copy is the dialog
+      /* A shell dialog wider than the column (About Program Manager 505 wide, Run un-reflowed) has
+         its right part, OK included, off the column and unreachable. It becomes its own layer:
+         the whole window scaled to fit the viewport, placed over its copy in the column (the copy
+         is masked in presentOnce), hit-tested transient-style so every control maps to guest pixels. */
+      const s = Math.min(c, vw / L.ww, vh / L.wh);
+      const hw = Math.round(L.ww * s), hh = Math.round(L.wh * s);
+      let x = Math.round(view.ox + (L.wx - view.x) * c), y = Math.round((L.wy - view.y) * c);
+      x = Math.max(0, Math.min(vw - hw, x));
+      y = Math.max(0, Math.min(vh - hh, y));
+      out.push({ ...L, src: L, key, s, c: s, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
+                 inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, transient: true, shellDialog: true });
+      return;
+    }
     if (L.kind === "S") {
       /* The shell takes part in z-order: when Program Manager is in front it is drawn again, on
          top of the applications, exactly where it already is in the desktop column. */
@@ -1176,10 +1190,26 @@ function hitTest(px, py) {
            y: Math.round(view.y + py / view.scale) };
 }
 
+/* A shell dialog drawn as its own layer leaves its copy in the column: the part of that copy inside
+   the column is covered with the desktop row just above the dialog, stretched (the desktop's own
+   pixels), so the layer is the only dialog on screen. Applied after the desktop blit and again after
+   the shell copy (Program Manager in front re-blits the same pixels). */
+function maskShellDialogCopies(g, src) {
+  for (const w of placed) if (w.shellDialog) {
+    const cx0 = Math.max(view.x, w.wx), cx1 = Math.min(view.x + view.w, w.wx + w.ww);
+    const cy0 = Math.max(view.y, w.wy), cy1 = Math.min(view.y + view.h, w.wy + w.wh);
+    if (cx1 > cx0 && cy1 > cy0) {
+      const sy = w.wy - 1 >= 0 ? w.wy - 1 : Math.min(SHELL_H - 1, w.wy + w.wh);
+      blit(g, src, cx0, sy, cx1 - cx0, 1, view.ox + (cx0 - view.x) * view.scale, (cy0 - view.y) * view.scale,
+           (cx1 - cx0) * view.scale, (cy1 - cy0) * view.scale);
+    }
+  }
+}
 function drawWindow(g, src, w) {
   const c = w.c;
   if (w.transient || w.shellCopy) {
     blit(g, src, w.wx, w.wy, w.ww, w.wh, w.x, w.y, w.hw, w.hh);
+    if (w.shellCopy) maskShellDialogCopies(g, src);
     return;
   }
   const { inset, capRow, menuRow, box, hl, ht, hb } = w;
@@ -1392,6 +1422,7 @@ function presentOnce() {
       const dw = view.w * view.scale, dh = view.h * view.scale;
       blit(g, src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
       placed = narrow() ? placeLayers(src) : [];
+      maskShellDialogCopies(g, src);
       const shift = keyboardShift();
       if (shift) g.translate(0, -shift);
       for (const w of placed) drawWindow(g, src, w);  // back to front
