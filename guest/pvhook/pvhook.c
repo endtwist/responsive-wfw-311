@@ -30,10 +30,11 @@
 #include <conio.h>
 
 #define SLOT_W   640
-#define ICON_ROW  76         /* rows at the bottom of the shell column kept free for minimised icons */
+#define ICON_ROW  88         /* rows at the bottom of the shell column kept free for minimised icons (icon + 2-line label) */
 
 static HINSTANCE g_hInst;
-static HHOOK g_cbt, g_cwp;
+static HHOOK g_cbt, g_cwp, g_mouse;
+static int g_tapOpens = -1;          /* [PVMon] TapOpens: a single tap opens Program Manager items */
 static BOOL g_installed;
 static int g_shellW, g_shellH;       /* the phone frame, from PVMON (runtime) or WIN.INI */
 
@@ -68,10 +69,18 @@ static void module_base(HWND hwnd, char FAR *out, int outlen)
     module_base_i((HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE), out, outlen);
 }
 
+/* The WIN.INI lists are read once (PvHookInstall / PvHookSetShell), never inside a hook call:
+   GetProfileString does file I/O that can yield, and yielding from HCBT_SETFOCUS inside USER's
+   menu loop left Write with all input dead (Notepad, whose Edit class needs no list, survived). */
+static char g_keepList[160], g_kbdList[160];
+static void load_lists(void)
+{
+    GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
+    GetProfileString("PVMon", "KeyboardApps", "", g_kbdList, sizeof(g_kbdList));
+}
 static BOOL in_list(const char FAR *key, const char FAR *name)
 {
-    char list[160]; char FAR *k;
-    GetProfileString("PVMon", key, "", list, sizeof(list));
+    char FAR *list = lstrcmpi(key, "KeepSize") == 0 ? g_keepList : g_kbdList; char FAR *k;
     for (k = list; *k; ) {
         char FAR *e = k; int n;
         while (*e && *e != ' ' && *e != ',') e++;
@@ -94,11 +103,21 @@ static BOOL parse_size(const char FAR *val, int FAR *w, int FAR *h)
 #define PV_DISPI_INDEX 0x1CE
 #define PV_DISPI_DATA  0x1CF
 #define PV_REG_DEBUG   0x16
+/* Index then data: PVMOUSE.DRV's interrupt handler writes the same index register, so the index
+   is rewritten before every byte and read back after (no cli: a ring-3 cli/popf pair hung the
+   system VM, see PVMON's rd/wr). */
 static void pv_dbg(const char FAR *s)
 {
-    outpw(PV_DISPI_INDEX, PV_REG_DEBUG);
-    while (*s) outpw(PV_DISPI_DATA, (unsigned char)*s++);
-    outpw(PV_DISPI_DATA, 10);
+    int tries;
+    for (;; s++) {
+        unsigned c = *s ? (unsigned char)*s : 10;
+        for (tries = 4; tries; tries--) {
+            outpw(PV_DISPI_INDEX, PV_REG_DEBUG);
+            outpw(PV_DISPI_DATA, c);
+            if (inpw(PV_DISPI_INDEX) == PV_REG_DEBUG) break;
+        }
+        if (!*s) break;
+    }
 }
 
 static int shell_w(void)
@@ -127,7 +146,21 @@ typedef struct { HWND hwnd; BOOL fixed; int maxH; } WinInfo;
 #define MAX_INFO 24
 static WinInfo g_info[MAX_INFO];
 
-static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst)
+/* Windows being destroyed. PVMON's poll touches every top-level window (GetWindowText,
+   SetWindowPos: cross-task SendMessages inside USER); one sent to a window whose task is on its
+   way out never returns until something else wakes the scheduler (Print Manager's spooler-off
+   box: PVMON froze until Ctrl+Esc). The hook sees HCBT_DESTROYWND first and remembers the last
+   few, and PVMON skips them (PvHookIsDead) while IsWindow still says yes. */
+static HWND g_dead[8]; static int g_deadAt;
+static void mark_dead(HWND h) { g_dead[g_deadAt++ & 7] = h; }
+BOOL FAR PASCAL __export PvHookIsDead(HWND h)
+{
+    int i;
+    for (i = 0; i < 8; i++) if (g_dead[i] == h) return TRUE;
+    return FALSE;
+}
+
+static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst, DWORD style)
 {
     char mod[16], key[32], line[80];
     int i, free = -1, h;
@@ -145,14 +178,20 @@ static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst)
     if (!mod[0]) {
         /* Windows sends WM_GETMINMAXINFO from inside CreateWindow, before the window's instance
            is known; do not remember an answer given without it (only the class is known) */
-        tmp.hwnd = NULL; tmp.fixed = lstrcmp(cls, "#32770") == 0; tmp.maxH = 0;
+        if (!style) style = GetWindowLong(hwnd, GWL_STYLE);
+        tmp.hwnd = NULL; tmp.fixed = lstrcmp(cls, "#32770") == 0 || !(style & WS_THICKFRAME); tmp.maxH = 0;
         return &tmp;
     }
     wi->hwnd = hwnd;
     /* A program whose main window is a dialog template (Task List, Sound Recorder, Character
        Map, WinVer...) laid its controls out for one size and never re-lays them; so did the
        modules listed in KeepSize (the games, Calculator, Clock, Paintbrush's toolbox...). */
-    wi->fixed = lstrcmp(cls, "#32770") == 0 || in_list("KeepSize", mod);
+    /* A window without WS_THICKFRAME cannot be resized by the user, so its program never lays out
+       to a new size either (Windows Setup's Network Setup: clamped, its text and list were simply
+       cut off). Only user-resizable windows reflow and are clamped; the rest keep their natural
+       size and the host scales them to the phone. */
+    if (!style) style = GetWindowLong(hwnd, GWL_STYLE);
+    wi->fixed = lstrcmp(cls, "#32770") == 0 || !(style & WS_THICKFRAME) || in_list("KeepSize", mod);
     wsprintf(key, "MaxHeight.%s", (LPSTR)mod);
     h = GetProfileInt("PVMon", key, 0);
     wi->maxH = (h > 100) ? h : 0;
@@ -377,11 +416,24 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
         HWND f = (HWND)wParam;
         char cls[24];
         if (f && GetClassName(f, cls, sizeof(cls)) > 0) {
-            if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0 || lstrcmpi(cls, "tty") == 0) pv_dbg("PVK 1");
+            int want = 0;
+            if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0 || lstrcmpi(cls, "tty") == 0) want = 1;
             else {
                 char pcls[24]; HWND parent = GetParent(f);
-                pv_dbg(parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0 ? "PVK 1" : "PVK 0");
+                if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) want = 1;
             }
+            /* Programs that take text in a window of their own class (Write's document, Cardfile's
+               card, Terminal, a DOS box): the focused window is not one of the known non-text
+               classes and its program is listed in [PVMon] KeyboardApps. */
+            if (!want && !(lstrcmpi(cls, "Button") == 0 || lstrcmpi(cls, "Static") == 0 || lstrcmpi(cls, "ScrollBar") == 0 ||
+                           lstrcmpi(cls, "ListBox") == 0 || lstrcmpi(cls, "ComboLBox") == 0 || cls[0] == '#' ||
+                           lstrcmpi(cls, "MDIClient") == 0 || lstrcmp(cls, "PMGroup") == 0 || lstrcmp(cls, "Progman") == 0)) {
+                HWND top = f; char mod[16]; int hops;
+                for (hops = 0; hops < 8 && (GetWindowLong(top, GWL_STYLE) & WS_CHILD); hops++) top = GetParent(top);
+                module_base(top, mod, sizeof(mod));
+                if (mod[0] && in_list("KeyboardApps", mod)) want = 1;
+            }
+            pv_dbg(want ? "PVK 1" : "PVK 0");
         }
     }
     if (code == HCBT_ACTIVATE && shell_w()) {
@@ -390,7 +442,16 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
         if (h && !(GetWindowLong(h, GWL_STYLE) & WS_CHILD) && !IsIconic(h) && !IsZoomed(h) &&
             !GetWindow(h, GW_OWNER) && GetClassName(h, cls, sizeof(cls)) > 0 &&
             !transient_class(cls) && lstrcmp(cls, "Progman") != 0 && lstrcmp(cls, "#32770") != 0) {
-            WinInfo *wi = learn(h, cls, NULL);
+            WinInfo *wi = learn(h, cls, NULL, 0);
+            if (wi->fixed) {
+                /* never resized, but it must sit in one column: Task List centres itself on the
+                   2560-column screen (x = 1095) and would straddle two slots */
+                RECT rc; int colX;
+                GetWindowRect(h, &rc);
+                colX = rc.left < SLOT_W ? SLOT_W : (rc.left / SLOT_W) * SLOT_W;
+                if (rc.left < SLOT_W || rc.right > colX + SLOT_W || rc.top < 0)
+                    SetWindowPos(h, NULL, colX, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            }
             if (!wi->fixed) {
                 RECT rc; int maxH = frame_h_for(wi, FALSE), w, ht;
                 GetWindowRect(h, &rc);
@@ -414,6 +475,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             if (lstrcmpi(mod, "USER") == 0) fix_msgbox(h);        /* a MessageBox */
         }
     }
+    if (code == HCBT_DESTROYWND && wParam && !(GetWindowLong((HWND)wParam, GWL_STYLE) & WS_CHILD)) mark_dead((HWND)wParam);
     if ((code == HCBT_ACTIVATE || code == HCBT_DESTROYWND || code == HCBT_SETFOCUS) && shell_w()) {
         char cls[24];
         HWND h = (HWND)wParam;
@@ -422,6 +484,15 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             for (hops = 0; h && hops < 8 && (GetWindowLong(h, GWL_STYLE) & WS_CHILD); hops++) h = GetParent(h);
         }
         if (h && GetClassName(h, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0 && !(GetWindowLong(h, GWL_STYLE) & WS_CHILD)) {
+            if (code != HCBT_DESTROYWND && !GetWindow(h, GW_OWNER) && !shell_task(h) && !task_main_window(h) && IsWindowVisible(h)) {
+                /* a dialog that is a program of its own (Task List) centred itself on the screen:
+                   put it at the top of the column it fell in before it is reported */
+                RECT rc; int colX;
+                GetWindowRect(h, &rc);
+                colX = rc.left < SLOT_W ? SLOT_W : (rc.left / SLOT_W) * SLOT_W;
+                if (rc.left < SLOT_W || rc.right > colX + SLOT_W || rc.top < 0)
+                    SetWindowPos(h, NULL, colX, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            }
             g_force = (code == HCBT_ACTIVATE) ? h : NULL;
             hook_publish(code == HCBT_DESTROYWND ? h : NULL);
             g_force = NULL;
@@ -458,7 +529,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
         }
         /* a top-level application window: born in the staging column, phone-sized unless it
            draws a fixed layout */
-        wi = learn(hwnd, cls, cs->hInstance);
+        wi = learn(hwnd, cls, cs->hInstance, cs->style);
         module_base_i(cs->hInstance, mod, sizeof(mod));
         wsprintf(key, "Size.%s", (LPSTR)mod);
         if (GetProfileString("PVMon", key, "", val, sizeof(val)) && parse_size(val, &w, &h)) {
@@ -493,7 +564,7 @@ static void clamp_minmax(HWND hwnd, MINMAXINFO FAR *mmi)
     if (GetWindow(hwnd, GW_OWNER)) return;                       /* dialogs do not maximise */
     if (GetClassName(hwnd, cls, sizeof(cls)) <= 0 || transient_class(cls)) return;
     isShell = lstrcmp(cls, "Progman") == 0;
-    if (!isShell) wi = learn(hwnd, cls, NULL);
+    if (!isShell) wi = learn(hwnd, cls, NULL, 0);
     wp.length = sizeof(wp);
     if (!isShell && GetWindowPlacement(hwnd, &wp) && wp.rcNormalPosition.left >= SLOT_W)
         colX = (wp.rcNormalPosition.left / SLOT_W) * SLOT_W;   /* the column it lives in, even when iconic */
@@ -568,7 +639,7 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
         return;
     }
     {
-        WinInfo *wi = learn(hwnd, cls, NULL);
+        WinInfo *wi = learn(hwnd, cls, NULL, 0);
         int maxH;
         if (wi->fixed) return;                                   /* never resized, only kept in its column */
         maxH = frame_h_for(wi, FALSE);
@@ -593,13 +664,42 @@ LRESULT CALLBACK __export PvCwpProc(int code, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(g_cwp, code, wParam, lParam);
 }
 
+/* Single tap opens (Josh): a phone has no double-tap worth asking for. When a left click ends in
+   the client area of a Program Manager group window, a double-click at the same point is posted
+   right behind it; Program Manager's own handler opens the item under the cursor and does nothing
+   on empty space. Captions, scroll bars and frames are non-client and are left alone (a converted
+   caption click would maximise the group). A click on a minimised group's icon (an iconic PMGroup,
+   hit-tested as caption) gets a non-client double-click, which is how Windows restores an icon.
+   WH_MOUSE sees the message as the task retrieves it; HC_NOREMOVE (a PeekMessage look) is skipped
+   so one click is converted once. */
+LRESULT CALLBACK __export PvMouseProc(int code, WPARAM wParam, LPARAM lParam)
+{
+    MOUSEHOOKSTRUCT FAR *m = (MOUSEHOOKSTRUCT FAR *)lParam;
+    if (code == HC_ACTION && m && g_tapOpens > 0 && m->hwnd) {
+        char cls[16];
+        if ((wParam == WM_LBUTTONUP || wParam == WM_NCLBUTTONUP) &&
+            GetClassName(m->hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "PMGroup") == 0) {
+            if (wParam == WM_LBUTTONUP && !IsIconic(m->hwnd)) {
+                POINT pt = m->pt;
+                ScreenToClient(m->hwnd, &pt);
+                PostMessage(m->hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELONG(pt.x, pt.y));
+            } else if (wParam == WM_NCLBUTTONUP && IsIconic(m->hwnd) && m->wHitTestCode == HTCAPTION) {
+                PostMessage(m->hwnd, WM_NCLBUTTONDBLCLK, HTCAPTION, MAKELONG(m->pt.x, m->pt.y));
+            }
+        }
+    }
+    return CallNextHookEx(g_mouse, code, wParam, lParam);
+}
+
 /* Install/remove, called by PVMON. */
 BOOL FAR PASCAL __export PvHookInstall(void)
 {
     if (g_installed) return TRUE;
-    shell_w(); shell_h();
+    shell_w(); shell_h(); load_lists();
     g_cbt = SetWindowsHookEx(WH_CBT, (HOOKPROC)PvCbtProc, g_hInst, NULL);
     g_cwp = SetWindowsHookEx(WH_CALLWNDPROC, (HOOKPROC)PvCwpProc, g_hInst, NULL);
+    g_tapOpens = GetProfileInt("PVMon", "TapOpens", 1);
+    g_mouse = g_tapOpens > 0 ? SetWindowsHookEx(WH_MOUSE, (HOOKPROC)PvMouseProc, g_hInst, NULL) : NULL;
     g_installed = g_cbt != NULL;
     if (!g_cwp) pv_dbg("pvhook: WH_CALLWNDPROC hook failed");
     return g_installed;
@@ -610,13 +710,15 @@ void FAR PASCAL __export PvHookSetShell(int w, int h)
 {
     if (w > 0) g_shellW = w;
     if (h > 0) g_shellH = h;
+    load_lists();
 }
 
 void FAR PASCAL __export PvHookRemove(void)
 {
     if (g_cbt) UnhookWindowsHookEx(g_cbt);
     if (g_cwp) UnhookWindowsHookEx(g_cwp);
-    g_cbt = g_cwp = NULL;
+    if (g_mouse) UnhookWindowsHookEx(g_mouse);
+    g_cbt = g_cwp = g_mouse = NULL;
     g_installed = FALSE;
 }
 

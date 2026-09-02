@@ -1585,3 +1585,75 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
 - `--skip A,B` (headless) / `?skip=A,B` (page) leave apps out; with `--skip PRINTMAN` the other 22
   complete headless and in the pane (Print Manager with the spooler off still stalls PVMON; see
   follow-up 4 — a guest fix, after which the skip goes away).
+### 2026-09-02 — non-resizable windows keep their size; touch scroll routed to MDI children (PVMON v23)
+- **Invariant refined.** Clamping only helps a window that reflows. A top-level window *without*
+  `WS_THICKFRAME` (dialog frames, fixed-layout programs such as Windows Setup's "Network Setup",
+  whose text and driver list were simply cut off at 352) is now fixed-layout by definition, in the
+  hook (`learn()`, from `CREATESTRUCT.style` at birth) and in PVMON (`fixed_layout`,
+  `apply_initial_size`): never shrunk, only kept in its column; the host scales it. Windows with
+  `WS_THICKFRAME` reflow and are clamped as before; `KeepSize` stays as the override for
+  resizable-but-fixed programs (Sound Recorder, the games...); message boxes are still re-laid.
+  Verified: Windows Setup (`WINSETUP.EXE`; `SETUP.EXE` is the DOS setup and runs in a DOS box)
+  main window `PVW 0 1031 265 497 173`, Options -> Change Network Settings ->
+  `PVO 0 640 438 708 378 Network Setup` at its natural width (`PVQ wide WFWSETUP "Network Setup"
+  708x378`). **Tour expectation:** `fit=fail` is acceptable for a window without `WS_THICKFRAME`
+  (and for `KeepSize` modules); the invariant for those is "inside its column", not "352 wide".
+- **CMD_SCROLL** (7) `arg = slot | dir << 8 | lines << 12`; **slot 15 = the shell** (Program
+  Manager). The scroll target is found in order: the focused control if it is inside the window
+  and has a scroll bar of the wanted direction; the active MDI child (`WM_MDIGETACTIVE` on the
+  window's `MDIClient`: a Program Manager group, a File Manager directory window), or its first
+  visible child with such a bar, or the focused control inside it; the window's first child with a
+  bar; the window itself. Plain `WM_VSCROLL`/`WM_HSCROLL` `SB_LINEUP/LINEDOWN` x lines, then
+  `SB_ENDSCROLL`. Verified: with the Main group restored (2 rows visible of 3),
+  `[7, 15 | 2<<8 | 3<<12]` scrolled the group to its last rows and `1<<8` scrolled it back.
+
+### 2026-09-02 — single-tap opens, keyboard report widened, DISPI guard, dead-task guard (PVMON v24)
+- **TapOpens** (`[PVMon] TapOpens=1`, default on): PVHOOK's WH_MOUSE hook converts a left click
+  that ends in the *client* area of a Program Manager group window (`PMGroup`) into a posted
+  `WM_LBUTTONDBLCLK` at the same point, and a click on a minimised group's icon (iconic `PMGroup`,
+  hit-tested HTCAPTION) into `WM_NCLBUTTONDBLCLK`; captions, scroll bars and frames are untouched.
+  Verified: one click on "File Manager" launches it (`PVW ... File Manager`), a click on empty
+  group space does nothing, a caption click only activates.
+- **PVK** (HCBT_SETFOCUS) now also reports 1 when the focused window is not a known non-text
+  control (Button, Static, ScrollBar, ListBox, ComboLBox, `#`-classes, MDIClient, PMGroup, Progman)
+  and its top-level window's module is in `[PVMon] KeyboardApps` (now `WINOA386 TERMINAL WRITE
+  CARDFILE CALENDAR RECORDER NOTEPAD`). Verified: Write's document takes focus -> `PVK 1`; a
+  menu-bar click and Esc produce no report (focus unchanged). Paintbrush's text tool is left to
+  the host's long-press toggle (no hookable caret creation).
+- **DISPI index/data pairs** (PVMOUSE.DRV's interrupt handler writes the same index register):
+  the first attempt (v24) wrapped PVMON's `rd`/`wr` and the hook's `pv_dbg` in `pushf/cli ... popf`
+  and **hung the whole system VM** on the first mouse click on Write's menu bar (heartbeat stopped,
+  no input; bisected: v22/v23 fine, v24 dead, hook version irrelevant) — ring-3 cli is trapped and
+  virtualised by the VMM and a ring-3 popf does not give the interrupt flag back the same way. v25
+  drops cli and checks instead: after each pair the index register is read back and the access is
+  repeated if the handler changed it (a clobbered write lands once in a cursor register the host
+  rewrites on the next move). PVDISP.DRV's BANK.INC and CURSOR.ASM use the DDK's `EnterCrit`;
+  PVDPI runs under DOS before any mouse handler exists.
+- **Dead-task guard**: Print Manager (spooler off) exits the moment its box is dismissed, and a
+  cross-task SendMessage from PVMON's poll to a window of an exiting task (GetWindowText,
+  SetWindowPos) blocked PVMON until Ctrl+Esc. The hook records `HCBT_DESTROYWND` of top-level
+  windows (`PvHookIsDead`), PVMON skips those windows and frees their slot; hidden top-level
+  windows free their slot too (a closed program's window lingers hidden while its task exits, so a
+  new program landed in slot 1). Verified: PRINTMAN box, Esc -> heartbeat continues
+  (`PVH 86397 ... 110179`), Control Panel launched next gets slot 0.
+- Fixed-layout windows are moved into a column at `HCBT_ACTIVATE` when they straddle one
+  (Task List centres itself at x=1095); PVMON then parks them. Terminal: after "Default Serial
+  Port" closes the focus returns to the `Terminal` window, which the widened rule now reports.
+- The "Write menu click kills all input" seen while testing was the v24 cli hang above
+  (heartbeat had stopped too); gone in v25 (cursor moves, `PVH` advances after the same sequence).
+- `WM_WINDOWPOSCHANGING` does reach the hook for some windows after all (`pvhook: clamp
+  CtlPanelClass 471x283 -> 352x283`); the activate-time clamp stays as the backstop.
+
+### 2026-09-02 — icons: user drags respected, label room; MDI icons re-arranged (PVMON v26)
+- Minimised icons are placed once, when first seen minimised (or when they have left the column);
+  an icon whose position differs from the one PVMON set was dragged by the user and stays where it
+  was dropped (per-hwnd record). Previously every poll snapped it back to its cell, so a dragged
+  Program Manager icon "vanished".
+- `ICON_ROW` 76 -> 88 (PVMON, hook, PROGMAN.INI pre-write): 36 px icon + two 20 px label lines fit
+  inside the column (pane: shell 762 -> Program Manager 674 tall, icon at y=678, label to ~758).
+- `arrange_shell` re-sends `WM_MDIICONARRANGE` on a later poll as well, so minimised groups line up
+  along the bottom of the MDI client as it is after the resize; the active group is maximised there
+  (`WM_MDIMAXIMIZE`) on every arrange, including `CMD_SHELLSIZE`.
+- Task List is still first reported at its self-centred x=1095 (the hook's publish runs before its
+  column placement lands); PVMON parks it in a slot on the next poll. Tour: `slot` for TASKMAN reads
+  the first report and fails; harmless.

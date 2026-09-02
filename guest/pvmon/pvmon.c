@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 22     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 26     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -56,8 +56,25 @@
 #define ARRANGE_MS    50     /* the shell starts after us (WIN.INI load=): poll for it, arrange the moment it is up */
 #define ARRANGE_GIVEUP 200   /* polls (10 s) before we stop looking */
 
-static unsigned rd(unsigned idx) { outpw(DISPI_INDEX, idx); return inpw(DISPI_DATA); }
-static void wr(unsigned idx, unsigned v) { outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); }
+/* The adapter is programmed as an index write then a data access. PVMOUSE.DRV's interrupt handler
+   writes the same index register (cursor position 1Dh/1Eh/1Fh), so an interrupt between the two
+   halves would make us read or write the wrong register: a dropped host command, a misread size.
+   cli/popf around the pair was tried and hung the system VM (v24: Write's menu bar, a click ->
+   everything stopped; ring-3 popf does not restore IF the way the VMM's trapped cli expects), so
+   the pair is checked instead: the index register reads back, and if the handler changed it
+   under us the access is repeated. A clobbered write lands once in a cursor register the host
+   rewrites on the next move. */
+static unsigned rd(unsigned idx)
+{
+    unsigned v; int tries = 4;
+    do { outpw(DISPI_INDEX, idx); v = inpw(DISPI_DATA); } while (inpw(DISPI_INDEX) != idx && --tries);
+    return v;
+}
+static void wr(unsigned idx, unsigned v)
+{
+    int tries = 4;
+    do { outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); } while (inpw(DISPI_INDEX) != idx && --tries);
+}
 static void dbg(const char *s) { while (*s) wr(R_DEBUG, (unsigned char)*s++); wr(R_DEBUG, 10); }
 static void dbgnum(const char *s, unsigned a, unsigned b)
 {
@@ -71,6 +88,12 @@ static HINSTANCE g_hookDll;
 typedef BOOL (FAR PASCAL *HOOKINSTALL)(void);
 typedef void (FAR PASCAL *HOOKREMOVE)(void);
 typedef void (FAR PASCAL *HOOKSETSHELL)(int, int);
+typedef BOOL (FAR PASCAL *HOOKISDEAD)(HWND);
+static HOOKISDEAD g_isDead;
+/* A window the hook has seen HCBT_DESTROYWND for: its task may be gone, and a cross-task
+   SendMessage to it (GetWindowText, SetWindowPos) can block PVMON until something else wakes
+   the scheduler. Such windows are left alone even while IsWindow still says yes. */
+static BOOL is_dead(HWND h) { return g_isDead ? g_isDead(h) : FALSE; }
 static unsigned g_shellW, g_shellH;
 /* The hook DLL enforces the geometry invariant in every task; it needs the shell column's
    runtime height, which only the host knows and PVMON receives (CMD_SHELLSIZE). */
@@ -87,6 +110,7 @@ static void install_hook(void)
     g_hookDll = LoadLibrary("PVHOOK.DLL");
     if ((UINT)g_hookDll < 32) { g_hookDll = NULL; dbg("pvmon: PVHOOK.DLL not found"); return; }
     inst = (HOOKINSTALL)GetProcAddress(g_hookDll, "PvHookInstall");
+    g_isDead = (HOOKISDEAD)GetProcAddress(g_hookDll, "PvHookIsDead");
     dbg(inst && inst() ? "pvmon: hooks installed (windows are born in their slots and clamped to the frame)" : "pvmon: CBT hook failed");
     hook_set_shell();
 }
@@ -112,7 +136,7 @@ static void remove_hook(void)
    are simply somewhere on it. That is what gives each application its own framebuffer without
    Windows having any notion of one. */
 #define SLOT_W   640              /* each application gets a full-width slot of its own */
-#define ICON_ROW  76         /* desktop rows kept free for minimised icons (32px icon + title) */
+#define ICON_ROW  88         /* desktop rows kept free for minimised icons: 36 px icon, gap, two 20 px label lines */
 #define MAX_SLOTS 3          /* shell column + this many application columns */
 static char g_lastPub[256];         /* last line published to the host, to avoid repeats */
 static unsigned g_fitW, g_fitH;     /* screen the window fixer is fitting to */
@@ -234,6 +258,7 @@ static UINT find_menu_command(HWND hwnd, const char *want)
 }
 
 static BOOL g_arrangePending;   /* the shell was iconic when its column changed: arrange on restore */
+static int g_arrangeIcons;      /* polls left on which to re-arrange the MDI icons after arrange_shell */
 static void arrange_shell(void)
 {
     HWND pm, mdi, active;
@@ -259,6 +284,7 @@ static void arrange_shell(void)
     active = (HWND)(WORD)SendMessage(mdi, WM_MDIGETACTIVE, 0, 0L);
     if (active) SendMessage(mdi, WM_MDIMAXIMIZE, (WPARAM)active, 0L);
     SendMessage(mdi, WM_MDIICONARRANGE, 0, 0L);
+    g_arrangeIcons = 2;                          /* and again after the layout has settled */
     /* Re-grid the program items inside the group: their positions come from the .GRP files
        and were saved for the old resolution, so captions collide until Program Manager
        re-arranges them itself. */
@@ -697,7 +723,7 @@ BOOL CALLBACK __export FindApp(HWND hwnd, LPARAM lParam)
     char cls[24];
     WndRec *r;
     if (g_nWnds >= MAX_WND) return FALSE;
-    if (!IsWindowVisible(hwnd)) return TRUE;
+    if (!IsWindowVisible(hwnd) || is_dead(hwnd)) return TRUE;
     if (is_transient(hwnd, cls, sizeof(cls))) {
         if (lstrcmp(cls, "PVMonitor") == 0) return TRUE;
         r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->kind = 'T'; r->owner = NULL;
@@ -745,7 +771,8 @@ static int slot_of(HWND hwnd)
     int i, free = -1;
     for (i = 0; i < MAX_SLOTS; i++) if (g_slotWnd[i] == hwnd) return i;
     for (i = 0; i < MAX_SLOTS; i++)
-        if (free < 0 && (g_slotWnd[i] == NULL || !IsWindow(g_slotWnd[i]))) free = i;
+        if (free < 0 && (g_slotWnd[i] == NULL || !IsWindow(g_slotWnd[i]) || is_dead(g_slotWnd[i]) ||
+                         !IsWindowVisible(g_slotWnd[i]))) free = i;   /* a closed program's window lingers hidden while its task exits */
     if (free < 0) return -1;
     g_slotWnd[free] = hwnd;
     return free;
@@ -764,6 +791,7 @@ static int owner_slot(HWND owner)
 
 /* Owned windows are placed once, when first seen; a dialog the program then moves itself is left
    alone unless it leaves its owner's column. */
+static struct { HWND hwnd; int x, y; } g_iconPos[16];   /* where we last put each minimised icon */
 static HWND g_owned[24];
 static BOOL owned_seen(HWND hwnd)               /* TRUE the first time hwnd is seen */
 {
@@ -854,6 +882,7 @@ static void apply_initial_size(HWND hwnd, int slotX)
     /* A program whose main window is a dialog template (Task List, Sound Recorder...) laid its
        controls out once, for its own size: resizing it only crops or strands them. */
     if (GetClassName(hwnd, key, sizeof(key)) > 0 && lstrcmp(key, "#32770") == 0) return;
+    if (!(GetWindowLong(hwnd, GWL_STYLE) & WS_THICKFRAME)) return;
     inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
     if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return;
     base = path;
@@ -891,6 +920,7 @@ static BOOL fixed_layout(HWND hwnd)
     char cls[24], path[128], keep[128], *base, *p, *k;
     HINSTANCE inst;
     if (GetClassName(hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0) return TRUE;
+    if (!(GetWindowLong(hwnd, GWL_STYLE) & WS_THICKFRAME)) return TRUE;   /* not user-resizable: never reflows */
     inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
     if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return FALSE;
     base = path;
@@ -1019,6 +1049,12 @@ static void publish_layout(void)
             RECT src;
             GetWindowRect(g_wnds[i].hwnd, &src);
             if (g_arrangePending) arrange_shell();          /* its column changed while it was an icon */
+            else if (g_arrangeIcons > 0 && --g_arrangeIcons == 0) {
+                /* minimised groups were arranged along the bottom of an MDI client that has since
+                   been resized: line them up along the bottom of the client as it is now */
+                HWND mdi = GetWindow(g_wnds[i].hwnd, GW_CHILD);
+                if (mdi) SendMessage(mdi, WM_MDIICONARRANGE, 0, 0L);
+            }
             else if (IsZoomed(g_wnds[i].hwnd) &&
                      (src.right > (int)g_shellW || src.bottom > (int)g_shellH - ICON_ROW)) {
                 /* the hook makes the shell's maximised rectangle its column; a shell zoomed past
@@ -1038,28 +1074,39 @@ static void publish_layout(void)
     {
         /* Icons sit in cells of SM_CXICONSPACING (WIN.INI IconSpacing=100) across the column, so
            the centred label under each fits inside the column too; a fourth icon starts a second
-           row above. The position goes through SetWindowPlacement, which is how USER itself
-           places an icon, so the icon title follows it (a bare SetWindowPos left titles behind). */
+           row above. An icon is placed when it is first seen minimised, or when it has left the
+           column; one the user has dragged elsewhere (its position differs from the one we set)
+           stays where it was dropped. Placement goes through SetWindowPlacement, which is how
+           USER itself places an icon, so the icon title follows it. */
         int n = 0, cell = GetSystemMetrics(SM_CXICONSPACING), per;
         if (cell < 64) cell = 100;
         per = (int)g_shellW / cell; if (per < 1) per = 1;
         for (i = 0; i < g_nWnds; i++) {
-            RECT rc; WINDOWPLACEMENT wp; int x, y, cx = GetSystemMetrics(SM_CXICON);
+            RECT rc; WINDOWPLACEMENT wp; int x, y, cx = GetSystemMetrics(SM_CXICON), k, slotk = -1;
+            BOOL placed = FALSE, moved = FALSE;
             if (g_wnds[i].kind != 'I' && !(g_wnds[i].kind == 'S' && IsIconic(g_wnds[i].hwnd))) continue;
             GetWindowRect(g_wnds[i].hwnd, &rc);
+            for (k = 0; k < 16; k++) {
+                if (g_iconPos[k].hwnd == g_wnds[i].hwnd) { placed = TRUE; moved = rc.left != g_iconPos[k].x || rc.top != g_iconPos[k].y; slotk = k; break; }
+                if (slotk < 0 && (g_iconPos[k].hwnd == NULL || !IsWindow(g_iconPos[k].hwnd) || !IsIconic(g_iconPos[k].hwnd))) slotk = k;
+            }
             x = (n % per) * cell + (cell - cx) / 2;
             y = (int)g_shellH - ICON_ROW + 4 - (n / per) * ICON_ROW;
             if (y < 0) y = 0;
-            if (rc.left != x || rc.top != y) {
-                wp.length = sizeof(wp);
-                if (GetWindowPlacement(g_wnds[i].hwnd, &wp)) {
-                    wp.flags |= WPF_SETMINPOSITION; wp.ptMinPosition.x = x; wp.ptMinPosition.y = y;
-                    wp.showCmd = SW_SHOWMINNOACTIVE;
-                    SetWindowPlacement(g_wnds[i].hwnd, &wp);
-                } else
-                    SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
-            }
             n++;
+            if (placed && moved && rc.left >= 0 && rc.right <= (int)g_shellW && rc.top >= 0 && rc.bottom + 44 <= (int)g_shellH)
+                continue;                                   /* the user put it there */
+            if (placed && !moved) continue;
+            if (rc.left == x && rc.top == y) { if (slotk >= 0) { g_iconPos[slotk].hwnd = g_wnds[i].hwnd; g_iconPos[slotk].x = x; g_iconPos[slotk].y = y; } continue; }
+            wp.length = sizeof(wp);
+            if (GetWindowPlacement(g_wnds[i].hwnd, &wp)) {
+                wp.flags |= WPF_SETMINPOSITION; wp.ptMinPosition.x = x; wp.ptMinPosition.y = y;
+                wp.showCmd = SW_SHOWMINNOACTIVE;
+                SetWindowPlacement(g_wnds[i].hwnd, &wp);
+            } else
+                SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            GetWindowRect(g_wnds[i].hwnd, &rc);
+            if (slotk >= 0) { g_iconPos[slotk].hwnd = g_wnds[i].hwnd; g_iconPos[slotk].x = rc.left; g_iconPos[slotk].y = rc.top; }
         }
     }
     for (i = 0; i < g_nWnds; i++)
@@ -1204,6 +1251,31 @@ static void enforce_cursor(void)
     if (!g_hideCursor) ShowCursor(TRUE);             /* undo the probe */
 }
 
+/* See CMD_SCROLL. */
+static HWND scroll_target(HWND top, DWORD want)
+{
+    HWND f = GetFocus(), t, mdi, active, child;
+    char c[16];
+    if (f) {
+        for (t = f; GetParent(t); ) t = GetParent(t);
+        if (t == top && (GetWindowLong(f, GWL_STYLE) & want)) return f;
+    }
+    for (mdi = GetWindow(top, GW_CHILD); mdi; mdi = GetWindow(mdi, GW_HWNDNEXT))
+        if (GetClassName(mdi, c, sizeof(c)) > 0 && lstrcmpi(c, "MDIClient") == 0) break;
+    if (mdi) {
+        active = (HWND)(WORD)SendMessage(mdi, WM_MDIGETACTIVE, 0, 0L);
+        if (active && IsWindow(active)) {
+            if (GetWindowLong(active, GWL_STYLE) & want) return active;
+            for (child = GetWindow(active, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+                if (IsWindowVisible(child) && (GetWindowLong(child, GWL_STYLE) & want)) return child;
+            if (f && IsChild(active, f)) return f;          /* a focused list without bars still scrolls */
+        }
+    }
+    for (child = GetWindow(top, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+        if (IsWindowVisible(child) && (GetWindowLong(child, GWL_STYLE) & want)) return child;
+    return top;
+}
+
 static void run_host_command_1(void)
 {
     unsigned cmd = rd(R_CMD), arg;
@@ -1233,28 +1305,21 @@ static void run_host_command_1(void)
         return;
     }
     if (cmd == CMD_SCROLL) {
-        /* Two-finger scrolling from the host: scroll whatever in the slot's window scrolls. The
-           focused control if it is inside that window, else the first child with a scroll bar,
-           else the window itself, gets ordinary WM_VSCROLL/WM_HSCROLL line messages. */
+        /* Two-finger scrolling from the host: arg = slot | direction << 8 | lines << 12, slot byte
+           15 meaning the shell (Program Manager's active group). The thing that scrolls is found in order: the
+           focused control if it is inside the window and has a scroll bar; the active MDI child
+           (a Program Manager group, a File Manager directory window) or the first of its children
+           with a scroll bar; the first child of the window with a scroll bar; the window itself.
+           Ordinary WM_VSCROLL/WM_HSCROLL line messages, so every program scrolls its own way. */
         unsigned slotn = arg & 0xFF, dir = (arg >> 8) & 0xF, lines = (arg >> 12) & 0xF, k;
-        HWND top, target, child;
+        HWND top, target;
         UINT msg = (dir <= 2) ? WM_VSCROLL : WM_HSCROLL;
         WPARAM sb = (dir == 1 || dir == 3) ? SB_LINEUP : SB_LINEDOWN;
-        if (slotn >= MAX_SLOTS) return;
-        top = g_slotWnd[slotn];
-        if (!top || !IsWindow(top)) return;
-        target = GetFocus();
-        if (target) {                       /* is the focus inside this slot's window? */
-            HWND t = target;
-            while (GetParent(t)) t = GetParent(t);
-            if (t != top) target = NULL;
-        }
-        if (!target) {
-            DWORD want = (msg == WM_VSCROLL) ? WS_VSCROLL : WS_HSCROLL;
-            for (child = GetWindow(top, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
-                if (IsWindowVisible(child) && (GetWindowLong(child, GWL_STYLE) & want)) { target = child; break; }
-        }
-        if (!target) target = top;
+        if (slotn == 15) top = FindWindow("Progman", NULL);
+        else if (slotn >= MAX_SLOTS) return;
+        else top = g_slotWnd[slotn];
+        if (!top || !IsWindow(top) || IsIconic(top)) return;
+        target = scroll_target(top, (msg == WM_VSCROLL) ? WS_VSCROLL : WS_HSCROLL);
         if (!lines) lines = 3;
         for (k = 0; k < lines; k++) SendMessage(target, msg, sb, 0L);
         SendMessage(target, msg, SB_ENDSCROLL, 0L);
