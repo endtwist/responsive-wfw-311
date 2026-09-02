@@ -345,6 +345,9 @@ function placeLayers(src) {
   const c = view.scale;                              // chrome scale: same as the desktop's
   layers.forEach((L, i) => {
     const key = layerKey(L);
+    // A dialog owned by the shell already shows in the desktop column at desktop scale, and
+    // PVMON reflows it to fit there; a second copy as a layer would be a double image.
+    if (L.kind === "O" && L.slot < 0) return;
     if (L.kind === "T") {
       const hw = Math.round(L.ww * c), hh = Math.round(L.wh * c);
       let x, y;
