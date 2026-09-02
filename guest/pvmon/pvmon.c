@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 14     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 15     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -727,11 +727,42 @@ static int max_height_for(HWND hwnd)
     return (h > 100 && h < GetSystemMetrics(SM_CYSCREEN)) ? h : GetSystemMetrics(SM_CYSCREEN);
 }
 
+/* Per-module initial size, applied once per window: [PVMon] Size.WINOA386=400x340 makes a
+   windowed DOS session about a phone's width, and WinOldAp then picks a smaller font on its own,
+   so the text is shown near 1:1 instead of a 640-column window scaled down to nothing. */
+static HWND g_sized[16];
+static void apply_initial_size(HWND hwnd, int slotX)
+{
+    char key[48], val[24], *base, *p, path[128];
+    HINSTANCE inst;
+    int i, w = 0, h = 0, free = -1;
+    for (i = 0; i < 16; i++) {
+        if (g_sized[i] == hwnd) return;
+        if (free < 0 && (g_sized[i] == NULL || !IsWindow(g_sized[i]))) free = i;
+    }
+    if (free < 0) return;
+    g_sized[free] = hwnd;
+    inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
+    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return;
+    base = path;
+    for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
+    for (p = base; *p && *p != '.'; p++) ;
+    *p = 0;
+    wsprintf(key, "Size.%s", (LPSTR)base);
+    if (!GetProfileString("PVMon", key, "", val, sizeof(val)) || !val[0]) return;
+    for (p = val; *p >= '0' && *p <= '9'; p++) w = w * 10 + (*p - '0');
+    if (*p == 'x') for (p++; *p >= '0' && *p <= '9'; p++) h = h * 10 + (*p - '0');
+    if (w < 100 || h < 60) return;
+    SetWindowPos(hwnd, NULL, slotX, 0, min(w, (int)SLOT_W), min(h, GetSystemMetrics(SM_CYSCREEN)),
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static void park(HWND hwnd, int slot)
 {
     RECT rc;
     int slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
     int screenH = GetSystemMetrics(SM_CYSCREEN);
+    apply_initial_size(hwnd, slotX);
     if (IsZoomed(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
         SetWindowPos(hwnd, NULL, slotX, 0, (int)SLOT_W, max_height_for(hwnd),

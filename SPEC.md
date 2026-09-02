@@ -1049,3 +1049,13 @@ column. System font 20 px so Program Manager's menu stays on one row at 352. MS-
 PIF now runs it windowed with Alt+Enter disabled (`tools/pifwin.py`), since a full-screen DOS
 session switches the display to text mode under the compositor. Open: Solitaire drag residue
 (driver screen-to-screen blit), icons still 32 px bitmaps.
+
+**2026-09-02 — DOS box.** With a 386 enhanced DOS session running, USER only calls the driver's
+MoveCursor on the next mouse interrupt, so `SetCursorPos` moves the pointer but the host waited a
+full timeout for confirmation: PVMON now writes the cursor registers itself after SetCursorPos
+(confirmation 11 ms with the DOS box open, was >1200). The DOS box's PIF is windowed, Alt+Enter
+disabled, priorities 20/10. `[PVMon] Size.WINOA386=400x340` (PVMON applies a per-module initial
+size once per window) makes the DOS window a phone's width, so its text is shown at ~1:1 with a
+horizontal scroll bar (WinOldAp does not switch fonts on its own; a smaller DOSAPP.FON face would
+give all 80 columns). The emulator itself slows sharply while a DOS VM runs (phone: 64 -> 11-37
+MIPS), which is the remaining lag.
