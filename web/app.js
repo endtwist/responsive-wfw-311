@@ -1863,11 +1863,20 @@ function installKeyboard() {
     if (ev.isComposing) return;                          // wait for the composition to end
     const text = kbdRead(inp);
     for (const ch of text) if (ch !== "\n" && ch !== "\r") emulator.keyboard_send_text(ch);
-    if (inp.isContentEditable && /\n/.test(text)) emulator.keyboard_send_text("\n");   // Enter in a contenteditable arrives as a newline
-    kbdClear(inp);
+    kbdClear(inp);                                       // newlines: handled once, in beforeinput
+  });
+  /* Enter and Backspace in the contenteditable: exactly one source. iOS fires keydown (sometimes
+     twice, keyCode 229 then Enter) AND beforeinput/input for the same key, and preventDefault on
+     the keydown does not stop the insertion, so Enter went to the guest two or three times. */
+  inp.addEventListener("beforeinput", ev => {
+    if (!inp.isContentEditable) return;
+    const t = ev.inputType || "";
+    if (t === "insertParagraph" || t === "insertLineBreak") { ev.preventDefault(); emulator.keyboard_send_text("\n"); }
+    else if (t === "deleteContentBackward") { ev.preventDefault(); emulator.bus.send("keyboard-code", 0x0E); emulator.bus.send("keyboard-code", 0x8E); }
   });
   inp.addEventListener("compositionend", () => { const t = kbdRead(inp); for (const ch of t) emulator.keyboard_send_text(ch); kbdClear(inp); });
   inp.addEventListener("keydown", ev => {
+    if (inp.isContentEditable) return;                   // handled in beforeinput
     if (ev.key === "Enter") { emulator.keyboard_send_text("\n"); ev.preventDefault(); }
     if (ev.key === "Backspace") { emulator.bus.send("keyboard-code", 0x0E); emulator.bus.send("keyboard-code", 0x8E); ev.preventDefault(); }
   });
