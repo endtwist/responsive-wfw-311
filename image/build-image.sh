@@ -77,7 +77,7 @@ H=$SHELLH; [ "$H" = 0 ] && H=760
 # clamps to the runtime shell height). JezzBall (JEZZ) has a fixed playfield: natural size, scaled.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 PVMon.Size.SKI=${W}x${H} "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZ" \
+  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 Paintbrush.width=536 Paintbrush.height=300 PVMon.Size.SKI=${W}x${H} "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZ" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
   "windows.device=$( [ "$PRINTER" = TTY ] && echo "Text Printer,TTY" || echo "PDF Printer,PSCRIPT" ),C:\\PRINT.PRN" \
