@@ -1039,3 +1039,13 @@ back-to-back synthetic drags. Icons are 32x32 bitmaps inside the programs, so th
 the only native lever: shell column 352 wide (≈1.14x on a 402-pt phone, icons ≈37 pt). Open:
 Solitaire's drag residue reproduces on the fast pane guest too, so it is the driver's
 screen-to-screen blit (bank crossings at 4096 pitch, 16 rows per 64K), not the pointer.
+
+**2026-09-02 — absolute drag motion, dialogs, DOS box.** Relative PS/2 packets lag far behind a
+finger on the phone's slow guest while `SetCursorPos` via PVMON lands in tens of milliseconds, so
+drag motion now goes through the absolute path too (Windows raises WM_MOUSEMOVE for the dragging
+program); three back-to-back synthetic drags land exactly. Dialog reflow is judged against the
+shell column (the screen is 2560 wide, so nothing ever overflowed it): Run reflows to 327 in a 352
+column. System font 20 px so Program Manager's menu stays on one row at 352. MS-DOS Prompt: the
+PIF now runs it windowed with Alt+Enter disabled (`tools/pifwin.py`), since a full-screen DOS
+session switches the display to text mode under the compositor. Open: Solitaire drag residue
+(driver screen-to-screen blit), icons still 32 px bitmaps.
