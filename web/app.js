@@ -335,7 +335,7 @@ emulator.add_listener("emulator-ready", async () => {
   // IndexedDB itself can hang on iOS Chrome (the first boot after a blocked delete never returned
   // from the open): never let the boot wait on it for more than 3 s.
   let snap = null;
-  if (!(params.get("fresh") || params.get("reset") || boot.retry)) {
+  if (!(params.get("fresh") || params.get("reset") || params.get("restart") || boot.retry)) {
     try { snap = await withTimeout(loadState(), 3000); } catch (e) { boot.errors.push("loadState: " + (e && e.message)); bootStep("local snapshot skipped: " + (e && e.message)); }
   }
   if (snap) { boot.path = "local"; boot.localBytes = snap.byteLength; bootStep(`local snapshot ${snap.byteLength}`); }
@@ -369,6 +369,18 @@ emulator.add_listener("emulator-ready", async () => {
 });
 
 emulator.add_listener("screen-set-size", s => {
+  /* Windows exited to DOS (text mode after the desktop was up). AUTOEXEC would run WIN again — a
+     full boot with the logo flickering through at phone speed. Restarting from the shipped
+     snapshot is the same result in two seconds, and the local snapshot must not be saved from
+     this state (desktopReady is cleared so pagehide's saveState refuses). */
+  if (desktopReady && s[2] === 0 && !params.get("noexitrestart")) {
+    desktopReady = false;
+    report("exit", "Windows exited to DOS; restarting from the shipped snapshot");
+    status("Windows exited; restarting");
+    const u = new URL(location.href); u.searchParams.set("restart", "1");
+    setTimeout(() => location.replace(u.toString()), 400);
+    return;
+  }
   $("mode").textContent = `${s[0]}x${s[1]}`;
   emulator.screen_set_scale(1, 1);
   fitCanvas();
