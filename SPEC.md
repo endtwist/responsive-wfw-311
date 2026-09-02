@@ -1029,3 +1029,13 @@ the log. Testing: synthetic `TouchEvent`s through the real handlers in the (hidd
 with the app's `sleep()` driven by the worker heartbeat so background throttling cannot stall it;
 regression = tap, card drag (incl. off-layer), caption drag, desktop tap, menu, Program Manager to
 front, minimise/restore.
+
+**2026-09-02 (early) — drag pipeline and icon scale.** The phone trace showed each touchmove being
+queued as its own guest round-trip, so a 0.4 s drag became seconds of backlog on a slow guest and
+the next gesture queued behind it (and shared press flags were clobbered by the next gesture,
+firing right-clicks). A press is now one pipeline with its own state: place, press, a single
+follow loop steering to the latest finger position, release once caught up. Verified with three
+back-to-back synthetic drags. Icons are 32x32 bitmaps inside the programs, so the desktop scale is
+the only native lever: shell column 352 wide (≈1.14x on a 402-pt phone, icons ≈37 pt). Open:
+Solitaire's drag residue reproduces on the fast pane guest too, so it is the driver's
+screen-to-screen blit (bank crossings at 4096 pitch, 16 rows per 64K), not the pointer.
