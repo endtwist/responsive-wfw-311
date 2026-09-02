@@ -1077,7 +1077,9 @@ function placeLayers(src) {
         // Coincident only when the owner is shown near 1:1; a dialog inside a 0.3x-scaled owner
         // (Paintbrush's save prompt in a 1280-wide window) would be unreadable, so it is drawn as
         // its own layer centred on its copy instead; the owner's clip hole stays under it.
-        if (overlaps && owner.zs >= 0.8) {
+        // …and only if the dialog fits the viewport at that scale; a 600-wide Control Panel dialog
+        // drawn coincident at 1:1 had to be panned to reach its buttons.
+        if (overlaps && owner.zs >= 0.8 && L.ww * owner.zs <= vw && L.wh * owner.zs <= vh) {
           const zs = owner.zs;
           const hw = Math.round(L.ww * zs), hh = Math.round(L.wh * zs);
           const x = Math.round(owner.x + owner.hl + (L.wx - ox0) * zs);
