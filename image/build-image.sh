@@ -3,16 +3,20 @@
 #   changes/system/*   -> C:\WINDOWS\SYSTEM
 #   changes/windows/*  -> C:\WINDOWS
 #   changes/root/*     -> C:\
+#   changes/games/*    -> C:\GAMES  (games=1, default; each known game also gets a Program Manager
+#                         item in the Games group via tools/grpadd.py: SKI.EXE "SkiFree" is in the
+#                         repo, JEZZ.EXE "JezzBall" is picked up when dropped in — see SPEC 2026-09-02)
 # then apply SYSTEM.INI edits via tools/inied.py.
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
 #        [fakescreen=1|0] ([PVMon] FakeScreen: USER reports the phone frame as the screen, SPEC 2026-09-02) [hookclamp=1|0] (0 = PVHOOK measuring mode, never ship)
 #        [spooler=yes|no] [printer=PSCRIPT|TTY]  -- which of the two installed printers is the default:
 #        "PDF Printer" (PSCRIPT.DRV, HP LaserJet III PostScript, graphics) or "Text Printer" (TTY.DRV,
 #        Generic / Text Only); both print to the file port C:\PRINT.PRN, which PVMON ships to the host.
+#        [games=1|0]  -- install changes/games/ as C:\GAMES with Program Manager items (default 1)
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; esac; done
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; games=*) GAMES=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
@@ -20,6 +24,20 @@ for f in changes/system/*;  do mcopy -o $M "$f" ::/WINDOWS/SYSTEM/; done
 for f in changes/windows/*; do mcopy -o $M "$f" ::/WINDOWS/; done
 for f in changes/root/*;    do mcopy -o $M "$f" ::/; done
 TMP=$(mktemp -d)
+# Games: C:\GAMES plus one Program Manager item per known game (GAMES.GRP is binary; tools/grpadd.py
+# rewrites it with the icon taken from the executable). SkiFree (SKI.EXE, 1991, free from its author,
+# ski.ihoc.net) is in the repo; JezzBall (Entertainment Pack 4, not redistributable) is installed the
+# moment JEZZ.EXE (+ JEZZ.HLP) is dropped into changes/games/. Unknown files are copied, no item.
+if [ "$GAMES" = 1 ] && [ -d changes/games ] && [ -n "$(ls changes/games)" ]; then
+  mmd $M ::/GAMES 2>/dev/null || true
+  for f in changes/games/*; do mcopy -o $M "$f" ::/GAMES/; done
+  mcopy -n $M ::/WINDOWS/GAMES.GRP $TMP/GAMES.GRP
+  for g in "SKI.EXE:SkiFree" "JEZZ.EXE:JezzBall"; do
+    exe=${g%%:*}; title=${g#*:}
+    if [ -f "changes/games/$exe" ]; then python3 ../tools/grpadd.py $TMP/GAMES.GRP "$title" "C:\\GAMES\\$exe" --exe "changes/games/$exe"; fi
+  done
+  mcopy -o $M $TMP/GAMES.GRP ::/WINDOWS/GAMES.GRP
+fi
 # boot=win (default): AUTOEXEC runs WIN in a loop, so PVMON's exit-to-DOS resize comes straight
 # back up at the new mode. boot=pvtest: run the DOS adapter test first, then WIN. boot=dos: prompt.
 {
@@ -53,9 +71,12 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 # natural size is not the frame, KeepSize for fixed-layout programs that must never be resized
 # (dialog-template main windows such as Task List are detected by class and need no key).
 W=$SHELLW; [ "$W" = 0 ] && W=352
+H=$SHELLH; [ "$H" = 0 ] && H=760
+# SkiFree (module SKI) draws its slope in whatever client it gets: the whole phone frame (the hook
+# clamps to the runtime shell height). JezzBall (JEZZ) has a fixed playfield: natural size, scaled.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH" \
+  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 PVMon.Size.SKI=${W}x${H} "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZ" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
   "windows.device=$( [ "$PRINTER" = TTY ] && echo "Text Printer,TTY" || echo "PDF Printer,PSCRIPT" ),C:\\PRINT.PRN" \
