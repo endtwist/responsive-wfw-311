@@ -192,7 +192,17 @@ far_set_page	ENDP
 
 PUBLIC	set_page
 set_page	PROC	NEAR
-;	DL = 64K bank; CF set = destination (write) bank, clear = source (read) bank
+;	DL = 64K bank; CF set = destination (write) bank, clear = source (read) bank.
+;	Returns DL = 256K bank (shifted), as the V7 original did; DH and all other
+;	registers are preserved.
+;
+;	History: the first port did "push dx / shr dl,2 / popf", so popf restored DX
+;	(not the saved flags) into FLAGS: CF became bit 0 of the 64K bank number and
+;	the saved flags came back in DX. Every screen-source blt that started on an
+;	odd 64K bank therefore programmed the *write* bank and read its first rows
+;	(up to the first bank crossing) from whatever the read bank was left at,
+;	which is where Solitaire's save-under bitmaps picked up the desktop grey and
+;	stale card fragments they later restored onto the felt.
 	pushf
 	push	ds
 	push	ax
@@ -201,13 +211,11 @@ set_page	PROC	NEAR
 	mov	al,dl
 	and	al,3
 	mov	ds:[pv_page],al
+	shr	dl,2				;256K bank, before the flags come back
 	pop	ax
 	pop	ds
-	push	dx
-	shr	dl,2
 	popf					;carry flag is important
 	call	set_banko
-	pop	dx
         ret
 set_page    ENDP				;
 
