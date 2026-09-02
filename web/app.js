@@ -907,9 +907,18 @@ function placeLayers(src) {
           ? Math.round(owner.y + (L.wy - owner.wy) * c)                   // hangs off the chrome
           : Math.round(owner.y + owner.ht + (L.wy - owner.gy) * owner.s);
       } else { x = Math.round(view.ox + L.wx * c); y = Math.round(L.wy * c); }
-      x = Math.max(0, Math.min(vw - hw, x));
-      y = Math.max(0, Math.min(vh - hh, y));
-      out.push({ ...L, key, s: c, c, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
+      /* Shown as far as possible: anchored where it popped up, shifted up/left so the whole of it
+         fits when it can. A popup taller or wider than the viewport (a long View menu, a combo
+         drop-down) cannot scroll in the guest, so the user pans it instead: layerPos holds the pan,
+         clamped so the layer's far edge can be brought into view and no further (never a gap). */
+      x = hw > vw ? 0 : Math.max(0, Math.min(vw - hw, x));        // too wide: start at its left edge
+      y = hh > vh ? 0 : Math.max(0, Math.min(vh - hh, y));        // too tall: start at its top, pan for the rest
+      const pan = layerPos[key];
+      if (pan) {
+        x = hw > vw ? Math.max(vw - hw, Math.min(0, x + pan.dx)) : x;
+        y = hh > vh ? Math.max(vh - hh, Math.min(0, y + pan.dy)) : y;
+      }
+      out.push({ ...L, key, s: c, c, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0, ax: x - (pan ? pan.dx : 0), ay: y - (pan ? pan.dy : 0),
                  inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, transient: true });
       return;
     }
@@ -973,7 +982,9 @@ function placeLayers(src) {
     // A window that fits stays entirely on screen; one that does not may hang off the edges, but
     // never so far that less than a thumb's width of it is left to grab.
     const x = Math.max(40 - hw, Math.min(vw - 40, p.x));   // at least a thumb's width stays on screen
-    const y = Math.max(0, Math.min(vh - Math.round(capRow * c), p.y));
+    // a window taller than the viewport (a dialog on a short landscape screen) may be panned up
+    // until its bottom edge shows, since the guest cannot scroll it; a shorter one keeps its caption on screen
+    const y = Math.max(Math.min(0, vh - hh), Math.min(vh - Math.round(capRow * c), p.y));
     /* Pinch zoom: the frame keeps its fitted size and the client area inside it is shown at a
        larger scale, panned. z = 1 is "fit". */
     const zp = layerZoom[key] || { z: 1, px: 0, py: 0 };
@@ -1502,6 +1513,34 @@ function pressStart(ev) {
     }, 600);
     return "drag";
   }
+  /* A transient (menu, drop-down, switcher) or a dialog that does not fit the viewport is panned by
+     one finger anywhere on it: the guest cannot scroll it, so the layer is moved instead, clamped
+     in placeLayers so its clipped edge can be brought into view and no further. A finger that does
+     not travel is still a click at the pixel under it. */
+  const w = h.win;
+  if (w && (w.transient || w.kind === "O") && !w.shellCopy) {
+    const [vw, vh] = viewport();
+    if (w.hw > vw || w.hh > vh) {
+      const common = { startX: px, startY: py, moved: false, guest: mapThrough(w, px, py), timer: 0, toggled: false, fitW: w.hw <= vw, fitH: w.hh <= vh };
+      if (w.coincident) {
+        /* A dialog drawn coincident with its copy inside the owner's capture must stay coincident, so
+           the owner layer is what pans, bounded so the dialog's clipped edge comes into view and no
+           further (a wide Open box on a portrait phone). */
+        const owner = placed.find(o => o.kind === "W" && o.slot === w.slot && !o.transient);
+        if (!owner) return null;
+        const offX = w.x - owner.x, offY = w.y - owner.y;
+        chromeDrag = { ...common, key: owner.key, pan: "O", base: { x: owner.x, y: owner.y },
+                       bounds: { minX: vw - w.hw - offX, maxX: -offX, minY: vh - w.hh - offY, maxY: -offY } };
+      } else if (w.transient) {
+        chromeDrag = { ...common, key: w.key, pan: "T", base: { ...(layerPos[w.key] || { dx: 0, dy: 0 }) } };
+      } else {
+        chromeDrag = { ...common, key: w.key, pan: "O", base: { x: w.x, y: w.y },
+                       bounds: { minX: vw - w.hw, maxX: 0, minY: vh - w.hh, maxY: 0 } };
+      }
+      diag(`pan start ${w.kind}${w.coincident ? " (owner pans)" : ""} ${w.title} ${w.hw}x${w.hh} in ${vw}x${vh}`);
+      return "drag";
+    }
+  }
   return null;
 }
 
@@ -1509,7 +1548,17 @@ function dragMove(ev) {
   if (!chromeDrag) return false;
   const { px, py } = hostPoint(ev);
   if (Math.hypot(px - chromeDrag.startX, py - chromeDrag.startY) > 6) chromeDrag.moved = true;
-  if (chromeDrag.moved) layerPos[chromeDrag.key] = { x: Math.round(px - chromeDrag.dx), y: Math.round(py - chromeDrag.dy) };
+  if (!chromeDrag.moved) return true;
+  const mx = chromeDrag.fitW ? 0 : Math.round(px - chromeDrag.startX), my = chromeDrag.fitH ? 0 : Math.round(py - chromeDrag.startY);
+  if (chromeDrag.pan === "T") layerPos[chromeDrag.key] = { dx: chromeDrag.base.dx + mx, dy: chromeDrag.base.dy + my };
+  else if (chromeDrag.pan === "O") {
+    const b = chromeDrag.bounds;
+    let x = chromeDrag.base.x + mx, y = chromeDrag.base.y + my;
+    if (!chromeDrag.fitW) x = Math.max(b.minX, Math.min(b.maxX, x)); else x = chromeDrag.base.x;
+    if (!chromeDrag.fitH) y = Math.max(b.minY, Math.min(b.maxY, y)); else y = chromeDrag.base.y;
+    layerPos[chromeDrag.key] = { x: Math.round(x), y: Math.round(y) };
+  }
+  else layerPos[chromeDrag.key] = { x: Math.round(px - chromeDrag.dx), y: Math.round(py - chromeDrag.dy) };
   return true;
 }
 
