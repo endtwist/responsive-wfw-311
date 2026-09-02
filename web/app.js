@@ -850,7 +850,10 @@ function installTouch() {
     let steered = null;
     for (;;) {
       const t = G.latest;
-      if (t && (!steered || steered.x !== t.x || steered.y !== t.y)) { await steerTo(t); steered = t; continue; }
+      // Absolute placement for drag motion too: on a phone the guest runs slowly enough that
+      // relative PS/2 packets lag behind the release, while SetCursorPos through PVMON lands in
+      // tens of milliseconds and Windows generates the WM_MOUSEMOVE for the dragging program.
+      if (t && (!steered || steered.x !== t.x || steered.y !== t.y)) { await placePointer(t); steered = t; continue; }
       if (!G.active) break;
       await sleep(16);
     }
