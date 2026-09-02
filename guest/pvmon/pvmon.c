@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 23     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 24     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -56,8 +56,16 @@
 #define ARRANGE_MS    50     /* the shell starts after us (WIN.INI load=): poll for it, arrange the moment it is up */
 #define ARRANGE_GIVEUP 200   /* polls (10 s) before we stop looking */
 
-static unsigned rd(unsigned idx) { outpw(DISPI_INDEX, idx); return inpw(DISPI_DATA); }
-static void wr(unsigned idx, unsigned v) { outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); }
+/* The adapter is programmed as an index write then a data access. PVMOUSE.DRV's interrupt handler
+   writes the same index register (cursor position 1Dh/1Eh/1Fh), so an interrupt between the two
+   halves would make us read or write the wrong register: a dropped host command, a misread size.
+   Each pair runs with interrupts off, restoring the caller's flag (we may already be in cli). */
+unsigned pv_cli(void);
+#pragma aux pv_cli = "pushf" "pop ax" "cli" value [ax] modify exact [ax];
+void pv_sti(unsigned f);
+#pragma aux pv_sti = "push ax" "popf" parm [ax] modify exact [];
+static unsigned rd(unsigned idx) { unsigned f = pv_cli(), v; outpw(DISPI_INDEX, idx); v = inpw(DISPI_DATA); pv_sti(f); return v; }
+static void wr(unsigned idx, unsigned v) { unsigned f = pv_cli(); outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); pv_sti(f); }
 static void dbg(const char *s) { while (*s) wr(R_DEBUG, (unsigned char)*s++); wr(R_DEBUG, 10); }
 static void dbgnum(const char *s, unsigned a, unsigned b)
 {
@@ -71,6 +79,12 @@ static HINSTANCE g_hookDll;
 typedef BOOL (FAR PASCAL *HOOKINSTALL)(void);
 typedef void (FAR PASCAL *HOOKREMOVE)(void);
 typedef void (FAR PASCAL *HOOKSETSHELL)(int, int);
+typedef BOOL (FAR PASCAL *HOOKISDEAD)(HWND);
+static HOOKISDEAD g_isDead;
+/* A window the hook has seen HCBT_DESTROYWND for: its task may be gone, and a cross-task
+   SendMessage to it (GetWindowText, SetWindowPos) can block PVMON until something else wakes
+   the scheduler. Such windows are left alone even while IsWindow still says yes. */
+static BOOL is_dead(HWND h) { return g_isDead ? g_isDead(h) : FALSE; }
 static unsigned g_shellW, g_shellH;
 /* The hook DLL enforces the geometry invariant in every task; it needs the shell column's
    runtime height, which only the host knows and PVMON receives (CMD_SHELLSIZE). */
@@ -87,6 +101,7 @@ static void install_hook(void)
     g_hookDll = LoadLibrary("PVHOOK.DLL");
     if ((UINT)g_hookDll < 32) { g_hookDll = NULL; dbg("pvmon: PVHOOK.DLL not found"); return; }
     inst = (HOOKINSTALL)GetProcAddress(g_hookDll, "PvHookInstall");
+    g_isDead = (HOOKISDEAD)GetProcAddress(g_hookDll, "PvHookIsDead");
     dbg(inst && inst() ? "pvmon: hooks installed (windows are born in their slots and clamped to the frame)" : "pvmon: CBT hook failed");
     hook_set_shell();
 }
@@ -697,7 +712,7 @@ BOOL CALLBACK __export FindApp(HWND hwnd, LPARAM lParam)
     char cls[24];
     WndRec *r;
     if (g_nWnds >= MAX_WND) return FALSE;
-    if (!IsWindowVisible(hwnd)) return TRUE;
+    if (!IsWindowVisible(hwnd) || is_dead(hwnd)) return TRUE;
     if (is_transient(hwnd, cls, sizeof(cls))) {
         if (lstrcmp(cls, "PVMonitor") == 0) return TRUE;
         r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->kind = 'T'; r->owner = NULL;
@@ -745,7 +760,8 @@ static int slot_of(HWND hwnd)
     int i, free = -1;
     for (i = 0; i < MAX_SLOTS; i++) if (g_slotWnd[i] == hwnd) return i;
     for (i = 0; i < MAX_SLOTS; i++)
-        if (free < 0 && (g_slotWnd[i] == NULL || !IsWindow(g_slotWnd[i]))) free = i;
+        if (free < 0 && (g_slotWnd[i] == NULL || !IsWindow(g_slotWnd[i]) || is_dead(g_slotWnd[i]) ||
+                         !IsWindowVisible(g_slotWnd[i]))) free = i;   /* a closed program's window lingers hidden while its task exits */
     if (free < 0) return -1;
     g_slotWnd[free] = hwnd;
     return free;

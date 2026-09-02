@@ -33,7 +33,8 @@
 #define ICON_ROW  76         /* rows at the bottom of the shell column kept free for minimised icons */
 
 static HINSTANCE g_hInst;
-static HHOOK g_cbt, g_cwp;
+static HHOOK g_cbt, g_cwp, g_mouse;
+static int g_tapOpens = -1;          /* [PVMon] TapOpens: a single tap opens Program Manager items */
 static BOOL g_installed;
 static int g_shellW, g_shellH;       /* the phone frame, from PVMON (runtime) or WIN.INI */
 
@@ -94,11 +95,19 @@ static BOOL parse_size(const char FAR *val, int FAR *w, int FAR *h)
 #define PV_DISPI_INDEX 0x1CE
 #define PV_DISPI_DATA  0x1CF
 #define PV_REG_DEBUG   0x16
+/* Index then data: PVMOUSE.DRV's interrupt handler writes the same index register, so the
+   pair runs with interrupts off (restoring the caller's flag). */
+unsigned pv_cli(void);
+#pragma aux pv_cli = "pushf" "pop ax" "cli" value [ax] modify exact [ax];
+void pv_sti(unsigned f);
+#pragma aux pv_sti = "push ax" "popf" parm [ax] modify exact [];
 static void pv_dbg(const char FAR *s)
 {
+    unsigned f = pv_cli();
     outpw(PV_DISPI_INDEX, PV_REG_DEBUG);
     while (*s) outpw(PV_DISPI_DATA, (unsigned char)*s++);
     outpw(PV_DISPI_DATA, 10);
+    pv_sti(f);
 }
 
 static int shell_w(void)
@@ -126,6 +135,20 @@ static BOOL transient_class(const char FAR *cls)
 typedef struct { HWND hwnd; BOOL fixed; int maxH; } WinInfo;
 #define MAX_INFO 24
 static WinInfo g_info[MAX_INFO];
+
+/* Windows being destroyed. PVMON's poll touches every top-level window (GetWindowText,
+   SetWindowPos: cross-task SendMessages inside USER); one sent to a window whose task is on its
+   way out never returns until something else wakes the scheduler (Print Manager's spooler-off
+   box: PVMON froze until Ctrl+Esc). The hook sees HCBT_DESTROYWND first and remembers the last
+   few, and PVMON skips them (PvHookIsDead) while IsWindow still says yes. */
+static HWND g_dead[8]; static int g_deadAt;
+static void mark_dead(HWND h) { g_dead[g_deadAt++ & 7] = h; }
+BOOL FAR PASCAL __export PvHookIsDead(HWND h)
+{
+    int i;
+    for (i = 0; i < 8; i++) if (g_dead[i] == h) return TRUE;
+    return FALSE;
+}
 
 static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst, DWORD style)
 {
@@ -383,11 +406,24 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
         HWND f = (HWND)wParam;
         char cls[24];
         if (f && GetClassName(f, cls, sizeof(cls)) > 0) {
-            if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0 || lstrcmpi(cls, "tty") == 0) pv_dbg("PVK 1");
+            int want = 0;
+            if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0 || lstrcmpi(cls, "tty") == 0) want = 1;
             else {
                 char pcls[24]; HWND parent = GetParent(f);
-                pv_dbg(parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0 ? "PVK 1" : "PVK 0");
+                if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) want = 1;
             }
+            /* Programs that take text in a window of their own class (Write's document, Cardfile's
+               card, Terminal, a DOS box): the focused window is not one of the known non-text
+               classes and its program is listed in [PVMon] KeyboardApps. */
+            if (!want && !(lstrcmpi(cls, "Button") == 0 || lstrcmpi(cls, "Static") == 0 || lstrcmpi(cls, "ScrollBar") == 0 ||
+                           lstrcmpi(cls, "ListBox") == 0 || lstrcmpi(cls, "ComboLBox") == 0 || cls[0] == '#' ||
+                           lstrcmpi(cls, "MDIClient") == 0 || lstrcmp(cls, "PMGroup") == 0 || lstrcmp(cls, "Progman") == 0)) {
+                HWND top = f; char mod[16]; int hops;
+                for (hops = 0; hops < 8 && (GetWindowLong(top, GWL_STYLE) & WS_CHILD); hops++) top = GetParent(top);
+                module_base(top, mod, sizeof(mod));
+                if (mod[0] && in_list("KeyboardApps", mod)) want = 1;
+            }
+            pv_dbg(want ? "PVK 1" : "PVK 0");
         }
     }
     if (code == HCBT_ACTIVATE && shell_w()) {
@@ -397,6 +433,15 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             !GetWindow(h, GW_OWNER) && GetClassName(h, cls, sizeof(cls)) > 0 &&
             !transient_class(cls) && lstrcmp(cls, "Progman") != 0 && lstrcmp(cls, "#32770") != 0) {
             WinInfo *wi = learn(h, cls, NULL, 0);
+            if (wi->fixed) {
+                /* never resized, but it must sit in one column: Task List centres itself on the
+                   2560-column screen (x = 1095) and would straddle two slots */
+                RECT rc; int colX;
+                GetWindowRect(h, &rc);
+                colX = rc.left < SLOT_W ? SLOT_W : (rc.left / SLOT_W) * SLOT_W;
+                if (rc.left < SLOT_W || rc.right > colX + SLOT_W || rc.top < 0)
+                    SetWindowPos(h, NULL, colX, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            }
             if (!wi->fixed) {
                 RECT rc; int maxH = frame_h_for(wi, FALSE), w, ht;
                 GetWindowRect(h, &rc);
@@ -420,6 +465,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             if (lstrcmpi(mod, "USER") == 0) fix_msgbox(h);        /* a MessageBox */
         }
     }
+    if (code == HCBT_DESTROYWND && wParam && !(GetWindowLong((HWND)wParam, GWL_STYLE) & WS_CHILD)) mark_dead((HWND)wParam);
     if ((code == HCBT_ACTIVATE || code == HCBT_DESTROYWND || code == HCBT_SETFOCUS) && shell_w()) {
         char cls[24];
         HWND h = (HWND)wParam;
@@ -599,6 +645,33 @@ LRESULT CALLBACK __export PvCwpProc(int code, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(g_cwp, code, wParam, lParam);
 }
 
+/* Single tap opens (Josh): a phone has no double-tap worth asking for. When a left click ends in
+   the client area of a Program Manager group window, a double-click at the same point is posted
+   right behind it; Program Manager's own handler opens the item under the cursor and does nothing
+   on empty space. Captions, scroll bars and frames are non-client and are left alone (a converted
+   caption click would maximise the group). A click on a minimised group's icon (an iconic PMGroup,
+   hit-tested as caption) gets a non-client double-click, which is how Windows restores an icon.
+   WH_MOUSE sees the message as the task retrieves it; HC_NOREMOVE (a PeekMessage look) is skipped
+   so one click is converted once. */
+LRESULT CALLBACK __export PvMouseProc(int code, WPARAM wParam, LPARAM lParam)
+{
+    MOUSEHOOKSTRUCT FAR *m = (MOUSEHOOKSTRUCT FAR *)lParam;
+    if (code == HC_ACTION && m && g_tapOpens > 0 && m->hwnd) {
+        char cls[16];
+        if ((wParam == WM_LBUTTONUP || wParam == WM_NCLBUTTONUP) &&
+            GetClassName(m->hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "PMGroup") == 0) {
+            if (wParam == WM_LBUTTONUP && !IsIconic(m->hwnd)) {
+                POINT pt = m->pt;
+                ScreenToClient(m->hwnd, &pt);
+                PostMessage(m->hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELONG(pt.x, pt.y));
+            } else if (wParam == WM_NCLBUTTONUP && IsIconic(m->hwnd) && m->wHitTestCode == HTCAPTION) {
+                PostMessage(m->hwnd, WM_NCLBUTTONDBLCLK, HTCAPTION, MAKELONG(m->pt.x, m->pt.y));
+            }
+        }
+    }
+    return CallNextHookEx(g_mouse, code, wParam, lParam);
+}
+
 /* Install/remove, called by PVMON. */
 BOOL FAR PASCAL __export PvHookInstall(void)
 {
@@ -606,6 +679,8 @@ BOOL FAR PASCAL __export PvHookInstall(void)
     shell_w(); shell_h();
     g_cbt = SetWindowsHookEx(WH_CBT, (HOOKPROC)PvCbtProc, g_hInst, NULL);
     g_cwp = SetWindowsHookEx(WH_CALLWNDPROC, (HOOKPROC)PvCwpProc, g_hInst, NULL);
+    g_tapOpens = GetProfileInt("PVMon", "TapOpens", 1);
+    g_mouse = g_tapOpens > 0 ? SetWindowsHookEx(WH_MOUSE, (HOOKPROC)PvMouseProc, g_hInst, NULL) : NULL;
     g_installed = g_cbt != NULL;
     if (!g_cwp) pv_dbg("pvhook: WH_CALLWNDPROC hook failed");
     return g_installed;
@@ -622,7 +697,8 @@ void FAR PASCAL __export PvHookRemove(void)
 {
     if (g_cbt) UnhookWindowsHookEx(g_cbt);
     if (g_cwp) UnhookWindowsHookEx(g_cwp);
-    g_cbt = g_cwp = NULL;
+    if (g_mouse) UnhookWindowsHookEx(g_mouse);
+    g_cbt = g_cwp = g_mouse = NULL;
     g_installed = FALSE;
 }
 

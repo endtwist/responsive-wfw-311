@@ -1485,3 +1485,37 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   bar; the window itself. Plain `WM_VSCROLL`/`WM_HSCROLL` `SB_LINEUP/LINEDOWN` x lines, then
   `SB_ENDSCROLL`. Verified: with the Main group restored (2 rows visible of 3),
   `[7, 15 | 2<<8 | 3<<12]` scrolled the group to its last rows and `1<<8` scrolled it back.
+
+### 2026-09-02 — single-tap opens, keyboard report widened, DISPI guard, dead-task guard (PVMON v24)
+- **TapOpens** (`[PVMon] TapOpens=1`, default on): PVHOOK's WH_MOUSE hook converts a left click
+  that ends in the *client* area of a Program Manager group window (`PMGroup`) into a posted
+  `WM_LBUTTONDBLCLK` at the same point, and a click on a minimised group's icon (iconic `PMGroup`,
+  hit-tested HTCAPTION) into `WM_NCLBUTTONDBLCLK`; captions, scroll bars and frames are untouched.
+  Verified: one click on "File Manager" launches it (`PVW ... File Manager`), a click on empty
+  group space does nothing, a caption click only activates.
+- **PVK** (HCBT_SETFOCUS) now also reports 1 when the focused window is not a known non-text
+  control (Button, Static, ScrollBar, ListBox, ComboLBox, `#`-classes, MDIClient, PMGroup, Progman)
+  and its top-level window's module is in `[PVMon] KeyboardApps` (now `WINOA386 TERMINAL WRITE
+  CARDFILE CALENDAR RECORDER NOTEPAD`). Verified: Write's document takes focus -> `PVK 1`; a
+  menu-bar click and Esc produce no report (focus unchanged). Paintbrush's text tool is left to
+  the host's long-press toggle (no hookable caret creation).
+- **DISPI index/data pairs** in PVMON (`rd`/`wr`) and PVHOOK (`pv_dbg`) run with interrupts off
+  (`pushf/cli ... popf`, caller's IF restored): PVMOUSE.DRV's interrupt handler writes the same
+  index register. PVDISP.DRV's BANK.INC and CURSOR.ASM already wrap theirs in `EnterCrit`; PVDPI
+  runs under DOS before any mouse interrupt handler exists.
+- **Dead-task guard**: Print Manager (spooler off) exits the moment its box is dismissed, and a
+  cross-task SendMessage from PVMON's poll to a window of an exiting task (GetWindowText,
+  SetWindowPos) blocked PVMON until Ctrl+Esc. The hook records `HCBT_DESTROYWND` of top-level
+  windows (`PvHookIsDead`), PVMON skips those windows and frees their slot; hidden top-level
+  windows free their slot too (a closed program's window lingers hidden while its task exits, so a
+  new program landed in slot 1). Verified: PRINTMAN box, Esc -> heartbeat continues
+  (`PVH 86397 ... 110179`), Control Panel launched next gets slot 0.
+- Fixed-layout windows are moved into a column at `HCBT_ACTIVATE` when they straddle one
+  (Task List centres itself at x=1095); PVMON then parks them. Terminal: after "Default Serial
+  Port" closes the focus returns to the `Terminal` window, which the widened rule now reports.
+- Observed, not yet explained: with an absolute-pointer click on **Write's** menu bar (first row,
+  guest y≈100) followed by Esc, all guest input (mouse and keyboard, incl. Ctrl+Esc) stops while
+  PVMON's heartbeat continues; Notepad and File Manager survive the same sequence; reproduced
+  with TapOpens=0, so not the mouse hook. Needs a bisect against an older hook.
+- `WM_WINDOWPOSCHANGING` does reach the hook for some windows after all (`pvhook: clamp
+  CtlPanelClass 471x283 -> 352x283`); the activate-time clamp stays as the backstop.
