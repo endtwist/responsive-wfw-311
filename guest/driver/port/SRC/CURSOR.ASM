@@ -43,6 +43,9 @@ curs_func	ENDS
 sBegin	Data
 
 EXTRN	enabled_flag:WORD
+EXTRN	pv_page:BYTE			;responsive-wfw311: PV bank shadows (BANK.INC)
+EXTRN	pv_src_bank:BYTE
+EXTRN	pv_dst_bank:BYTE
 
 PUBLIC  exclude_rect_left, exclude_rect_right
 PUBLIC	exclude_rect_top, exclude_rect_bottom, exclude_global
@@ -100,6 +103,8 @@ sEnd    BlueMoonSeg
 sBegin	Code
 	assumes cs,Code
 	assumes ds,Data
+
+	externNP pv_apply_banks		;responsive-wfw311: reprogram READ/WRITE_BANK from the shadows
 
 ;
 ;	SetCursor	- change cursor shape
@@ -194,9 +199,12 @@ cBegin
 	LeaveCrit a
 
 	push	dx				;tell the host the new pointer position
+	push	bx
 	mov	dx,PV_DISPI_INDEX
-	mov	ax,PV_R_CURSOR_X
-	out	dx,ax
+	in	ax,dx				;this runs at interrupt time: whoever we
+	mov	bx,ax				; interrupted may be between an index
+	mov	ax,PV_R_CURSOR_X		; write and its data write, so leave the
+	out	dx,ax				; index as we found it
 	inc	dx
 	mov	ax,abs_x
 	out	dx,ax
@@ -206,6 +214,10 @@ cBegin
 	inc	dx
 	mov	ax,abs_y
 	out	dx,ax
+	dec	dx
+	mov	ax,bx
+	out	dx,ax
+	pop	bx
 	pop	dx
 
 	test	cursor_flags,YES_CURSOR 	;if NULL cursor data, done
@@ -608,6 +620,9 @@ SAVE_SQREGS_COUNT       EQU     14
 SAVE_GRREGS_COUNT	EQU	4
 SAVE_MISCREGS_COUNT	EQU	1
 SAVE_LASTREG_OFFSET	EQU	(SAVE_SQREGS_COUNT + SAVE_GRREGS_COUNT + SAVE_MISCREGS_COUNT) * 2 - 2
+PV_PAGE_INDEX		EQU	2CH		;responsive-wfw311: PV bank shadows saved
+PV_SRC_BANK_INDEX	EQU	2DH		; alongside the VGA registers (see below)
+PV_DST_BANK_INDEX	EQU	2EH
 
 PUBLIC  cursor_save_state
 cursor_save_state	PROC	NEAR
@@ -813,6 +828,20 @@ cursor_save_state	PROC	NEAR
 	in	al,dx
 	stosb
 
+;	responsive-wfw311: the V7 bank state above (SQ F6/F9, misc output page bit) is
+;	inert on the paravirtual adapter. The banks live in the DISPI READ/WRITE_BANK
+;	registers, programmed from three shadow bytes by BANK.INC. The cursor code
+;	moves those banks (far_set_both_pages) at interrupt time, in the middle of
+;	whatever GDI call was drawing, so they must be saved and put back too or
+;	the interrupted blt carries on 16 scanlines (one 64K bank) off. That was the
+;	torn-card residue in Solitaire.
+	mov	al,pv_page
+	mov	es:cursor_state.PV_PAGE_INDEX,al
+	mov	al,pv_src_bank
+	mov	es:cursor_state.PV_SRC_BANK_INDEX,al
+	mov	al,pv_dst_bank
+	mov	es:cursor_state.PV_DST_BANK_INDEX,al
+
 	pop	es
 
 cursor_save_state_0:
@@ -859,6 +888,14 @@ cursor_restore_state	PROC	NEAR
 	mov	al,cursor_state.SQ_INDEX	;restore Graphics index
 	out	dx,al
 	cld
+
+	mov	al,cursor_state.PV_PAGE_INDEX	;responsive-wfw311: put the PV banks
+	mov	pv_page,al			; back (see cursor_save_state)
+	mov	al,cursor_state.PV_SRC_BANK_INDEX
+	mov	pv_src_bank,al
+	mov	al,cursor_state.PV_DST_BANK_INDEX
+	mov	pv_dst_bank,al
+	call	pv_apply_banks
 
 	mov	cursor_state_lock,0
         ret

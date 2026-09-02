@@ -32,12 +32,16 @@ sBegin  Code
 	assumes cs,Code
 
 ;--- pv_apply_banks: program the adapter from the shadows. Preserves everything.
+;    Interrupts are held off across the index/data pairs: MoveCursor runs at
+;    interrupt time and touches the same DISPI index register.
 pv_apply_banks proc near
         push    ds
         push    ax
+        push    bx
         push    dx
         mov     ax,DGROUP
         mov     ds,ax
+        EnterCrit
         mov     dx,PV_DISPI_INDEX
         mov     ax,PV_REG_READ_BANK
         out     dx,ax
@@ -56,7 +60,9 @@ pv_apply_banks proc near
         or      al,ds:[pv_page]
         xor     ah,ah
         out     dx,ax
+        LeaveCrit b
         pop     dx
+        pop     bx
         pop     ax
         pop     ds
         ret
