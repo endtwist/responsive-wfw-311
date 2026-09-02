@@ -702,13 +702,31 @@ static int owner_slot(HWND owner)
    wide as the whole virtual screen, overlapping the other slots and forcing the host to scale
    it down to nothing; so a maximised window is restored and then sized to fill its slot, which
    is what maximise means here. Windows accepts this as an ordinary size change. */
+/* Some applications lay out to their window's shape (Paintbrush stretches its toolbox to the
+   window height), so a slot-tall maximise looks wrong for them. WIN.INI can cap it per module:
+   [PVMon] MaxHeight.PBRUSH=480 */
+static int max_height_for(HWND hwnd)
+{
+    char path[128], key[48], *base, *p;
+    HINSTANCE inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
+    int h;
+    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return (int)g_shellH;
+    base = path;
+    for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
+    for (p = base; *p && *p != '.'; p++) ;
+    *p = 0;
+    wsprintf(key, "MaxHeight.%s", (LPSTR)base);
+    h = GetProfileInt("PVMon", key, 0);
+    return (h > 100 && h < (int)g_shellH) ? h : (int)g_shellH;
+}
+
 static void park(HWND hwnd, int slot)
 {
     RECT rc;
     int slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
     if (IsZoomed(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
-        SetWindowPos(hwnd, NULL, slotX, 0, (int)SLOT_W, (int)g_shellH,
+        SetWindowPos(hwnd, NULL, slotX, 0, (int)SLOT_W, max_height_for(hwnd),
                      SWP_NOZORDER | SWP_NOACTIVATE);
         return;
     }
@@ -738,6 +756,24 @@ static void describe(HWND hwnd, char *line, const char *tag, int slot)
     wsprintf(line, "%s %d %d %d %d %d %d %d %d %d %s", (LPSTR)tag, slot,
              wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
              pt.x, pt.y, rc.right - rc.left, rc.bottom - rc.top, (LPSTR)title);
+}
+
+/* Tell the host whether a text control has the keyboard focus, so it can offer the soft keyboard
+   when one does and put it away when none does. Windows 3.1 has no soft keyboard of its own. */
+static int g_lastKbd = -1;
+static void report_focus(void)
+{
+    HWND f = GetFocus();
+    char cls[24];
+    int want = 0;
+    if (f && GetClassName(f, cls, sizeof(cls)) > 0) {
+        if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0) want = 1;
+        else {                             /* a combo box's edit child reports as Edit already */
+            char pcls[24]; HWND parent = GetParent(f);
+            if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) want = 1;
+        }
+    }
+    if (want != g_lastKbd) { g_lastKbd = want; dbg(want ? "PVK 1" : "PVK 0"); }
 }
 
 static void publish_layout(void)
@@ -823,6 +859,7 @@ static void publish_layout(void)
 #define CMD_MINIMIZE 4
 #define CMD_RUN      5     /* WinExec the string in R_CMDSTR (a command line) */
 #define CMD_REPUBLISH 6    /* host restored a snapshot: tell it everything again */
+#define CMD_SCROLL   7     /* arg: slot | direction << 8 (1 up, 2 down, 3 left, 4 right), lines in bits 12+ */
 
 static void run_host_command(void)
 {
@@ -837,6 +874,34 @@ static void run_host_command(void)
         dbg(b);
         dbg("PVA");
         g_lastPub[0] = 0;
+        return;
+    }
+    if (cmd == CMD_SCROLL) {
+        /* Two-finger scrolling from the host: scroll whatever in the slot's window scrolls. The
+           focused control if it is inside that window, else the first child with a scroll bar,
+           else the window itself, gets ordinary WM_VSCROLL/WM_HSCROLL line messages. */
+        unsigned slotn = arg & 0xFF, dir = (arg >> 8) & 0xF, lines = (arg >> 12) & 0xF, k;
+        HWND top, target, child;
+        UINT msg = (dir <= 2) ? WM_VSCROLL : WM_HSCROLL;
+        WPARAM sb = (dir == 1 || dir == 3) ? SB_LINEUP : SB_LINEDOWN;
+        if (slotn >= MAX_SLOTS) return;
+        top = g_slotWnd[slotn];
+        if (!top || !IsWindow(top)) return;
+        target = GetFocus();
+        if (target) {                       /* is the focus inside this slot's window? */
+            HWND t = target;
+            while (GetParent(t)) t = GetParent(t);
+            if (t != top) target = NULL;
+        }
+        if (!target) {
+            DWORD want = (msg == WM_VSCROLL) ? WS_VSCROLL : WS_HSCROLL;
+            for (child = GetWindow(top, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+                if (IsWindowVisible(child) && (GetWindowLong(child, GWL_STYLE) & want)) { target = child; break; }
+        }
+        if (!target) target = top;
+        if (!lines) lines = 3;
+        for (k = 0; k < lines; k++) SendMessage(target, msg, sb, 0L);
+        SendMessage(target, msg, SB_ENDSCROLL, 0L);
         return;
     }
     if (cmd == CMD_RUN) {
@@ -950,7 +1015,7 @@ static void poll(HWND hwnd)
     if (w < 320 || h < 200) return;
     g_hostW = w; g_hostH = h;
     if (g_dlgReflow) check_dialogs();
-    if (g_shellW) { run_host_command(); publish_layout(); }
+    if (g_shellW) { run_host_command(); publish_layout(); report_focus(); }
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }

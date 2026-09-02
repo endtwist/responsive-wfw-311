@@ -244,6 +244,8 @@ emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
   let m = /^PVD (\d+) (\d+)(?: (\d+))?/.exec(line);
   if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18 }; return; }
+  m = /^PVK (\d)/.exec(line);
+  if (m) { wantKeyboard = m[1] === "1"; syncKeyboard(); return; }
   if (/^PVA/.test(line)) {
     desktopReady = true;
     if (params.get("mkstate") && !restored) { uploadBootState(); return; }
@@ -289,6 +291,19 @@ function launchFromUrl() {
   const cmd = APPS[key] || (q && /^[A-Z0-9_.\\: -]+$/i.test(q) ? q : null);
   if (cmd) emulator.bus.send("pv-command-string", [CMD_RUN, cmd]);
 }
+
+/* The soft keyboard follows the guest: when an edit control takes the focus the hidden input is
+   focused, which summons the platform keyboard, and it is blurred when the focus leaves. iOS only
+   lets a page focus an input inside a user gesture, so the touch handlers also call this at the
+   end of a tap, by which time PVMON has usually reported the new focus. */
+let wantKeyboard = false;
+function syncKeyboard() {
+  const inp = $("kbd");
+  if (!inp) return;
+  if (wantKeyboard && document.activeElement !== inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
+  else if (!wantKeyboard && document.activeElement === inp) inp.blur();
+}
+const CMD_SCROLL = 7;
 
 function layerKey(L) { return L.kind === "W" ? "s" + L.slot : L.kind + ":" + L.title; }
 function sendCommand(cmd, slot) { emulator.bus.send("pv-command", [cmd, slot]); }
@@ -706,16 +721,52 @@ function installTouch() {
     });
   };
 
+  // Two fingers scroll whatever is under them: each SCROLL_STEP of travel is a line message to
+  // the guest window under the midpoint, so lists, documents and pictures scroll natively.
+  const SCROLL_STEP = 24;
+  let twoFinger = null;
+  const mid = t => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+  const scrollTargetSlot = m => {
+    const r = c.getBoundingClientRect();
+    const h = hitTest(m.x - r.left, m.y - r.top);
+    return h.win && h.win.kind === "W" ? h.win.slot : (h.win && h.win.slot >= 0 ? h.win.slot : -1);
+  };
+
   c.addEventListener("touchstart", ev => {
+    if (ev.touches.length === 2) {
+      clearTimeout(pressTimer);
+      if (dragging) { button(false, false); dragging = false; }
+      const m = mid(ev.touches);
+      twoFinger = { last: m, accX: 0, accY: 0, slot: scrollTargetSlot(m) };
+      ev.preventDefault();
+      return;
+    }
     if (ev.touches.length !== 1) { clearTimeout(pressTimer); return; }
     ev.preventDefault(); down(ev.touches[0]);
   }, { passive: false });
   c.addEventListener("touchmove", ev => {
+    if (twoFinger && ev.touches.length === 2) {
+      ev.preventDefault();
+      const m = mid(ev.touches);
+      twoFinger.accX += m.x - twoFinger.last.x; twoFinger.accY += m.y - twoFinger.last.y;
+      twoFinger.last = m;
+      const send = (dir, n) => { if (twoFinger.slot >= 0) sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); };
+      const ny = Math.trunc(twoFinger.accY / SCROLL_STEP), nx = Math.trunc(twoFinger.accX / SCROLL_STEP);
+      if (ny) { send(ny > 0 ? 1 : 2, Math.abs(ny)); twoFinger.accY -= ny * SCROLL_STEP; }   // finger down = content up = line up
+      if (nx) { send(nx > 0 ? 3 : 4, Math.abs(nx)); twoFinger.accX -= nx * SCROLL_STEP; }
+      return;
+    }
     if (ev.touches.length !== 1) return;
     ev.preventDefault(); move(ev.touches[0]);
   }, { passive: false });
-  c.addEventListener("touchend", ev => { ev.preventDefault(); up(); }, { passive: false });
-  c.addEventListener("touchcancel", ev => { ev.preventDefault(); up(); }, { passive: false });
+  const end = ev => {
+    ev.preventDefault();
+    if (twoFinger) { if (ev.touches.length === 0) twoFinger = null; return; }
+    up();
+    setTimeout(syncKeyboard, 350);          // PVMON polls at 100 ms; still inside iOS's gesture grace
+  };
+  c.addEventListener("touchend", end, { passive: false });
+  c.addEventListener("touchcancel", end, { passive: false });
 
   // The same gestures with a mouse, since the v86 canvas itself is off-screen in this mode.
   let mouseDown = false;
