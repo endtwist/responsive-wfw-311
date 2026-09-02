@@ -416,6 +416,7 @@ CPU.prototype.wasm_patch = function()
     this.svga_allocate_dest_buffer = get_import("svga_allocate_dest_buffer");
     this.svga_fill_pixel_buffer = get_import("svga_fill_pixel_buffer");
     this.svga_mark_dirty = get_import("svga_mark_dirty");
+    this.svga_dirty_range = get_import("svga_dirty_range");
 
     this.get_pic_addr_master = get_import("get_pic_addr_master");
     this.get_pic_addr_slave = get_import("get_pic_addr_slave");

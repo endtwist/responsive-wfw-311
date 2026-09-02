@@ -948,3 +948,32 @@ Windows in screen space (the Alt+Tab switcher `#32771`, menus) land inside which
 they fall in and need their own 1:1 layer path anchored to the owning layer; (3) a third
 application gets no slot and is never published (Hearts). A stale `C:\WINDOWS\PVMON.EXE`
 shadowed the staged binary for a while; PVMON is now staged in `changes/windows`.
+
+**2026-09-01 (later) — layer kinds, native minimise, run-by-URL, boot snapshot.**
+
+Rule from Josh, now standing: everything on screen is Windows' own pixels. The host composites,
+scales, crops and places guest pixels and translates input; it draws nothing of its own. The
+host dock was removed; minimise is native (Program Manager leaves `ICON_ROW` free at the bottom of
+the shell column, where Windows puts its icons).
+
+PVMON now classifies top-level windows: applications (`PVW`, parked in a slot; maximise = restore
+then fill the slot), owned windows (`PVO`, dialogs, drawn over the owner), transients (`PVT`:
+menus, combo drop-downs, the Alt+Tab switcher `#32771`, drawn at chrome scale where they popped
+up, anchored through the layer whose column they fell in; the switcher, centred on the whole
+screen, is centred on the viewport), iconic (`PVI`), slot-less (`PVX`). Icon titles (`#32772`)
+and windows owned by a minimised app are skipped. Chrome is drawn at the desktop's scale so every
+caption and menu bar matches; the caption strip is cropped around its centre, never squeezed.
+
+Host->guest command channel: DISPI 0x1A command / 0x1B argument / 0x1C command string (one byte
+per read). Commands: activate, restore, close, minimise (a slot), run (WinExec a command line),
+republish (after a snapshot restore). `/solitaire`, `/hearts`, ... or `?run=` launch an app the
+moment `PVA` arrives. `image/boot.state.gz` (2.1 MB gzipped, made with `?fresh=1&mkstate=1`,
+posted to the dev server's `/__state`) is restored on a cold visit: desktop up in a few seconds
+instead of a minute. Local snapshots are keyed by the image's size and mtime, since a stale one
+restores an old PVMON and looks like a hang. The 8 bpp palette conversion now covers only dirty
+rows (rust `svga_dirty_range` + JS-side min/max for the banked write path). `PLYBITM8.ASM`'s
+bank switch now goes through BANK.INC (`far_set_both_pages`), which was the torn-card bug.
+
+Dev notes: the service worker is not registered on localhost (dead pooled connections after a
+server restart made every GET fail with ERR_FAILED); PVMON is staged in `changes/windows`
+because `C:\WINDOWS` shadows `C:\` on the PATH.

@@ -82,7 +82,13 @@ const initial = computeMode();
 // DPI is fixed for a session: Windows 3.x cannot change font metrics on the fly, and PVDPI.EXE
 // picks the matching SYSTEM.INI at each Windows start.
 const dpi = params.get("dpi") ? +params.get("dpi") : (viewport()[0] < 600 ? 120 : 96);
-const stateKey = `wfw311:${IMAGE}:${dpi}`;
+/* Local snapshots are keyed by the image's identity (size and modification time from the
+   server), not just its name: a snapshot of an older build of the image restores a guest whose
+   PVMON and screen layout no longer match this page, and it looks like a hang. */
+let stateKey = `wfw311:${IMAGE}:${dpi}`;
+const stateKeyReady = fetch(IMAGE, { method: "HEAD" })
+  .then(r => { stateKey += `:${r.headers.get("content-length")}:${r.headers.get("last-modified")}`; })
+  .catch(() => {});
 
 /* ------------------------------------------------------------------------------- snapshots
  * Mobile browsers evict background tabs, so the VM is saved on hide and restored on load.
@@ -98,6 +104,7 @@ function idb() {
 }
 async function saveState(emulator) {
   try {
+    await stateKeyReady;
     const raw = await emulator.save_state();
     let blob = new Blob([raw]);
     if (typeof CompressionStream === "function") {
@@ -114,6 +121,7 @@ async function saveState(emulator) {
 }
 async function loadState() {
   try {
+    await stateKeyReady;
     const db = await idb();
     const rec = await new Promise((res, rej) => {
       const tx = db.transaction("state", "readonly");
@@ -153,6 +161,7 @@ async function uploadBootState() {
   } catch (e) { status("snapshot failed: " + e.message); }
 }
 async function clearState() {
+  await stateKeyReady;
   const db = await idb();
   await new Promise(res => {
     const tx = db.transaction("state", "readwrite");

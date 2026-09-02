@@ -22,3 +22,4 @@ guest/driver/inc/
 
 # throwaway framebuffer captures
 shots/
+image/boot.state.gz

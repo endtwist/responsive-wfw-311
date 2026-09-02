@@ -57,7 +57,8 @@ http.createServer((req, res) => {
   if (!fs.existsSync(file)) { res.writeHead(404); return res.end("404 " + url); }
   const size = fs.statSync(file).size;
   const headers = { "Content-Type": mime[path.extname(file)] || "application/octet-stream",
-    "Accept-Ranges": "bytes", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" };
+    "Accept-Ranges": "bytes", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*",
+    "Last-Modified": fs.statSync(file).mtime.toUTCString() };
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
   if (range) {
     let start = range[1] === "" ? Math.max(0, size - Number(range[2])) : Number(range[1]);

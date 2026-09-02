@@ -60,6 +60,16 @@ fn iter_dirty_pages(f: &dyn Fn(isize)) {
     }
 }
 
+/// responsive-wfw311: for 8 bpp the palette lookup happens in JS, which only needs to know the
+/// dirty byte range; this walks the bitmap into the min/max globals and clears it.
+#[no_mangle]
+pub unsafe fn svga_dirty_range() {
+    iter_dirty_pages(&|_off| {});
+    for v in dirty_bitmap.iter_mut() {
+        *v = 0
+    }
+}
+
 #[no_mangle]
 pub unsafe fn svga_fill_pixel_buffer(bpp: u32, svga_dest_offset: u32) {
     let debug_bounds = false;

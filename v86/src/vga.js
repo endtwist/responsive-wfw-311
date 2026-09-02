@@ -361,6 +361,9 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     // responsive-wfw311 paravirtual extensions (see SPEC.md §2.1)
     this.svga_pitch = 0;        // VIRT_WIDTH in pixels; 0 = same as visible width
     this.svga_read_bank_offset = 0;
+    this.js_dirty_min = 0x7FFFFFFF;   // PV: bytes written to svga_memory from JS (unchained path), min/max
+    this.js_dirty_max = -1;
+    this.svga_full_redraw = true;
     /**
      * responsive-wfw311: Video Seven VRAM-style extended sequencer registers (index >= 5).
      * The V7VGA-derived display driver relies on a small subset:
@@ -796,6 +799,8 @@ VGAScreen.prototype.svga_unchained_write = function(off, value)
     const mem = this.svga_memory;
     if(base + 3 >= mem.length) return;
     const plane_select = this.plane_write_bm & 0xF;
+    if(base < this.js_dirty_min) this.js_dirty_min = base;
+    if(base + 3 > this.js_dirty_max) this.js_dirty_max = base + 3;
     if(plane_select & 0x1) mem[base]     = plane_dword & 0xFF;
     if(plane_select & 0x2) mem[base + 1] = plane_dword >> 8 & 0xFF;
     if(plane_select & 0x4) mem[base + 2] = plane_dword >> 16 & 0xFF;
@@ -1134,6 +1139,7 @@ VGAScreen.prototype.complete_redraw = function()
         if(this.svga_enabled)
         {
             this.cpu.svga_mark_dirty();
+            this.svga_full_redraw = true;
         }
         else
         {
@@ -1348,6 +1354,7 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
             this.image_data = new ImageData(new Uint8ClampedArray(this.cpu.wasm_memory.buffer, offset, 4 * size), virtual_width, virtual_height);
 
             this.cpu.svga_mark_dirty();
+            this.svga_full_redraw = true;
         }
         else
         {
@@ -2830,17 +2837,36 @@ VGAScreen.prototype.screen_fill_buffer = function()
 
         if(this.svga_bpp === 8)
         {
-            // XXX: Slow, should be ported to rust, but it doesn't have access to vga256_palette
+            // The palette lookup happens here in JS, but only for the rows that changed since the
+            // last frame: the wide virtual screens used for the phone layout (2560 x 970) made a
+            // full conversion every frame too costly for a phone. Writes through the LFB are
+            // tracked by the rust dirty bitmap, writes from the JS banked path by js_dirty_*.
             const buffer = new Int32Array(this.cpu.wasm_memory.buffer, this.dest_buffet_offset, this.virtual_width * this.virtual_height);
             const svga_memory = new Uint8Array(this.cpu.wasm_memory.buffer, this.svga_memory.byteOffset, this.vga_memory_size);
             // svga_offset selects the visible part of svga_memory, used for page flipping (e.g. Master of Orion 2)
             const base = this.svga_offset;
-            const end = Math.min(buffer.length, this.vga_memory_size - base);
-
-            for(var i = 0; i < end; i++)
+            const total = Math.min(buffer.length, this.vga_memory_size - base);
+            this.cpu.svga_dirty_range();
+            let lo = this.cpu.svga_dirty_bitmap_min_offset[0], hi = this.cpu.svga_dirty_bitmap_max_offset[0];
+            if(lo > hi) { lo = 0x7FFFFFFF; hi = -1; }
+            if(this.js_dirty_max >= 0) { lo = Math.min(lo, this.js_dirty_min); hi = Math.max(hi, this.js_dirty_max); }
+            this.js_dirty_min = 0x7FFFFFFF; this.js_dirty_max = -1;
+            if(this.svga_full_redraw) { lo = base; hi = base + total - 1; this.svga_full_redraw = false; }
+            const pitch = this.virtual_width;
+            if(hi < lo || hi < base || lo >= base + total)
             {
-                var color = this.vga256_palette[svga_memory[base + i]];
-                buffer[i] = color & 0xFF00 | color << 16 | color >> 16 | 0xFF000000;
+                min_y = 0; max_y = 0;                    // nothing changed: nothing to push
+            }
+            else
+            {
+                min_y = Math.max(0, ((Math.max(lo, base) - base) / pitch) | 0);
+                max_y = Math.min(this.svga_height, (((Math.min(hi, base + total - 1) - base) / pitch) | 0) + 1);
+                const from = min_y * pitch, to = Math.min(total, max_y * pitch);
+                for(var i = from; i < to; i++)
+                {
+                    var color = this.vga256_palette[svga_memory[base + i]];
+                    buffer[i] = color & 0xFF00 | color << 16 | color >> 16 | 0xFF000000;
+                }
             }
         }
         else
