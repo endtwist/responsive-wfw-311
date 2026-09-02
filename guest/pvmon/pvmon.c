@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 27     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 28     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -967,6 +967,8 @@ static void park(HWND hwnd, int slot)
         int maxW = fixed ? (int)SLOT_W : (int)g_shellW;
         int maxH = fixed ? screenH : min((int)g_shellH, max_height_for(hwnd));
         if (rc.right - rc.left > maxW || rc.bottom - rc.top > maxH) {
+            char t[24]; t[0] = 0; GetWindowText(hwnd, t, sizeof(t));
+            dbgnum(t, rc.right - rc.left, rc.bottom - rc.top);
             SetWindowPos(hwnd, NULL, slotX, 0,
                          min(rc.right - rc.left, maxW), min(rc.bottom - rc.top, maxH),
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1381,9 +1383,19 @@ static void run_host_command_1(void)
         ShowWindow(hwnd, SW_RESTORE);
         SetActiveWindow(hwnd);
         break;
-    case CMD_CLOSE:
+    case CMD_CLOSE: {
+        /* A modal dialog (Terminal's "Default Serial Port" at start-up) disables its owner and
+           keeps WM_CLOSE queued until it ends, so the window looked unclosable. Cancel the dialogs
+           owned by the window first, then close it. */
+        HWND d;
+        for (d = GetWindow(GetDesktopWindow(), GW_CHILD); d; d = GetWindow(d, GW_HWNDNEXT)) {
+            char c[16];
+            if (!IsWindowVisible(d) || GetWindow(d, GW_OWNER) != hwnd) continue;
+            if (GetClassName(d, c, sizeof(c)) > 0 && lstrcmp(c, "#32770") == 0) PostMessage(d, WM_COMMAND, IDCANCEL, 0L);
+        }
         PostMessage(hwnd, WM_CLOSE, 0, 0L);
         break;
+    }
     case CMD_MINIMIZE:
         ShowWindow(hwnd, SW_MINIMIZE);
         break;
@@ -1586,6 +1598,12 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
         else poll(hwnd);
         return 0;
+    case WM_USER + 1: {
+        /* the hook saw a top-level window size itself past the frame: park it now */
+        HWND w = (HWND)wParam; int slot;
+        if (g_shellW && w && IsWindow(w) && IsWindowVisible(w) && !IsIconic(w) && (slot = slot_of(w)) >= 0) { park(w, slot); g_lastPub[0] = 0; }
+        return 0;
+    }
     case WM_ENDSESSION:
         if (wParam) KillTimer(hwnd, IDT_POLL);
         return 0;

@@ -1555,3 +1555,19 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
 - PRINTMAN `scale=0.793` on the pane: the guest reports the re-laid box as 352x225 with a 342x175
   client (dialog frame 5 px); host-side scale for a 342-wide client at c=1.065 should be >1, so the
   scaling is a compositor question (margins/insets for dialog frames), not a rect mismatch.
+
+### 2026-09-02 — Terminal close, oversize self-resize notification, Paintbrush KeepSize (PVMON v28)
+- **CMD_CLOSE** first cancels visible `#32770` dialogs owned by the window (`WM_COMMAND IDCANCEL`),
+  then posts `WM_CLOSE`: a modal start-up dialog (Terminal's "Default Serial Port") disables its
+  owner and kept `WM_CLOSE` queued, so the window looked unclosable. Tour TERMINAL `close=pass`.
+- The hook now watches `WM_WINDOWPOSCHANGED`: a resizable, unowned top-level window that has just
+  become wider than the column or taller than the shell posts `WM_USER+1` to PVMON, which parks
+  (clamps) it at once instead of at its next poll; `park()` logs `pvmon: <title> WxH` when it clamps,
+  so the phone's Terminal case (`1916x892` = 80 columns of its terminal font; not reproduced in the
+  pane or headless, where Terminal stays 352x600) will show who wins if the program re-asserts.
+- **Paintbrush**: the toolbox width follows the client width (~36 px at 352, two 18 px columns) while
+  the cell height follows the client height ((client - palette)/9 ≈ 32 px), so no 352-wide size gives
+  square tools (they would need a ~200 px tall client). PBRUSH is now `KeepSize` (natural size, the
+  host scales it uniformly); `Size.PBRUSH`/`MaxHeight.PBRUSH` removed.
+- Hearts' welcome dialog: OK is the default button but does nothing while the name field is empty;
+  typing a letter first, then Enter, closes it (verified); Alt+Q quits.
