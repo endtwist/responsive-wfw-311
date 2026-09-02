@@ -313,6 +313,7 @@ const APPS = {
   filemanager: "WINFILE.EXE", files: "WINFILE.EXE", controlpanel: "CONTROL.EXE",
   charmap: "CHARMAP.EXE", pifedit: "PIFEDIT.EXE", setup: "SETUP.EXE", winver: "WINVER.EXE",
   chat: "WINCHAT.EXE", mail: "MSMAIL.EXE", schedule: "SCHDPLUS.EXE", help: "WINHELP.EXE",
+  soundrecorder: "SOUNDREC.EXE", soundrec: "SOUNDREC.EXE", mediaplayer: "MPLAYER.EXE",
 };
 let launched = false;
 function launchFromUrl() {
@@ -714,6 +715,60 @@ function drawWindow(g, src, w) {
   blit(g, src, w.gx + w.px, w.gy + w.py, w.vw, w.vh, w.x + hl, w.y + ht,
        Math.round(w.vw * w.zs), Math.round(w.vh * w.zs));
 }
+
+/* Microphone: the emulated Sound Blaster asks for capture the moment the guest issues a DMA
+   input command (Sound Recorder's Record), so the browser's permission prompt is the only thing
+   the user sees and only when they record. Audio is pulled from getUserMedia through a
+   ScriptProcessor (an AudioWorklet would need a separate module file; this runs everywhere,
+   iOS Safari included), downmixed to mono, and handed to the device, which resamples to the
+   DSP's own rate. When there is no capture (denied, or not a secure context: getUserMedia is
+   absent over plain http except on localhost) the device records silence at the right rate, so
+   Record still runs and Stop still works. */
+const mic = { stream: null, ctx: null, source: null, node: null, sink: null, active: false, starting: null, blocks: 0 };
+window.micState = () => ({ active: mic.active, blocks: mic.blocks, have: !!mic.stream, secure: window.isSecureContext, gum: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) });
+async function micOpen() {
+  if (mic.stream) return true;
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    report("mic", `unavailable: secure=${window.isSecureContext} mediaDevices=${!!navigator.mediaDevices}`);
+    return false;
+  }
+  try {
+    mic.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: true }, video: false });
+  } catch (e) { report("mic", `getUserMedia failed: ${e && e.name} ${e && e.message}`); return false; }
+  const a = emulator.speaker_adapter && emulator.speaker_adapter.audio_context;
+  mic.ctx = a || new (window.AudioContext || window.webkitAudioContext)();
+  mic.source = mic.ctx.createMediaStreamSource(mic.stream);
+  mic.node = mic.ctx.createScriptProcessor(1024, 1, 1);
+  mic.sink = mic.ctx.createGain(); mic.sink.gain.value = 0;      // a ScriptProcessor only runs when routed to the destination
+  mic.node.onaudioprocess = ev => {
+    if (!mic.active) return;
+    const inb = ev.inputBuffer;
+    const out = new Float32Array(inb.length);
+    for (let c = 0; c < inb.numberOfChannels; c++) { const d = inb.getChannelData(c); for (let i = 0; i < d.length; i++) out[i] += d[i]; }
+    if (inb.numberOfChannels > 1) for (let i = 0; i < out.length; i++) out[i] /= inb.numberOfChannels;
+    mic.blocks++;
+    emulator.bus.send("sb16-record-data", [out, inb.sampleRate]);
+  };
+  mic.source.connect(mic.node); mic.node.connect(mic.sink); mic.sink.connect(mic.ctx.destination);
+  const tr = mic.stream.getAudioTracks()[0];
+  tr.onended = () => micClose();
+  report("mic", `capture open: ${mic.ctx.sampleRate} Hz, ${tr.label}`);
+  return true;
+}
+function micClose() {
+  try { mic.node && mic.node.disconnect(); mic.source && mic.source.disconnect(); mic.sink && mic.sink.disconnect(); } catch (e) {}
+  try { mic.stream && mic.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  mic.stream = mic.source = mic.node = mic.sink = null;
+}
+emulator.bus.register("sb16-record-start", rate => {
+  mic.active = true;
+  try { if (mic.ctx && mic.ctx.state === "suspended") mic.ctx.resume(); } catch (e) {}
+  if (!mic.starting) mic.starting = micOpen().finally(() => { mic.starting = null; });
+});
+emulator.bus.register("sb16-record-stop", () => { mic.active = false; });
+/* The capture is kept open between recordings (one permission prompt per visit); it is released
+   when the page is hidden, like the emulator's own state. */
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden" && !mic.active) micClose(); });
 
 /* Errors and a heartbeat go to the dev server: phones have no console to read. */
 let frames = 0, lastBeat = 0, lastIc = 0, lastBeatAt = 0;
