@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 19     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 20     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -964,7 +964,7 @@ static void publish_layout(void)
    Print Manager write each job there. Once the file can be opened exclusively (the spooler is
    done) it is sent to the host through the debug channel, base64 in short lines, and deleted;
    the host turns it into a PDF and offers the download. */
-#define PRINT_FILE "C:\\PRINT.PS"
+#define PRINT_FILE "C:\\PRINT.PRN"
 static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static void ship_print_job(void)
 {
@@ -975,7 +975,7 @@ static void ship_print_job(void)
     long size; int n, i, o;
     if (OpenFile(PRINT_FILE, &of, OF_EXIST) == HFILE_ERROR) return;
     f = OpenFile(PRINT_FILE, &of, OF_READ | OF_SHARE_EXCLUSIVE);
-    if (f == HFILE_ERROR) return;                       /* still being written */
+    if (f == HFILE_ERROR) { dbg("pvmon: print file present, still open"); return; }   /* being written */
     size = _llseek(f, 0L, 2); _llseek(f, 0L, 0);
     if (size <= 0) { _lclose(f); return; }
     wsprintf(line, "PVP-BEGIN %ld", size); dbg(line);

@@ -47,12 +47,12 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
   PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.MaxHeight.WINFILE=600 PVMon.Size.WINOA386=400x340 PVMon.DefaultSize=352x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CLOCK CHARMAP PBRUSH" \
-  "windows.device=PDF Printer,PSCRIPT,C:\\PRINT.PS" \
-  "devices.PDF Printer=PSCRIPT,C:\\PRINT.PS" \
-  "PrinterPorts.PDF Printer=PSCRIPT,C:\\PRINT.PS,15,45" \
-  "Ports.C:\\PRINT.PS=" \
-  "PSCRIPT,C:\\PRINT.PS::device=HP LaserJet III PostScript" \
-  "PostScript,C:\\PRINT.PS::device=HP LaserJet III PostScript" \
+  "windows.device=PDF Printer,PSCRIPT,C:\\PRINT.PRN" \
+  "devices.PDF Printer=PSCRIPT,C:\\PRINT.PRN" \
+  "PrinterPorts.PDF Printer=PSCRIPT,C:\\PRINT.PRN,15,45" \
+  "Ports.C:\\PRINT.PRN=" \
+  "PSCRIPT,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \
+  "PostScript,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \
   "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )"
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
 # File Manager remembers its window from its last run, which on this image was a 1024x768 session;
