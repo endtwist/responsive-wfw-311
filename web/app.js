@@ -1248,7 +1248,7 @@ function drawWindow(g, src, w) {
     // the menu bar's own colour (sampled at the strip's left end)
     const mx0 = w.wx + inset.l, my0 = w.wy + capRow;
     for (const h of overlapsOf(w, { x0: mx0, y0: my0, x1: mx0 + mwG, y1: my0 + menuRow })) {
-      g.fillStyle = sampleColour(src, mx0 + 1, h.y);
+      g.fillStyle = sampleColour(src, mx0 + mwG - 3, my0 + 2);   // the empty right end of the menu bar, not the frame line
       g.fillRect(w.x + hl + (h.x - mx0) * c, w.y + capH + (h.y - my0) * c, h.w * c, h.h * c);
     }
     if (innerW > mwH)                                 // pad with the menu bar's own background
