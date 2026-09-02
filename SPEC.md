@@ -1138,3 +1138,7 @@ reports focus changes the instant they happen (`HCBT_SETFOCUS` -> `PVK`), inside
 window. While the keyboard is up the layout is frozen (no shell re-arrange) and the focused layer
 is panned above it; taps map through the same shift. Gaps: no Esc/Tab/arrows/F-keys/Alt on the
 iOS keyboard (needs a gesture map or a hardware keyboard).
+
+### 2026-09-02 — keyboard accessory bar verified
+- `/notepad?keybar=1` in the pane: `#keybar` shown, docked at `bottom:0` of the visual viewport; Alt+F opened Notepad's File menu (`T:#32768` layer present), a synthetic `touchstart` on the bar's **Esc** button closed it (layer list back to `S`,`W`). The `#kbd` input keeps focus because the button handlers `preventDefault` on touchstart.
+- TTY.DRV (Generic/Text "PDF Printer") staged in `image/changes/system/`.
