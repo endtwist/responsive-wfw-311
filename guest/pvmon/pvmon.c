@@ -44,7 +44,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 12     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 13     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -1001,18 +1001,24 @@ BOOL CALLBACK __export FindWideDialog(HWND hwnd, LPARAM lParam)
     if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return TRUE;
     if (lstrcmp(cls, "#32770") != 0) return TRUE;
     GetWindowRect(hwnd, &rc);
-    if (rc.right - rc.left > (int)lParam || rc.left < 0) { g_wideDlg = hwnd; return FALSE; }
+    /* lParam is the width of the column the dialog must fit: the shell column for dialogs in
+       it, which is what the phone shows as the desktop. Dialogs parked in application slots are
+       640 wide by construction and are left alone. */
+    if (g_shellW && rc.left >= (int)SLOT_W) return TRUE;
+    if (rc.right - rc.left > (int)lParam - 2 * DLG_MARGIN || rc.left < 0 || rc.right > (int)lParam) {
+        g_wideDlg = hwnd; return FALSE;
+    }
     return TRUE;
 }
 
 static void check_dialogs(void)
 {
     FARPROC proc;
-    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenW = g_shellW ? (int)g_shellW : GetSystemMetrics(SM_CXSCREEN);
     g_wideDlg = NULL;
     proc = MakeProcInstance((FARPROC)FindWideDialog, g_hInst);
     if (!proc) return;
-    EnumWindows((WNDENUMPROC)proc, (LPARAM)(screenW - 2 * DLG_MARGIN));
+    EnumWindows((WNDENUMPROC)proc, (LPARAM)screenW);
     FreeProcInstance(proc);
     if (g_wideDlg) reflow_dialog(g_wideDlg, screenW);
 }
