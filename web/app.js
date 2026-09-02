@@ -463,18 +463,22 @@ async function loadGhostscript() {
   gsModule = mod.default;
   return gsModule;
 }
+/* The @jspawn build is MODULARIZE + noInitialRun: the module promise resolves with the runtime up
+   and nothing run; the job is a synchronous callMain on a fresh instance (the wasm is cached by
+   the browser after the first job). It returns the exit status instead of exiting the page. */
 async function psToPdf(psBytes) {
   const createModule = await loadGhostscript();
-  return new Promise((resolve, reject) => {
-    let out = null;
-    createModule({
-      locateFile: f => "https://cdn.jsdelivr.net/npm/@jspawn/ghostscript-wasm@0.0.2/" + f,   // the glue looks next to the page otherwise
-      arguments: ["-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-sDEVICE=pdfwrite", "-sOutputFile=/out.pdf", "/in.ps"],
-      preRun: [m => { m.FS.writeFile("/in.ps", psBytes); }],
-      postRun: [m => { try { out = m.FS.readFile("/out.pdf"); } catch (e) { reject(e); return; } resolve(out); }],
-      print: () => {}, printErr: t => report("gs", t),
-    }).catch(reject);
+  const errs = [];
+  const m = await createModule({
+    locateFile: f => "https://cdn.jsdelivr.net/npm/@jspawn/ghostscript-wasm@0.0.2/" + f,   // the glue looks next to the page otherwise
+    print: () => {}, printErr: t => { errs.push(t); report("gs", t); },
   });
+  m.FS.writeFile("/in.ps", psBytes);
+  const rc = m.callMain(["-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-sDEVICE=pdfwrite", "-sOutputFile=/out.pdf", "/in.ps"]);
+  let out = null;
+  try { out = m.FS.readFile("/out.pdf"); } catch (e) {}
+  if (!out || !out.length) throw new Error(`ghostscript exit ${rc}: ${errs.slice(-3).join(" | ")}`);
+  return out;
 }
 function offerDownload(bytes, name, type) {
   const url = URL.createObjectURL(new Blob([bytes], { type }));
@@ -523,8 +527,14 @@ async function finishPrintJob(b64) {
     if (!isPostScript) pdf = textToPdf(bin);
     else try { pdf = await psToPdf(ps); } catch (e) { report("print", "ghostscript failed: " + (e && e.message || e)); }
     const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 16);
-    if (pdf) offerDownload(pdf, `windows-${stamp}.pdf`, "application/pdf");
-    else offerDownload(ps, `windows-${stamp}.ps`, "application/postscript");
+    const out = pdf ? { bytes: pdf, name: `windows-${stamp}.pdf`, type: "application/pdf" }
+                    : { bytes: ps, name: `windows-${stamp}.ps`, type: "application/postscript" };
+    window.pvLastPrint = out;                                      // for tooling: the last job's output
+    report("print", `${out.name} ${out.bytes.length} bytes`);
+    if (params.get("diag")) {                                      // keep a copy on the dev server (shots/print-*.pdf)
+      try { fetch("/__print?ext=" + out.name.split(".").pop(), { method: "POST", body: out.bytes }); } catch (e) {}
+    }
+    offerDownload(out.bytes, out.name, out.type);
   } catch (e) { report("print", "failed: " + e.message); }
 }
 

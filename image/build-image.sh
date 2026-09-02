@@ -5,6 +5,9 @@
 #   changes/root/*     -> C:\
 # then apply SYSTEM.INI edits via tools/inied.py.
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
+#        [spooler=yes|no] [printer=PSCRIPT|TTY]  -- which of the two installed printers is the default:
+#        "PDF Printer" (PSCRIPT.DRV, HP LaserJet III PostScript, graphics) or "Text Printer" (TTY.DRV,
+#        Generic / Text Only); both print to the file port C:\PRINT.PRN, which PVMON ships to the host.
 set -euo pipefail
 cd "$(dirname "$0")"
 DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT
@@ -54,9 +57,11 @@ python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitl
   PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.Size.PBRUSH=${W}x480 PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} "PVMon.KeyboardApps=WINOA386 TERMINAL" PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
-  "windows.device=PDF Printer,$PRINTER,C:\\PRINT.PRN" \
-  "devices.PDF Printer=$PRINTER,C:\\PRINT.PRN" \
-  "PrinterPorts.PDF Printer=$PRINTER,C:\\PRINT.PRN,15,45" \
+  "windows.device=$( [ "$PRINTER" = TTY ] && echo "Text Printer,TTY" || echo "PDF Printer,PSCRIPT" ),C:\\PRINT.PRN" \
+  "devices.PDF Printer=PSCRIPT,C:\\PRINT.PRN" \
+  "devices.Text Printer=TTY,C:\\PRINT.PRN" \
+  "PrinterPorts.PDF Printer=PSCRIPT,C:\\PRINT.PRN,15,45" \
+  "PrinterPorts.Text Printer=TTY,C:\\PRINT.PRN,15,45" \
   "Ports.C:\\PRINT.PRN=" \
   "PSCRIPT,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \
   "PostScript,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \

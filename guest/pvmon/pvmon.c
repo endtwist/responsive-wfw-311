@@ -1148,8 +1148,8 @@ static void publish_layout(void)
     dbg("PVE");
 }
 
-/* Printing. WIN.INI names C:\PRINT.PS as the PDF Printer's port, so the PostScript driver and
-   Print Manager write each job there. Once the file can be opened exclusively (the spooler is
+/* Printing. WIN.INI names C:\PRINT.PRN as the port of both installed printers (PSCRIPT.DRV "PDF
+   Printer", TTY.DRV "Text Printer"), so the driver or Print Manager writes each job there. Once the file can be opened exclusively (the spooler is
    done) it is sent to the host through the debug channel, base64 in short lines, and deleted;
    the host turns it into a PDF and offers the download. */
 #define PRINT_FILE "C:\\PRINT.PRN"
