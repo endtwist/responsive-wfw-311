@@ -405,6 +405,16 @@ async function finishPrintJob(b64) {
    lets a page focus an input inside a user gesture, so the touch handlers also call this at the
    end of a tap, by which time PVMON has usually reported the new focus. */
 let wantKeyboard = false, keyboardHeld = false;
+function keyboardUp() { const k = $("kbd"); return !!(k && document.activeElement === k && window.visualViewport && window.visualViewport.height < window.innerHeight - 100); }
+/* With the keyboard up, the layer that has the focus is shifted so it sits above it. */
+function keyboardShift() {
+  if (!keyboardUp()) return 0;
+  const vh = window.visualViewport.height;
+  const focused = placed.filter(w => w.kind === "W" || w.kind === "O").slice(-1)[0];
+  if (!focused) return 0;
+  const bottom = focused.y + focused.hh;
+  return bottom > vh ? Math.min(focused.y, bottom - vh + 8) : 0;
+}
 function syncKeyboard() {
   const inp = $("kbd");
   if (!inp) return;
@@ -449,7 +459,9 @@ function chooseView(src) {
      menu, the program groups) and the rest is simply below the fold; application layers scale to
      the wide viewport on their own. */
   const scale = vw > vh ? Math.min(vw / shell.w, vh / 480) : vw / shell.w;
-  wantShellHeight(vw > vh ? 0 : Math.round(vh / scale));
+  // While the soft keyboard is up the visible viewport is short; that must not re-arrange the
+  // shell (it would thrash on every show/hide). Keep the column as it is and pan instead.
+  if (!keyboardUp()) wantShellHeight(vw > vh ? 0 : Math.round(vh / scale));
   return { x: 0, y: 0, w: shell.w, h: shell.h, scale,
            ox: Math.round((vw - shell.w * scale) / 2) };
 }
@@ -686,7 +698,10 @@ function presentOnce() {
       const dw = view.w * view.scale, dh = view.h * view.scale;
       blit(g, src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
       placed = narrow() ? placeLayers(src) : [];
+      const shift = keyboardShift();
+      if (shift) g.translate(0, -shift);
       for (const w of placed) drawWindow(g, src, w);  // back to front
+      if (shift) g.translate(0, shift);
     }
   }
 }
@@ -884,7 +899,7 @@ function button(down, right) { diag(`button ${down ? "down" : "up"}${right ? " r
    actually touched, even though each layer is drawn at its own scale and offset. */
 function hostPoint(ev) {
   const r = $("pres").getBoundingClientRect();
-  return { px: ev.clientX - r.left, py: ev.clientY - r.top };
+  return { px: ev.clientX - r.left, py: ev.clientY - r.top + keyboardShift() };
 }
 
 /* The layer a press started in. While the finger is down every move is mapped through that same

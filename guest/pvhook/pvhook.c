@@ -16,6 +16,7 @@
  * Build: guest/pvhook/build.sh (Open Watcom, wlink system windows_dll).
  */
 #include <windows.h>
+#include <conio.h>
 
 #define SLOT_W 640
 
@@ -70,8 +71,31 @@ static BOOL parse_size(const char *val, int *w, int *h)
     return *w >= 100 && *h >= 60;
 }
 
+#define PV_DISPI_INDEX 0x1CE
+#define PV_DISPI_DATA  0x1CF
+#define PV_REG_DEBUG   0x16
+static void pv_dbg(const char *s)
+{
+    outpw(PV_DISPI_INDEX, PV_REG_DEBUG);
+    while (*s) outpw(PV_DISPI_DATA, (unsigned char)*s++);
+    outpw(PV_DISPI_DATA, 10);
+}
+
 LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
 {
+    if (code == HCBT_SETFOCUS) {
+        /* The host must know the moment a text control takes the focus: iOS only shows its
+           keyboard inside the touch gesture that caused it, so a poll 100 ms later is too late. */
+        HWND f = (HWND)wParam;
+        char cls[24];
+        if (f && GetClassName(f, cls, sizeof(cls)) > 0) {
+            if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0 || lstrcmpi(cls, "tty") == 0) pv_dbg("PVK 1");
+            else {
+                char pcls[24]; HWND parent = GetParent(f);
+                pv_dbg(parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0 ? "PVK 1" : "PVK 0");
+            }
+        }
+    }
     if (code == HCBT_CREATEWND) {
         HWND hwnd = (HWND)wParam;
         LPCBT_CREATEWND cbt = (LPCBT_CREATEWND)lParam;
