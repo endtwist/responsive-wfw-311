@@ -1199,7 +1199,11 @@ function maskShellDialogCopies(g, src) {
     const cx0 = Math.max(view.x, w.wx), cx1 = Math.min(view.x + view.w, w.wx + w.ww);
     const cy0 = Math.max(view.y, w.wy), cy1 = Math.min(view.y + view.h, w.wy + w.wh);
     if (cx1 > cx0 && cy1 > cy0) {
-      const sy = w.wy - 1 >= 0 ? w.wy - 1 : Math.min(SHELL_H - 1, w.wy + w.wh);
+      // Fill with the row just BELOW the copy when there is one (the dialog sits over Program
+      // Manager's client area, so that row is the client background); the row above is usually
+      // the menu bar with the frame's grey corners, which stretched into grey blocks and a line.
+      const below = w.wy + w.wh, shellBottom = shell.h || SHELL_H;
+      const sy = below < shellBottom - 2 ? below : (w.wy - 1 >= 0 ? w.wy - 1 : below);
       blit(g, src, cx0, sy, cx1 - cx0, 1, view.ox + (cx0 - view.x) * view.scale, (cy0 - view.y) * view.scale,
            (cx1 - cx0) * view.scale, (cy1 - cy0) * view.scale);
     }
