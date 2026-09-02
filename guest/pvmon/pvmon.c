@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 17     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 18     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -1092,9 +1092,15 @@ BOOL CALLBACK __export FindWideDialog(HWND hwnd, LPARAM lParam)
     if (lstrcmp(cls, "#32770") != 0) return TRUE;
     GetWindowRect(hwnd, &rc);
     /* lParam is the width of the column the dialog must fit: the shell column for dialogs in
-       it, which is what the phone shows as the desktop. Dialogs parked in application slots are
-       640 wide by construction and are left alone. */
-    if (g_shellW && rc.left >= (int)SLOT_W) return TRUE;
+       it, which is what the phone shows as the desktop. Dialogs that belong to an application are
+       composited over it at their own scale and must not be touched, wherever they happen to be
+       when we see them (Hearts creates its welcome dialog in the desktop column first). */
+    if (g_shellW) {
+        HWND o = GetWindow(hwnd, GW_OWNER);
+        char ocls[16];
+        if (rc.left >= (int)SLOT_W) return TRUE;
+        if (o && (GetClassName(o, ocls, sizeof(ocls)) <= 0 || lstrcmp(ocls, "Progman") != 0)) return TRUE;
+    }
     if (rc.right - rc.left > (int)lParam - 2 * DLG_MARGIN || rc.left < 0 || rc.right > (int)lParam) {
         g_wideDlg = hwnd; return FALSE;
     }
