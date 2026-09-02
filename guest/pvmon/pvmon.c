@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 31     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 32     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -750,7 +750,11 @@ BOOL CALLBACK __export FindApp(HWND hwnd, LPARAM lParam)
     if (lstrcmp(cls, "#32772") == 0) return TRUE;             /* icon title of a minimised window */
     {
         HWND o = GetWindow(hwnd, GW_OWNER);
-        if (o && IsIconic(o)) return TRUE;                    /* belongs to something in the dock */
+        char oc[16];
+        /* belongs to something in the dock: nothing to draw it over. The shell's own dialogs
+           (Exit Windows from the minimised Program Manager's icon menu) live in the desktop
+           column and are always reported. */
+        if (o && IsIconic(o) && (GetClassName(o, oc, sizeof(oc)) <= 0 || lstrcmp(oc, "Progman") != 0)) return TRUE;
     }
     r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->owner = GetWindow(hwnd, GW_OWNER);
     if (!r->owner && lstrcmp(cls, "#32770") == 0) {
@@ -824,6 +828,34 @@ static int owner_slot(HWND owner)
 /* Owned windows are placed once, when first seen; a dialog the program then moves itself is left
    alone unless it leaves its owner's column. */
 static struct { HWND hwnd; int x, y; } g_iconPos[16];   /* where we last put each minimised icon */
+
+/* The width of the title USER draws under a minimised window: its icon-title window (class
+   #32772), found as the one owned by the icon, else the one whose centre sits under the icon's.
+   0 when there is none (yet). */
+static int icon_label_w(HWND icon, const RECT *irc)
+{
+    HWND h; char c[8]; RECT r; int cxm = (irc->left + irc->right) / 2, d;
+    for (h = GetWindow(GetDesktopWindow(), GW_CHILD); h; h = GetWindow(h, GW_HWNDNEXT)) {
+        if (GetClassName(h, c, sizeof(c)) <= 0 || lstrcmp(c, "#32772") != 0) continue;
+        GetWindowRect(h, &r);
+        if (GetWindow(h, GW_OWNER) == icon) return r.right - r.left;
+        d = (r.left + r.right) / 2 - cxm; if (d < 0) d = -d;
+        if (r.top >= irc->bottom - 8 && r.top <= irc->bottom + 16 && d <= 12) return r.right - r.left;
+    }
+    return 0;
+}
+/* Place an icon the way USER does (SetWindowPlacement), so its title follows it. */
+static void place_icon(HWND hwnd, int x, int y)
+{
+    WINDOWPLACEMENT wp;
+    wp.length = sizeof(wp);
+    if (GetWindowPlacement(hwnd, &wp)) {
+        wp.flags |= WPF_SETMINPOSITION; wp.ptMinPosition.x = x; wp.ptMinPosition.y = y;
+        wp.showCmd = SW_SHOWMINNOACTIVE;
+        SetWindowPlacement(hwnd, &wp);
+    } else
+        SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+}
 static HWND g_owned[24];
 static BOOL owned_seen(HWND hwnd)               /* TRUE the first time hwnd is seen */
 {
@@ -900,10 +932,37 @@ static BOOL lstrcmpi_n(const char *a, const char *b, int n)      /* case-insensi
     }
     return TRUE;
 }
+/* The module name (file base name without extension) of the program owning a window. */
+static BOOL module_of(HWND hwnd, char *out, int outlen)
+{
+    char path[128], *base, *p; int n;
+    HINSTANCE inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
+    out[0] = 0;
+    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return FALSE;
+    base = path;
+    for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
+    for (n = 0; base[n] && base[n] != '.' && n < outlen - 1; n++) out[n] = base[n];
+    out[n] = 0;
+    return TRUE;
+}
+/* [PVMon] KeepSize, read once (WM_CREATE) and again with each CMD_SHELLSIZE: a WIN.INI read per
+   window per layout pass is file I/O a phone's guest can do without. */
+static char g_keepList[160];
+static BOOL in_keep_list(const char *mod)
+{
+    char *k;
+    for (k = g_keepList; *k; ) {
+        char *e = k; int n;
+        while (*e && *e != ' ' && *e != ',') e++;
+        n = (int)(e - k);
+        if (n == lstrlen(mod) && lstrcmpi_n(k, mod, n)) return TRUE;
+        k = e; while (*k == ' ' || *k == ',') k++;
+    }
+    return FALSE;
+}
 static void apply_initial_size(HWND hwnd, int slotX)
 {
-    char key[48], val[24], *base, *p, path[128];
-    HINSTANCE inst;
+    char key[48], val[24], *p, mod[16];
     int i, w = 0, h = 0, free = -1;
     for (i = 0; i < 16; i++) {
         if (g_sized[i] == hwnd) return;
@@ -915,27 +974,14 @@ static void apply_initial_size(HWND hwnd, int slotX)
        controls out once, for its own size: resizing it only crops or strands them. */
     if (GetClassName(hwnd, key, sizeof(key)) > 0 && lstrcmp(key, "#32770") == 0) return;
     if (!(GetWindowLong(hwnd, GWL_STYLE) & WS_THICKFRAME)) return;
-    inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
-    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return;
-    base = path;
-    for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
-    for (p = base; *p && *p != '.'; p++) ;
-    *p = 0;
-    wsprintf(key, "Size.%s", (LPSTR)base);
+    if (!module_of(hwnd, mod, sizeof(mod))) return;
+    wsprintf(key, "Size.%s", (LPSTR)mod);
     if (!GetProfileString("PVMon", key, "", val, sizeof(val)) || !val[0]) {
         /* No per-module size: most Windows programs lay out to whatever window they get, so a
            window the width of the phone shows at 1:1 instead of a 640-column window scaled down.
            Programs that draw a fixed layout (Solitaire, Hearts, Minesweeper, Calculator...) are
            listed in KeepSize and left alone. */
-        char keep[128], *k;
-        GetProfileString("PVMon", "KeepSize", "", keep, sizeof(keep));
-        for (k = keep; *k; ) {
-            char *e = k; int n;
-            while (*e && *e != ' ' && *e != ',') e++;
-            n = (int)(e - k);
-            if (n == lstrlen(base) && lstrcmpi_n(k, base, n)) return;
-            k = e; while (*k == ' ' || *k == ',') k++;
-        }
+        if (in_keep_list(mod)) return;
         if (!GetProfileString("PVMon", "DefaultSize", "", val, sizeof(val)) || !val[0]) return;
     }
     for (p = val; *p >= '0' && *p <= '9'; p++) w = w * 10 + (*p - '0');
@@ -945,29 +991,24 @@ static void apply_initial_size(HWND hwnd, int slotX)
                  SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-/* Fixed-layout programs (the hook's rule, mirrored): a dialog-template main window, or a module
-   in [PVMon] KeepSize. They are never resized, only kept inside their column. */
+/* Fixed-layout programs (the hook's rule, mirrored): a dialog-template main window, or one the
+   user cannot resize (no WS_THICKFRAME). They are never resized, only kept inside their column;
+   wider than one column they take two (Character Map 785, Network Setup 708). */
 static BOOL fixed_layout(HWND hwnd)
 {
-    char cls[24], path[128], keep[128], *base, *p, *k;
-    HINSTANCE inst;
+    char cls[24];
     if (GetClassName(hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0) return TRUE;
-    if (!(GetWindowLong(hwnd, GWL_STYLE) & WS_THICKFRAME)) return TRUE;   /* not user-resizable: never reflows */
-    inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
-    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return FALSE;
-    base = path;
-    for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
-    for (p = base; *p && *p != '.'; p++) ;
-    *p = 0;
-    GetProfileString("PVMon", "KeepSize", "", keep, sizeof(keep));
-    for (k = keep; *k; ) {
-        char *e = k; int n;
-        while (*e && *e != ' ' && *e != ',') e++;
-        n = (int)(e - k);
-        if (n == lstrlen(base) && lstrcmpi_n(k, base, n)) return TRUE;
-        k = e; while (*k == ' ' || *k == ',') k++;
-    }
-    return FALSE;
+    return !(GetWindowLong(hwnd, GWL_STYLE) & WS_THICKFRAME);   /* not user-resizable: never reflows */
+}
+/* A resizable window of a [PVMon] KeepSize module (Solitaire, Hearts, Paintbrush, Packager...):
+   not shrunk to the phone's width, but held to one 640 slot and the shell height all the same. A
+   program that merely sizes itself to the 2560-column screen (Paintbrush: 1280x892, scaled to 0.31
+   on the phone) has no natural size worth keeping. */
+static BOOL keep_size(HWND hwnd)
+{
+    char mod[16];
+    if (fixed_layout(hwnd)) return FALSE;
+    return module_of(hwnd, mod, sizeof(mod)) && in_keep_list(mod);
 }
 
 static void park(HWND hwnd, int slot)
@@ -975,34 +1016,41 @@ static void park(HWND hwnd, int slot)
     RECT rc;
     int slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
     int screenH = GetSystemMetrics(SM_CYSCREEN);
+    BOOL fixed, keep;
+    int colW, maxW, maxH;
     apply_initial_size(hwnd, slotX);
     GetWindowRect(hwnd, &rc);
+    fixed = fixed_layout(hwnd); keep = !fixed && keep_size(hwnd);
+    colW = (fixed && double_slot(hwnd, slot)) ? 2 * (int)SLOT_W : (int)SLOT_W;
+    maxW = fixed ? colW : keep ? (int)SLOT_W : (int)g_shellW;
+    maxH = fixed ? screenH : min((int)g_shellH, max_height_for(hwnd));
     if (IsZoomed(hwnd)) {
-        /* The hook makes "maximised" mean the phone frame at the top of the column, so a zoomed
-           window is left zoomed (its maximise box toggles back). Only a window zoomed past the
-           frame, which means the hook missed it, is restored and sized to the frame by hand. */
-        if (rc.right - rc.left <= (int)g_shellW && rc.bottom - rc.top <= (int)g_shellH &&
-            rc.left >= slotX && rc.right <= slotX + (int)SLOT_W) return;
+        /* The hook makes "maximised" mean the phone frame at the top of the column, or, for a
+           fixed-layout / KeepSize window, its own normal rectangle (a no-op), so a zoomed window
+           is left zoomed (its restore box toggles back). Only a window zoomed past its limits,
+           which means the hook missed it, is restored and clamped by hand. (Sizing every zoomed
+           window wider than the phone to 352 here is what cut Solitaire's tableau to 352x598 and
+           left its restore box with nothing to do.) */
+        if (rc.right - rc.left <= maxW && rc.bottom - rc.top <= maxH &&
+            rc.left >= slotX && rc.right <= slotX + colW) return;
         ShowWindow(hwnd, SW_RESTORE);
-        SetWindowPos(hwnd, NULL, slotX, 0, (int)g_shellW, min(max_height_for(hwnd), (int)g_shellH),
+        GetWindowRect(hwnd, &rc);
+        SetWindowPos(hwnd, NULL, slotX, 0,
+                     (fixed || keep) ? min(rc.right - rc.left, maxW) : maxW,
+                     (fixed || keep) ? min(rc.bottom - rc.top, maxH) : maxH,
                      SWP_NOZORDER | SWP_NOACTIVATE);
         return;
     }
     /* The invariant's last line of defence: a resizable program that has sized itself past the
-       phone frame (the hook clamps every path it sees) is brought back to it; a fixed-layout
-       program is only kept inside its 640-wide column. */
-    {
-        BOOL fixed = fixed_layout(hwnd);
-        int maxW = fixed ? (double_slot(hwnd, slot) ? 2 * (int)SLOT_W : (int)SLOT_W) : (int)g_shellW;
-        int maxH = fixed ? screenH : min((int)g_shellH, max_height_for(hwnd));
-        if (rc.right - rc.left > maxW || rc.bottom - rc.top > maxH) {
-            char t[24]; t[0] = 0; GetWindowText(hwnd, t, sizeof(t));
-            dbgnum(t, rc.right - rc.left, rc.bottom - rc.top);
-            SetWindowPos(hwnd, NULL, slotX, 0,
-                         min(rc.right - rc.left, maxW), min(rc.bottom - rc.top, maxH),
-                         SWP_NOZORDER | SWP_NOACTIVATE);
-            return;
-        }
+       phone frame (the hook clamps every path it sees) is brought back to it, a KeepSize one to
+       its slot; a fixed-layout program is only kept inside its column(s). */
+    if (rc.right - rc.left > maxW || rc.bottom - rc.top > maxH) {
+        char t[24]; t[0] = 0; GetWindowText(hwnd, t, sizeof(t));
+        dbgnum(t, rc.right - rc.left, rc.bottom - rc.top);
+        SetWindowPos(hwnd, NULL, slotX, 0,
+                     min(rc.right - rc.left, maxW), min(rc.bottom - rc.top, maxH),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return;
     }
     if (rc.left != slotX || rc.top < 0) {
         SetWindowPos(hwnd, NULL, slotX, 0, 0, 0,
@@ -1111,12 +1159,17 @@ static void publish_layout(void)
            row above. An icon is placed when it is first seen minimised, or when it has left the
            column; one the user has dragged elsewhere (its position differs from the one we set)
            stays where it was dropped. Placement goes through SetWindowPlacement, which is how
-           USER itself places an icon, so the icon title follows it. */
+           USER itself places an icon, so the icon title follows it.
+           The label is then kept inside the column: a word too long to wrap at IconSpacing
+           ("[Accessories]" in Program Manager's title) makes USER's icon title wider than the
+           cell, and centred under an icon in the first cell it hung off the left edge of the
+           screen ("rogram / anager" on the phone). The icon is shifted right (or left, in the
+           last cell) by whatever the title needs; whether we placed the icon or the user did. */
         int n = 0, cell = GetSystemMetrics(SM_CXICONSPACING), per;
         if (cell < 64) cell = 100;
         per = (int)g_shellW / cell; if (per < 1) per = 1;
         for (i = 0; i < g_nWnds; i++) {
-            RECT rc; WINDOWPLACEMENT wp; int x, y, cx = GetSystemMetrics(SM_CXICON), k, slotk = -1;
+            RECT rc; int x, y, cx = GetSystemMetrics(SM_CXICON), k, slotk = -1, lw, margin, nx;
             BOOL placed = FALSE, moved = FALSE;
             if (g_wnds[i].kind != 'I' && !(g_wnds[i].kind == 'S' && IsIconic(g_wnds[i].hwnd))) continue;
             GetWindowRect(g_wnds[i].hwnd, &rc);
@@ -1129,16 +1182,24 @@ static void publish_layout(void)
             if (y < 0) y = 0;
             n++;
             if (placed && moved && rc.left >= 0 && rc.right <= (int)g_shellW && rc.top >= 0 && rc.bottom + 44 <= (int)g_shellH)
-                continue;                                   /* the user put it there */
-            if (placed && !moved) continue;
-            if (rc.left == x && rc.top == y) { if (slotk >= 0) { g_iconPos[slotk].hwnd = g_wnds[i].hwnd; g_iconPos[slotk].x = x; g_iconPos[slotk].y = y; } continue; }
-            wp.length = sizeof(wp);
-            if (GetWindowPlacement(g_wnds[i].hwnd, &wp)) {
-                wp.flags |= WPF_SETMINPOSITION; wp.ptMinPosition.x = x; wp.ptMinPosition.y = y;
-                wp.showCmd = SW_SHOWMINNOACTIVE;
-                SetWindowPlacement(g_wnds[i].hwnd, &wp);
-            } else
-                SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+                x = rc.left, y = rc.top;                    /* the user put it there: only its label is checked */
+            else if (placed && !moved) x = rc.left, y = rc.top;
+            /* the label's half-width past the icon's, plus a couple of pixels: how far from the
+               column's edges the icon must stay */
+            lw = icon_label_w(g_wnds[i].hwnd, &rc);
+            if (lw < cell) lw = cell;
+            margin = (lw - cx) / 2 + 2;
+            nx = x;
+            if (nx + cx + margin > (int)g_shellW) nx = (int)g_shellW - cx - margin;
+            if (nx < margin) nx = margin;
+            if (rc.left == nx && rc.top == y) {
+                if (slotk >= 0) { g_iconPos[slotk].hwnd = g_wnds[i].hwnd; g_iconPos[slotk].x = nx; g_iconPos[slotk].y = y; }
+                continue;
+            }
+            if (nx != x) {
+                char b[80]; wsprintf(b, "pvmon: icon label %d wide, icon %d -> %d", lw, x, nx); dbg(b);
+            }
+            place_icon(g_wnds[i].hwnd, nx, y);
             GetWindowRect(g_wnds[i].hwnd, &rc);
             if (slotk >= 0) { g_iconPos[slotk].hwnd = g_wnds[i].hwnd; g_iconPos[slotk].x = rc.left; g_iconPos[slotk].y = rc.top; }
         }
@@ -1157,7 +1218,8 @@ static void publish_layout(void)
                 if (rc.left >= 0 && rc.right <= (int)g_shellW && rc.top >= 0 && rc.bottom <= (int)g_shellH) continue;
                 GetWindowRect(g_wnds[i].owner, &orc);
                 if (orc.left >= (int)SLOT_W) continue;          /* owner parked elsewhere: not ours */
-                x = ((int)g_shellW - w) / 2; y = (orc.top + orc.bottom - h) / 2;
+                x = ((int)g_shellW - w) / 2;
+                y = IsIconic(g_wnds[i].owner) ? ((int)g_shellH - h) / 2 : (orc.top + orc.bottom - h) / 2;
                 slotX = 0; colR = (int)g_shellW; frameH = (int)g_shellH;
             } else {
                 slotX = (int)SLOT_W * (slot + 1); colR = slotX + (int)SLOT_W;
@@ -1322,6 +1384,7 @@ static void run_host_command_1(void)
            toolbars vary), so the desktop fills the phone edge to edge with no letterboxing. */
         char b[64];
         if (arg >= 300 && arg <= (unsigned)GetSystemMetrics(SM_CYSCREEN)) g_shellH = arg;
+        GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
         hook_set_shell();
         arrange_shell();
         wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
@@ -1589,6 +1652,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
            buttons (Run 483 -> 327); anything else (About Program Manager 505x360, values beside
            labels) is left as laid out at x=0, clipped at the right. */
         g_dlgReflow = GetProfileInt("PVMon", "DialogReflow", 1) != 0;
+        GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
         g_shellW = (unsigned)GetProfileInt("PVMon", "ShellWidth", 0);
         g_shellH = (unsigned)GetProfileInt("PVMon", "ShellHeight", 0);
         /* The screen is now one row of columns, so the shell column is the full screen height
