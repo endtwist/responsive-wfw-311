@@ -869,6 +869,27 @@ function placeLayers(src) {
                  inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, transient: true });
       return;
     }
+    /* An owned dialog that still overlaps its owner in guest VRAM (the hook could not place it
+       below or beside the owner) is already part of the owner's capture. Drawing it as a second,
+       larger layer showed two copies, and masking it out of the owner smeared a strip across the
+       hole. Instead it is drawn coincident with its copy: whole window, at the owner's client scale,
+       at exactly the spot where the owner shows it, so the two copies are one image. */
+    if (L.kind === "O") {
+      const owner = bySlot[L.slot];
+      if (owner) {
+        const ox0 = owner.gx + owner.px, oy0 = owner.gy + owner.py;
+        const overlaps = L.wx < ox0 + owner.vw && L.wx + L.ww > ox0 && L.wy < oy0 + owner.vh && L.wy + L.wh > oy0;
+        if (overlaps) {
+          const zs = owner.zs;
+          const hw = Math.round(L.ww * zs), hh = Math.round(L.wh * zs);
+          const x = Math.round(owner.x + owner.hl + (L.wx - ox0) * zs);
+          const y = Math.round(owner.y + owner.ht + (L.wy - oy0) * zs);
+          out.push({ ...L, key, s: zs, c: zs, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
+                     inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, transient: true, coincident: true });
+          return;
+        }
+      }
+    }
     const inset = {                                  // frame thickness in guest pixels
       l: Math.max(0, L.gx - L.wx),
       t: Math.max(0, L.gy - L.wy),
@@ -1013,22 +1034,7 @@ function drawWindow(g, src, w) {
   }
   blit(g, src, w.gx + w.px, w.gy + w.py, w.vw, w.vh, w.x + hl, w.y + ht,
        Math.round(w.vw * w.zs), Math.round(w.vh * w.zs));
-  if (holes.length) {
-    g.restore();
-    /* The hole is filled with the owner's own pixels after all: a one-pixel strip of its client
-       area bordering the hole (the row just above it, else below, else the column beside it),
-       stretched across. For a document or a dialog that is its background; for a canvas it is a
-       smear, which is still one dialog and not two. */
-    const cx0 = w.gx + w.px, cy0 = w.gy + w.py, cx1 = cx0 + w.vw, cy1 = cy0 + w.vh;
-    for (const h of holes) {
-      const dx = w.x + hl + (h.x - cx0) * w.zs, dy = w.y + ht + (h.y - cy0) * w.zs;
-      const dw = h.w * w.zs, dh = h.h * w.zs;
-      if (h.y - 1 >= cy0) blit(g, src, h.x, h.y - 1, h.w, 1, dx, dy, dw, dh);
-      else if (h.y + h.h < cy1) blit(g, src, h.x, h.y + h.h, h.w, 1, dx, dy, dw, dh);
-      else if (h.x - 1 >= cx0) blit(g, src, h.x - 1, h.y, 1, h.h, dx, dy, dw, dh);
-      else if (h.x + h.w < cx1) blit(g, src, h.x + h.w, h.y, 1, h.h, dx, dy, dw, dh);
-    }
-  }
+  if (holes.length) g.restore();
 }
 /* Owned (PVO) and transient (PVT) windows that overlap layer `w`'s client area in guest screen
    space, as guest rects clipped to the visible part of the client. Only children that are drawn as
@@ -1040,6 +1046,7 @@ function overlapsOf(w) {
     if (L === w.src || (L.kind !== "O" && L.kind !== "T")) continue;
     if (L.kind === "O" && L.slot < 0) continue;                 // shell dialogs are not layers
     if (L.kind === "O" && w.kind === "W" && L.slot !== w.slot) continue;
+    if (placed.some(p => p.src === L && p.coincident)) continue;   // drawn over its own copy: no hole
     const x0 = Math.max(cx0, L.wx), y0 = Math.max(cy0, L.wy);
     const x1 = Math.min(cx1, L.wx + L.ww), y1 = Math.min(cy1, L.wy + L.wh);
     if (x1 > x0 && y1 > y0) out.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
