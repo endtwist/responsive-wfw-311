@@ -861,3 +861,36 @@ otherwise stop the screen ever shrinking again.
 Verified on a phone viewport: **448x970 with just the desktop, 648x1402 while Solitaire is open
 and dealing correctly, and 448x970 again when it closes.** The Run dialog now draws complete,
 frame closed and all four buttons visible.
+
+**2026-09-01 (night) — responsive dialogs, so a phone can just be used.**
+The brief got sharper: it should be usable in portrait the way a website is. No rotation prompt,
+no zoom controls to reach for, and no screen resizing itself underneath whatever is open. Both of
+my earlier answers failed that test: magnification is fiddly, and widening the screen whenever an
+application or dialog appeared was worse, because the whole desktop changed size while you were
+using it.
+
+The thing that forced all of it was dialog width. So instead of sizing the screen around dialogs,
+`PVMON` now makes the dialogs fit: **controls that fall off the right-hand edge are moved into
+rows underneath the ones that fit, and the dialog is made narrower and taller to match.** Nothing
+is scaled, so no text is squashed or clipped; the buttons that normally run down the right simply
+end up in a row along the bottom, which is what the dialog would look like if it had been designed
+for a narrow screen. This is stretch tier 3 from the original spec, arrived at by reflow rather
+than by rescaling templates, which avoids the clipped-text problem rescaling would have had.
+
+Two details that mattered: child window positions are relative to the parent's *client* area, so
+the new positions are computed through `ClientToScreen` rather than the window rectangle (getting
+this wrong made the buttons vanish entirely), and the frame is added back when resizing by taking
+the difference between the window and client rectangles.
+
+Result on a 375-point portrait phone, with the desktop at a fixed 448x970 and a 17-point system
+font: **File > Run reflows its four buttons into a row along the bottom, and the common File Open
+dialog, the widest one at about 620 pixels, becomes a single readable column** with everything
+reachable. Write's menu bar wraps to two rows by itself. The screen never changes size, and
+nothing needs to be zoomed or panned.
+
+Still outstanding, and the honest limit of this approach: an application that draws its own
+fixed layout rather than laying out controls cannot be reflowed this way. **Solitaire needs about
+570 columns for its tableau and is cramped at 448** -- its cards are drawn by the game, not
+arranged as child windows, so there is nothing for PVMON to move. Fixing that needs either a
+per-application rule that gives such programs a wider screen, or leaving them to landscape, where
+a phone gets 864x400 and everything works at a comfortable size anyway.

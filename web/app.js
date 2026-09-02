@@ -13,31 +13,37 @@ const IMAGE = params.get("hda") || "../image/work-live.img";
  * The emulated mode tracks the viewport rather than snapping to fixed breakpoints. Windows 3.x
  * needs room, so on small screens the emulated pixel scale shrinks instead of the mode.
  */
-/* Windows needs roughly 640 columns for its fixed-size dialogs, but holding the emulated width
-   there on a phone shrinks every emulated pixel to well under a point, which is what made the
-   screen unreadable. The desktop itself is fine much smaller, so phones get a lower resolution,
-   which makes icons, hit areas and text all physically larger with the whole screen still
-   visible; PVMON widens the screen on its own for the moment a dialog is actually up. */
-const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
-const PHONE_W = 448;              // comfort width on a narrow screen
-
+/* Mode selection.
+ *
+ * Windows needs roughly 640 columns: its dialogs are fixed templates and the common File Open
+ * dialog alone wants about 620 pixels. A phone in portrait is only about 375 points wide, so
+ * those 640 columns land at 0.59 points each and the result is hard to read. There is no way
+ * round that in portrait; the honest options are a stable screen with small text, or a small
+ * readable desktop whose screen has to widen whenever something needs the room.
+ *
+ * So a narrow screen gets a narrow desktop, which is what makes the interface readable, and
+ * PVMON reflows any dialog that does not fit into it: controls that fall off the edge move into
+ * rows underneath, nothing is scaled and no text is clipped. No zooming, no panning, and no
+ * resizing the screen underneath whatever is open.
+ */
 function viewport() {
   const vv = window.visualViewport;
   let w = vv ? vv.width : window.innerWidth;
   let h = vv ? vv.height : window.innerHeight;
-  if (!(w > 0) || !(h > 0)) { w = 1024; h = 768; }
+  if (!(w > 0) || !(h > 0)) { w = 1024; h = 768; }   // a hidden page can report nothing
   return [w, h];
 }
 
-// Default to fitting the whole screen, on every device. Starting a phone magnified means
-// landing in a view that is zoomed in and scrolls around, which is disorienting; magnification
-// is a control you reach for, not a place to begin.
+// Magnification stays available as a control, but nothing reaches for it on its own.
 let zoom = 1;
 const ZOOM_MIN = 0.5, ZOOM_MAX = 6;
 
+const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
+const PHONE_W = 448;                     // narrow screens get a readable desktop
+
 function computeMode() {
   const [vw, vh] = viewport();
-  const floorW = vw < 600 ? PHONE_W : MIN_W;      // a phone gets fewer, larger pixels
+  const floorW = vw < 600 ? PHONE_W : MIN_W;
   let scale = Math.max(1, floorW / vw, MIN_H / vh);
   scale = Math.min(scale, MAX_W / vw, MAX_H / vh);
   const w = Math.max(floorW, Math.min(MAX_W, Math.floor(vw * scale / 8) * 8));
@@ -151,11 +157,11 @@ window.pvGuestCursor = () => guestCursor;
 /* ------------------------------------------------------------------------- mode controller */
 let lastReq = null;
 function requestMode(force) {
-  const { w, h, zoom } = computeMode();
+  const { w, h, zoom: scale } = computeMode();
   if (!force && lastReq && Math.abs(lastReq.w - w) < 8 && Math.abs(lastReq.h - h) < 8) return;
   lastReq = { w, h };
   emulator.bus.send("pv-request-mode", [w, h]);
-  $("zoom").textContent = zoom === 1 ? "" : `scale ${zoom.toFixed(2)}`;
+  $("zoom").textContent = scale === 1 ? "" : `scale ${scale.toFixed(2)}`;
   fitCanvas();
 }
 // The debounce deliberately avoids setTimeout: a hidden page throttles timers almost to a
@@ -368,6 +374,9 @@ try {
 
 
 window.addEventListener("pagehide", () => saveState(emulator));
+// A phone in portrait can have a readable desktop or a stable screen, not both; let the choice
+// be made explicitly rather than by the page changing size underneath whatever is open.
+
 $("zoomin").onclick = () => setZoom(zoom * 1.25);
 $("zoomout").onclick = () => setZoom(zoom / 1.25);
 $("zoomfit").onclick = () => { setZoom(1); const b = $("screen_container"); b.scrollLeft = 0; b.scrollTop = 0; };

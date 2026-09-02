@@ -189,10 +189,8 @@ static unsigned g_lastGen;
 static unsigned g_wantW, g_wantH, g_stable;
 static BOOL g_restarting;
 static BOOL g_live;
-static BOOL g_dlgWiden;            /* WIN.INI [PVMon] DialogWiden */
-static BOOL g_widened;             /* screen is currently widened for a dialog */
-static unsigned g_hostW, g_hostH;  /* the size the host actually asked for */
-static int g_noDialog;            /* WIN.INI [PVMon] Live=1 -> try the Phase 3 live re-mode */
+static BOOL g_dlgReflow;           /* WIN.INI [PVMon] DialogReflow */
+static unsigned g_hostW, g_hostH;  /* the size the host actually asked for */            /* WIN.INI [PVMon] Live=1 -> try the Phase 3 live re-mode */
 static unsigned g_doneW, g_doneH;  /* mode the live path has already applied */
 
 /* ------------------------------------------------------------------ Phase 3 step 3b
@@ -461,54 +459,132 @@ static void patch_user_metrics(unsigned w, unsigned h)
    The driver updates its own surface state and GDI's copy of the screen BITMAP. GDI's
    cached device caps and USER's screen metrics are still the old size at this point, so
    the shell is expected to keep drawing at the old geometry until 3b/3c land. */
-/* How wide does the content on screen actually need the screen to be?
+/* Responsive dialogs.
  *
- * Everything from this era lays out to a fixed size: dialogs are fixed templates, and an
- * application window carries whatever layout it computed for its own size. A screen narrower
- * than the widest window on it therefore either cuts that window off or, if the window is
- * resized to fit, makes the application re-lay itself into nonsense -- which is what happened to
- * Solitaire, whose tableau collapsed into a column of overlapping cards.
+ * Windows 3.x dialogs are fixed templates laid out for a 640-column screen: the common File Open
+ * dialog is about 620 pixels wide. On a phone-sized desktop they hang off the right-hand edge and
+ * their buttons are unreachable, which is the one thing that stopped the screen simply being made
+ * small enough to read.
  *
- * So the screen is kept as small as the content allows and no smaller: small while it is only
- * the desktop, which is what makes everything large and readable on a phone, and widened for
- * exactly as long as something on it needs the room.
- *
- * An application's window is a special case, because Windows clamps a new window to the screen:
- * open Solitaire on a 448-wide screen and its window is born 448 wide, which is below the size
- * it needs to lay out a tableau at all, so it draws nothing and never asks for more. Measuring
- * what is on screen cannot discover that. So any application window at all means the screen goes
- * to a standard width, and the window, having been clamped to the old screen, is then grown to
- * the new one by the fill rule in FitWindow and lays itself out properly. */
-#define APP_MIN_W 640              /* a screen this wide is what 1993 applications assume */
-static BOOL g_setW;                /* next live_remode uses an explicit size */
-static unsigned g_needW;
+ * Rather than resize the screen around them, the dialog is reflowed: controls that fall off the
+ * edge are moved down into rows underneath the ones that fit, and the dialog is made narrower and
+ * taller to match. Nothing is scaled, so no text is squashed or clipped -- the buttons that
+ * normally sit in a column down the right simply end up in a row along the bottom, which is what
+ * the same dialog would look like if it had been designed for a narrow screen.
+ */
+#define DLG_MARGIN   8
+#define DLG_GAP      6
+#define MAX_KIDS     40
 
-BOOL CALLBACK __export MeasureWindow(HWND hwnd, LPARAM lParam)
+typedef struct { HWND hwnd; int x, y, cx, cy; } KID;
+static KID g_kids[MAX_KIDS];
+static int g_nKids;
+
+BOOL CALLBACK __export CollectKid(HWND hwnd, LPARAM lParam)
 {
     RECT rc;
-    char cls[24];
-    unsigned w;
-    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
-    /* The shell is always sized to the screen, so counting it would mean the screen could never
-       shrink again: it would always appear to need exactly the width it currently has. */
-    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return TRUE;
-    if (lstrcmp(cls, "Progman") == 0 || lstrcmp(cls, "PVMonitor") == 0) return TRUE;
+    if (g_nKids >= MAX_KIDS) return FALSE;
+    if (!IsWindowVisible(hwnd)) return TRUE;
     GetWindowRect(hwnd, &rc);
-    w = (unsigned)(rc.right - rc.left);
-    if (w > g_needW && w <= 2560) g_needW = w;
-    if (g_needW < APP_MIN_W) g_needW = APP_MIN_W;   /* an application is open: give it room */
+    g_kids[g_nKids].hwnd = hwnd;
+    g_kids[g_nKids].x = rc.left;  g_kids[g_nKids].y = rc.top;
+    g_kids[g_nKids].cx = rc.right - rc.left;
+    g_kids[g_nKids].cy = rc.bottom - rc.top;
+    g_nKids++;
     return TRUE;
 }
 
-static unsigned content_width(void)
+/* Move the controls that do not fit into rows below the ones that do, and resize the dialog to
+   match. Child positions are relative to the parent's *client* area, so screen coordinates are
+   converted through the client origin rather than the window rectangle. */
+static BOOL reflow_dialog(HWND dlg, int screenW)
 {
     FARPROC proc;
-    g_needW = 0;
-    proc = MakeProcInstance((FARPROC)MeasureWindow, g_hInst);
-    if (!proc) return 0;
-    EnumWindows((WNDENUMPROC)proc, 0L);
+    RECT dr;
+    POINT org;
+    int avail, i, fitBottom, rowX, rowY, rowH, moved = 0, widest = 0, newW, newH;
+
+    GetWindowRect(dlg, &dr);
+    avail = screenW - 2 * DLG_MARGIN;
+    if (dr.right - dr.left <= avail) return FALSE;      /* already fits */
+
+    g_nKids = 0;
+    proc = MakeProcInstance((FARPROC)CollectKid, g_hInst);
+    if (!proc) return FALSE;
+    EnumChildWindows(dlg, (WNDENUMPROC)proc, 0L);
     FreeProcInstance(proc);
-    return g_needW;
+    if (!g_nKids) return FALSE;
+
+    org.x = 0; org.y = 0;
+    ClientToScreen(dlg, &org);           /* screen position of the dialog's client origin */
+
+    /* Anything whose right edge still lands on screen keeps its place. */
+    fitBottom = org.y;
+    for (i = 0; i < g_nKids; i++) {
+        if (g_kids[i].x + g_kids[i].cx <= dr.left + avail) {
+            if (g_kids[i].y + g_kids[i].cy > fitBottom) fitBottom = g_kids[i].y + g_kids[i].cy;
+            if (g_kids[i].x + g_kids[i].cx - org.x > widest) widest = g_kids[i].x + g_kids[i].cx - org.x;
+        }
+    }
+
+    /* The rest go into rows underneath, in their original order, wrapping at the edge. */
+    rowX = org.x + DLG_MARGIN;
+    rowY = fitBottom + DLG_GAP;
+    rowH = 0;
+    for (i = 0; i < g_nKids; i++) {
+        if (g_kids[i].x + g_kids[i].cx <= dr.left + avail) continue;
+        if (rowH && (rowX - org.x) + g_kids[i].cx > avail - DLG_MARGIN) {
+            rowX = org.x + DLG_MARGIN;
+            rowY += rowH + DLG_GAP;
+            rowH = 0;
+        }
+        SetWindowPos(g_kids[i].hwnd, NULL, rowX - org.x, rowY - org.y, 0, 0,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+        rowX += g_kids[i].cx + DLG_GAP;
+        if (g_kids[i].cy > rowH) rowH = g_kids[i].cy;
+        if (rowX - org.x > widest) widest = rowX - org.x;
+        moved++;
+    }
+    if (!moved) return FALSE;
+
+    /* Grow the frame back around the new content: the difference between the window and client
+       rectangles is the border and caption we have to add back. */
+    newW = widest + DLG_MARGIN + ((dr.right - dr.left) - (avail));    /* placeholder, fixed below */
+    newW = widest + DLG_MARGIN + (org.x - dr.left) * 2;
+    newH = (rowY + rowH - org.y) + DLG_MARGIN + (org.y - dr.top) + (org.x - dr.left);
+    if (newW > avail) newW = avail;
+    SetWindowPos(dlg, NULL, DLG_MARGIN, dr.top, newW, newH, SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(dlg, NULL, TRUE);
+    UpdateWindow(dlg);
+    dbgnum("pvmon: reflowed a dialog to", (unsigned)newW, (unsigned)newH);
+    return TRUE;
+}
+
+/* Find dialogs that overflow the screen and reflow them. */
+static HWND g_wideDlg;
+
+BOOL CALLBACK __export FindWideDialog(HWND hwnd, LPARAM lParam)
+{
+    char cls[16];
+    RECT rc;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return TRUE;
+    if (lstrcmp(cls, "#32770") != 0) return TRUE;
+    GetWindowRect(hwnd, &rc);
+    if (rc.right - rc.left > (int)lParam || rc.left < 0) { g_wideDlg = hwnd; return FALSE; }
+    return TRUE;
+}
+
+static void check_dialogs(void)
+{
+    FARPROC proc;
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    g_wideDlg = NULL;
+    proc = MakeProcInstance((FARPROC)FindWideDialog, g_hInst);
+    if (!proc) return;
+    EnumWindows((WNDENUMPROC)proc, (LPARAM)(screenW - 2 * DLG_MARGIN));
+    FreeProcInstance(proc);
+    if (g_wideDlg) reflow_dialog(g_wideDlg, screenW);
 }
 
 static BOOL live_remode(unsigned w, unsigned h)
@@ -525,13 +601,7 @@ static BOOL live_remode(unsigned w, unsigned h)
     g_prevW = GetSystemMetrics(SM_CXSCREEN);
     g_prevH = GetSystemMetrics(SM_CYSCREEN);
     ShowCursor(FALSE);
-    if (g_setW) {                            /* an explicit size, not the host's request */
-        WORD want[2];
-        want[0] = (WORD)w; want[1] = (WORD)h;
-        r = Escape(hdc, PV_SETMODE, sizeof(want), (LPCSTR)(LPSTR)want, NULL);
-    } else {
-        r = Escape(hdc, PV_REMODE, 0, NULL, NULL);
-    }
+    r = Escape(hdc, PV_REMODE, 0, NULL, NULL);
     ReleaseDC(NULL, hdc);
     dbgnum("pvmon: live re-mode returned", (unsigned)r, 0);
     if (r <= 0) { ShowCursor(TRUE); return FALSE; }
@@ -555,39 +625,6 @@ static BOOL adapter_present(void)
     return rd(R_DEBUG) == 0x5056;
 }
 
-/* Widen while something on screen needs more room than the host asked for, and go back after. */
-static void check_content(void)
-{
-    unsigned curW = GetSystemMetrics(SM_CXSCREEN), curH = GetSystemMetrics(SM_CYSCREEN);
-    unsigned need = content_width();
-    if (!curW || !curH) return;
-
-    if (need > curW) {                       /* something does not fit: make room for it */
-        unsigned w = (need + 15) & ~7u;
-        unsigned h;
-        if (w > 2560) w = 2560;
-        h = (unsigned)((DWORD)curH * w / curW) & ~1u;
-        if (h > 1600) h = 1600;
-        g_noDialog = 0;
-        g_setW = TRUE;
-        if (live_remode(w, h)) { g_widened = TRUE; dbgnum("pvmon: widened for content", w, h); }
-        g_setW = FALSE;
-        return;
-    }
-    if (!g_widened) return;
-    /* Only go back once the content would still fit at the host's size, with a little margin so
-       that a window sitting near the boundary does not make the screen flap back and forth. */
-    if (need + 16 > g_hostW) { g_noDialog = 0; return; }
-    if (++g_noDialog < UNDIALOG_POLLS) return;
-    g_setW = TRUE;
-    if (live_remode(g_hostW, g_hostH)) {
-        g_widened = FALSE;
-        dbgnum("pvmon: back to", g_hostW, g_hostH);
-    }
-    g_setW = FALSE;
-    g_noDialog = 0;
-}
-
 static void poll(HWND hwnd)
 {
     unsigned gen, w, h, curW, curH;
@@ -597,8 +634,7 @@ static void poll(HWND hwnd)
     h = rd(R_HOST_YRES) & ~1u;
     if (w < 320 || h < 200) return;
     g_hostW = w; g_hostH = h;
-    if (g_live && g_dlgWiden) check_content();
-    if (g_widened) return;                    /* leave the dialog room alone while it is up */
+    if (g_dlgReflow) check_dialogs();
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
@@ -632,7 +668,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         HDC hdc; TEXTMETRIC tm; char buf[80];
         g_lastGen = rd(R_GEN);
         g_live = GetProfileInt("PVMon", "Live", 0) != 0;
-        g_dlgWiden = GetProfileInt("PVMon", "DialogWiden", 1) != 0;
+        g_dlgReflow = GetProfileInt("PVMon", "DialogReflow", 1) != 0;
         if (g_live) { dbg("pvmon: live re-mode enabled"); find_user_state(); }
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);
