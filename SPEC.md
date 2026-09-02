@@ -1517,3 +1517,18 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   604 guest px -> 643 host px on a 375 px phone) and combo drop-downs longer than the column.
   Pane (375x812): Open box x 1 -> -268 (= 375-643, exact clamp) and back to 0, owner moved with it,
   tap on it clicked. File Manager's View menu at 375x400 shifts up to y=43 so its 357 px fit.
+
+### 2026-09-02 — one-finger scroll on Program Manager and MDI programs
+- Program Manager's client area (the group windows: a desktop hit inside the `S` layer's client
+  rect, not the icon row or the bare desktop) is now a scroll surface: a vertical/horizontal
+  one-finger drag sends `CMD_SCROLL` with the slot field **15 (0xF) = the shell**; PVMON routes it
+  to the active MDI group (guest agent's change; the encoding is `SHELL_SCROLL_SLOT` in app.js and
+  must match pvmon.c when it lands — the PVMON on the current image ignores slot 15, harmlessly).
+  A tap is still a click, a double-tap still opens, the icon row and desktop still pointer-drag.
+- W layers in the scroll policy (File Manager, Write, …) scroll from anywhere on their client even
+  when the scroll bar belongs to an MDI child; the guest targets the focused/child window. Two-finger
+  scroll unchanged.
+- Pane: File Manager client drag -> `CMD_SCROLL slot=0 dir=2`; with File Manager closed, a drag on
+  Program Manager's client (guest 282,582) -> `scroll start slot=15 Program Manager`,
+  `slot=15 dir=2 lines=2`, no button events; a tap at the same spot -> `button down/up`, no scroll;
+  a drag on the icon row -> ordinary pointer drag.

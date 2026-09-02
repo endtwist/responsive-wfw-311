@@ -792,6 +792,16 @@ const SURFACE_POLICY = [
   [/^Solitaire/, "drag"], [/^Paintbrush/, "drag"], [/^Minesweeper/, "drag"], [/^Hearts/, "drag"], [/MS-DOS/, "drag"],
   [/^Terminal/, "drag"], [/^Reversi/, "drag"],
 ];
+/* CMD_SCROLL's slot field for the shell: PVMON routes it to Program Manager's active MDI group
+   window (WM_VSCROLL/WM_HSCROLL). Slot numbers 0..MAX_SLOTS-1 are application columns. */
+const SHELL_SCROLL_SLOT = 15;
+/* A desktop hit inside Program Manager's client area (the group windows), not the icon row or the
+   desktop around it: a one-finger drag there scrolls the active group. */
+function insideShellClient(h) {
+  if (!h || h.kind !== "desktop") return false;
+  const S = layers.find(L => L.kind === "S");
+  return !!S && h.x >= S.gx && h.x < S.gx + S.gw && h.y >= S.gy && h.y < S.gy + S.gh;
+}
 function surfacePolicy(L) {
   if (!L || L.kind !== "W") return "drag";
   for (const [re, pol] of SURFACE_POLICY) if (re.test(L.title || "")) return pol;
@@ -1632,8 +1642,11 @@ function installTouch() {
     if (consumed) { diag(`down consumed=${consumed}`); noteInput(`down ${consumed}`); return; }
     let pt = canvasPoint(ev, true);
     { const { px, py } = hostPoint(ev);
-      const pol = pressLayer && !pressLayer.transient && !pressLayer.shellCopy && hitTest(px, py).kind === "client" ? surfacePolicy(pressLayer) : "drag";
-      oneScroll = pol === "scroll" ? { slot: pressLayer.slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title: pressLayer.title } : null; }
+      const h0 = hitTest(px, py);
+      let pol = "drag", slot = -1, title = "";
+      if (pressLayer && !pressLayer.transient && !pressLayer.shellCopy && h0.kind === "client") { pol = surfacePolicy(pressLayer); slot = pressLayer.slot; title = pressLayer.title; }
+      else if (insideShellClient(h0)) { pol = "scroll"; slot = SHELL_SCROLL_SLOT; title = "Program Manager"; }   // PVMON targets the active group
+      oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title } : null; }
     // A quick second tap near the first is a double-click: Windows 3.1 only pairs clicks a few
     // pixels apart, and fingers do not repeat to the pixel, so the second tap reuses the first
     // tap's exact point.
