@@ -1928,7 +1928,10 @@ CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
         apic_time = this.apic_timer(now);
     }
 
-    return Math.min(pit_time, rtc_time, acpi_time, apic_time);
+    // responsive-wfw311: the Sound Blaster's recording path is paced by wall-clock time.
+    const sb16_time = this.devices.sb16 ? this.devices.sb16.timer(now) : 100;
+
+    return Math.min(pit_time, rtc_time, acpi_time, apic_time, sb16_time);
 };
 
 CPU.prototype.debug_init = function()

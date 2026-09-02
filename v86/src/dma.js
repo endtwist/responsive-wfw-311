@@ -300,6 +300,49 @@ DMA.prototype.do_read = function(buffer, start, len, channel, fn)
     }
 };
 
+// responsive-wfw311: device -> memory, synchronous and incremental (do_read above transfers the
+// channel's whole remaining count at once and ignores autoinit, which suits a floppy but not a
+// sound card feeding a double buffer a few hundred bytes at a time). Writes up to len bytes of
+// src into memory at the channel's current address, advancing address and count the way
+// do_write does, wrapping to the initial address/count when the terminal count is reached in
+// autoinit mode. Returns the number of bytes written (less than len when the terminal count was
+// reached in single mode, or the channel is masked).
+DMA.prototype.do_read_sync = function(src, len, channel)
+{
+    var autoinit = this.channel_mode[channel] & 0x10;
+    var written = 0;
+
+    while(written < len)
+    {
+        if(this.channel_mask[channel])
+        {
+            break;
+        }
+        var remaining = (this.channel_count[channel] + 1) & 0xFFFF;
+        var n = Math.min(len - written, remaining);
+        var addr = this.address_get_8bit(channel);
+
+        this.cpu.write_blob(src.subarray(written, written + n), addr);
+        this.channel_addr[channel] += n;
+        this.channel_count[channel] -= n;   // underflows to 0xFFFF at terminal count, like do_write
+        written += n;
+
+        if(n === remaining)
+        {
+            if(autoinit)
+            {
+                this.channel_addr[channel] = this.channel_addr_init[channel];
+                this.channel_count[channel] = this.channel_count_init[channel];
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+    return written;
+};
+
 // write data, read memory
 // start and len in bytes
 DMA.prototype.do_write = function(buffer, start, len, channel, fn)

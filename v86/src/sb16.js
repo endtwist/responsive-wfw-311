@@ -6,6 +6,7 @@ import {
 import { h } from "./lib.js";
 import { dbg_log } from "./log.js";
 import { SyncBuffer } from "./buffer.js";
+import { v86 } from "./main.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
@@ -60,6 +61,11 @@ const
 
     // Number of samples to attempt to retrieve per transfer.
     SB_DMA_BLOCK_SAMPLES = 1024,
+    // Host-side capture ring, in host samples (about 1.3 s at 48 kHz).
+    SB_REC_RING_SIZE = 65536,
+    // Recording latency bound: when the host is further ahead than this many host samples, the
+    // read position jumps forward rather than letting the lag grow (about 250 ms at 48 kHz).
+    SB_REC_MAX_LAG = 12000,
 
     // Usable DMA channels.
     SB_DMA0 = 0,
@@ -248,6 +254,30 @@ export function SB16(cpu, bus)
 
     this.dma.on_unmask(this.dma_on_unmask, this);
 
+    // responsive-wfw311: ADC / recording path (DSP 0x24, 0x2C, 0x91, 0x98, 0x99, 0xC8..0xCF).
+    // Samples come from the host over the bus ("sb16-record-data": [Float32Array, rate]) into a
+    // ring; the DSP pulls them at its own programmed rate, paced by the emulator clock in
+    // timer(), so a block of DMA input and its IRQ arrive on time whether or not the host has a
+    // microphone to offer (silence is written when the ring is empty).
+    this.rec_active = false;
+    this.rec_autoinit = false;
+    this.rec_paused = false;
+    this.rec_channel = 0;
+    this.rec_bytes_count = 0;
+    this.rec_bytes_left = 0;
+    this.rec_last_time = 0;
+    this.rec_owed = 0;                      // fractional samples owed since the last tick
+    this.rec_buffer = new Uint8Array(SB_DMA_BUFSIZE);
+    this.rec_ring = new Float32Array(SB_REC_RING_SIZE);
+    this.rec_ring_w = 0;                    // host samples written (monotonic)
+    this.rec_ring_r = 0;                    // device read position (fractional, monotonic)
+    this.rec_host_rate = 48000;
+    this.rec_host_seen = false;
+    bus.register("sb16-record-data", function(msg)
+    {
+        this.rec_push(msg[0], msg[1]);
+    }, this);
+
     bus.register("dac-request-data", function()
     {
         this.dac_handle_request();
@@ -300,6 +330,8 @@ SB16.prototype.dsp_reset = function()
 
     this.sampling_rate = 22050;
     this.bytes_per_sample = 1;
+
+    this.rec_stop();
 
     this.lower_irq(SB_IRQ_8BIT);
     this.irq_triggered.fill(0);
@@ -420,6 +452,9 @@ SB16.prototype.set_state = function(state)
     this.dma_buffer_int16 = new Int16Array(this.dma_buffer);
     this.dma_buffer_uint16 = new Uint16Array(this.dma_buffer);
     this.dma_syncbuffer = new SyncBuffer(this.dma_buffer);
+
+    // A recording in progress does not survive a snapshot: the host capture it fed is gone.
+    this.rec_stop();
 
     if(this.dma_paused)
     {
@@ -858,16 +893,32 @@ register_dsp_command([0x1F], 0);
 // 8-bit direct mode single byte digitized sound input.
 register_dsp_command([0x20], 0, function()
 {
-    // Fake silent input.
+    // One sample from the host ring (silence, 0x80, when there is none). Not paced: a guest that
+    // polls this faster than the sampling rate simply drains the ring faster.
     this.read_buffer.clear();
-    this.read_buffer.push(0x7f);
+    this.read_buffer.push(this.rec_pull_byte(false));
 });
 
 // 8-bit single-cycle DMA mode digitized sound input.
-register_dsp_command([0x24], 2);
+register_dsp_command([0x24], 2, function()
+{
+    this.dsp_signed = false;
+    this.dsp_16bit = false;
+    this.dsp_highspeed = false;
+    this.dma_transfer_size_set();
+    this.rec_start(false);
+});
 
 // 8-bit auto-init DMA mode digitized sound input.
-register_dsp_command([0x2C], 0);
+// (What WfW 3.11's SNDBLST2.DRV issues for Sound Recorder: 0x48 block 0x7FF, then 0x2C, over a
+// 4 KB autoinit DMA buffer; it stops with 0xD0 and then masks the DMA channel.)
+register_dsp_command([0x2C], 0, function()
+{
+    this.dsp_signed = false;
+    this.dsp_16bit = false;
+    this.dsp_highspeed = false;
+    this.rec_start(true);
+});
 
 // Polling mode MIDI input.
 register_dsp_command([0x30], 0);
@@ -954,13 +1005,22 @@ register_dsp_command([0x90], 0, function()
 });
 
 // 8-bit high-speed single-cycle DMA mode digitized sound input.
-register_dsp_command([0x91], 0);
+register_dsp_command([0x91, 0x99], 0, function()
+{
+    this.dsp_signed = false;
+    this.dsp_16bit = false;
+    this.dsp_highspeed = true;
+    this.rec_start(false);
+});
 
 // 8-bit high-speed auto-init DMA mode digitized sound input.
-register_dsp_command([0x98], 0);
-
-// 8-bit high-speed single-cycle DMA mode digitized sound input.
-register_dsp_command([0x99], 0);
+register_dsp_command([0x98], 0, function()
+{
+    this.dsp_signed = false;
+    this.dsp_16bit = false;
+    this.dsp_highspeed = true;
+    this.rec_start(true);
+});
 
 // Set input mode to mono.
 register_dsp_command([0xA0], 0);
@@ -991,13 +1051,18 @@ register_dsp_command(any_first_digit(0xB0), 3, function()
 // Program 8-bit DMA mode digitized sound I/O.
 register_dsp_command(any_first_digit(0xC0), 3, function()
 {
+    var mode = this.write_buffer.shift();
     if(this.command & (1 << 3))
     {
-        // Analogue to digital not implemented.
-        this.dsp_default_handler();
+        // Analogue to digital (8-bit). Stereo input is written as the mono capture on both
+        // channels.
+        this.dsp_signed = !!(mode & (1 << 4));
+        this.dsp_stereo = !!(mode & (1 << 5));
+        this.dsp_16bit = false;
+        this.dma_transfer_size_set();
+        this.rec_start(!!(this.command & (1 << 2)));
         return;
     }
-    var mode = this.write_buffer.shift();
     this.dma_irq = SB_IRQ_8BIT;
     this.dma_channel = this.dma_channel_8bit;
     this.dma_autoinit = !!(this.command & (1 << 2));
@@ -1012,6 +1077,7 @@ register_dsp_command(any_first_digit(0xC0), 3, function()
 register_dsp_command([0xD0], 0, function()
 {
     this.dma_paused = true;
+    this.rec_paused = true;
     this.bus.send("dac-disable");
 });
 
@@ -1033,6 +1099,7 @@ register_dsp_command([0xD3], 0, function()
 register_dsp_command([0xD4], 0, function()
 {
     this.dma_paused = false;
+    this.rec_paused = false;
     this.bus.send("dac-enable");
 });
 
@@ -1062,6 +1129,7 @@ register_dsp_command([0xD8], 0, function()
 register_dsp_command([0xD9, 0xDA], 0, function()
 {
     this.dma_autoinit = false;
+    this.rec_autoinit = false;
 });
 
 // DSP identification
@@ -1839,6 +1907,168 @@ SB16.prototype.dma_to_dac = function(sample_count)
     }
 
     this.dac_send();
+};
+
+//
+// Recording (ADC -> DMA) behaviours
+//
+
+// Host capture arrives here: mono float samples at the host's rate.
+SB16.prototype.rec_push = function(samples, rate)
+{
+    if(!samples || !samples.length) return;
+    if(rate > 0) this.rec_host_rate = rate;
+    this.rec_host_seen = true;
+
+    var ring = this.rec_ring, size = SB_REC_RING_SIZE;
+    for(var i = 0; i < samples.length; i++)
+    {
+        ring[(this.rec_ring_w + i) % size] = samples[i];
+    }
+    this.rec_ring_w += samples.length;
+
+    // Bound the latency: if the DSP has fallen far behind (it was not recording, or the tab was
+    // throttled), skip ahead so what it reads next is recent.
+    var lag = this.rec_ring_w - this.rec_ring_r;
+    if(lag > SB_REC_MAX_LAG)
+    {
+        this.rec_ring_r = this.rec_ring_w - SB_REC_MAX_LAG / 2;
+    }
+};
+
+// One 8-bit sample for the DSP, resampled from the host ring; 0x80 (or 0 signed) when there is
+// nothing to read.
+SB16.prototype.rec_pull_byte = function(signed)
+{
+    var v = 0;
+    var r = this.rec_ring_r;
+    if(r + 1 < this.rec_ring_w)
+    {
+        var i0 = Math.floor(r), f = r - i0;
+        var size = SB_REC_RING_SIZE;
+        var a = this.rec_ring[i0 % size], b = this.rec_ring[(i0 + 1) % size];
+        v = a + (b - a) * f;
+        this.rec_ring_r = r + this.rec_host_rate / this.sampling_rate;
+    }
+    v = audio_clip(v, -1, 1);
+    var byte = Math.round(v * 127) + (signed ? 0 : 128);
+    return byte & 0xFF;
+};
+
+SB16.prototype.rec_start = function(autoinit)
+{
+    this.rec_channel = this.dma_channel_8bit;
+    this.rec_autoinit = autoinit;
+    // Block size in bytes; stereo input writes two bytes per sample pair.
+    this.rec_bytes_count = this.dma_sample_count * (this.dsp_stereo ? 2 : 1);
+    this.rec_bytes_left = this.rec_bytes_count;
+    this.rec_owed = 0;
+    this.rec_paused = false;
+    this.rec_last_time = v86.microtick();
+    this.rec_active = true;
+    // Start reading recent host samples, not whatever was buffered while idle.
+    this.rec_ring_r = this.rec_ring_w;
+    if(this.trace) console.log("[sb16] rec start: ch " + this.rec_channel + " block " + this.rec_bytes_count +
+        " rate " + this.sampling_rate + " autoinit " + autoinit + " stereo " + this.dsp_stereo +
+        " signed " + this.dsp_signed + " masked " + this.dma.channel_mask[this.rec_channel]);
+    this.bus.send("sb16-record-start", this.sampling_rate);
+};
+
+SB16.prototype.rec_stop = function()
+{
+    if(!this.rec_active) return;
+    this.rec_active = false;
+    this.rec_paused = false;
+    this.rec_bytes_left = 0;
+    if(this.trace) console.log("[sb16] rec stop");
+    this.bus.send("sb16-record-stop");
+};
+
+// Called from the CPU's hardware timer loop. Writes the samples that have become due since the
+// last call into guest memory through the DMA controller, raising the 8-bit IRQ at each block
+// boundary. Returns the number of milliseconds until the next block is due.
+SB16.prototype.timer = function(now)
+{
+    if(!this.rec_active)
+    {
+        return 100;
+    }
+
+    if(this.rec_paused)
+    {
+        // A paused recording that the driver then masks the DMA channel of is over: that is
+        // how SNDBLST2.DRV stops (0xD0, then mask). Otherwise wait for 0xD4.
+        if(this.dma.channel_mask[this.rec_channel])
+        {
+            this.rec_stop();
+        }
+        this.rec_last_time = now;
+        return 100;
+    }
+
+    var rate = this.sampling_rate * (this.dsp_stereo ? 2 : 1);   // bytes per second
+    var elapsed = now - this.rec_last_time;
+    this.rec_last_time = now;
+    if(elapsed > 0)
+    {
+        this.rec_owed += elapsed * rate / 1000;
+    }
+    // After a stall (throttled tab) do not flood the guest with interrupts: at most two blocks
+    // are made up, the rest of the lost time is dropped.
+    var cap = Math.max(2 * this.rec_bytes_count, 1024);
+    if(this.rec_owed > cap) this.rec_owed = cap;
+
+    var n = Math.floor(this.rec_owed);
+    while(n > 0 && this.rec_active)
+    {
+        var chunk = Math.min(n, this.rec_bytes_left, this.rec_buffer.length);
+        var signed = this.dsp_signed;
+        if(this.dsp_stereo)
+        {
+            for(var i = 0; i < chunk; i += 2)
+            {
+                var s = this.rec_pull_byte(signed);
+                this.rec_buffer[i] = s;
+                this.rec_buffer[i + 1] = s;
+            }
+        }
+        else
+        {
+            for(var j = 0; j < chunk; j++)
+            {
+                this.rec_buffer[j] = this.rec_pull_byte(signed);
+            }
+        }
+
+        var written = this.dma.do_read_sync(this.rec_buffer, chunk, this.rec_channel);
+        // Time passes whether or not the DMA channel accepted the bytes (masked channel or
+        // single-mode terminal count): the samples are consumed either way.
+        this.rec_owed -= chunk;
+        n -= chunk;
+        this.rec_bytes_left -= chunk;
+
+        if(written < chunk && this.trace)
+        {
+            console.log("[sb16] rec: dma accepted " + written + " of " + chunk + " bytes");
+        }
+
+        if(this.rec_bytes_left === 0)
+        {
+            this.raise_irq(SB_IRQ_8BIT);
+            if(this.rec_autoinit)
+            {
+                this.rec_bytes_left = this.rec_bytes_count;
+            }
+            else
+            {
+                this.rec_stop();
+            }
+        }
+    }
+
+    if(!this.rec_active) return 100;
+    var next = (this.rec_bytes_left - this.rec_owed) * 1000 / rate;
+    return Math.max(1, Math.min(next, 20));
 };
 
 SB16.prototype.dac_handle_request = function()
