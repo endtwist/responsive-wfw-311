@@ -31,7 +31,7 @@ const SHIPPED_STATE = manifest && manifest.state ? "../image/" + manifest.state 
  * rows underneath, nothing is scaled and no text is clipped. No zooming, no panning, and no
  * resizing the screen underneath whatever is open.
  */
-function viewport() {
+function fullViewport() {
   const vv = window.visualViewport;
   // Whole pixels: the canvas backing store must match its CSS box exactly, or Safari resamples
   // the whole canvas (a half-pixel mismatch read as "everything is blurry" on the phone).
@@ -39,6 +39,27 @@ function viewport() {
   let h = Math.floor(vv ? vv.height : window.innerHeight);
   if (!(w > 0) || !(h > 0)) { w = 1024; h = 768; }   // a hidden page can report nothing
   return [w, h];
+}
+/* Safe areas (notch, home indicator, rounded corners): read from the CSS env() tokens on :root
+   so the compositor never puts guest pixels under them. Re-read on resize/rotation. */
+let safe = { l: 0, t: 0, r: 0, b: 0 }, safeReadAt = 0;
+function readSafeInsets() {
+  try {
+    const cs = getComputedStyle(document.documentElement);
+    const n = v => { const x = parseFloat(cs.getPropertyValue(v)); return Number.isFinite(x) && x > 0 ? Math.round(x) : 0; };
+    safe = { l: n("--sal"), t: n("--sat"), r: n("--sar"), b: n("--sab") };
+    // Safari with its own bars reports no insets; the standalone (home-screen) page does.
+    // The soft keyboard replaces the bottom inset while it is up.
+    if (keyboardUp()) safe.b = 0;
+  } catch (e) { safe = { l: 0, t: 0, r: 0, b: 0 }; }
+  safeReadAt = performance.now();
+}
+/* The area the desktop and the layers are laid out in: the visual viewport less the safe areas.
+   Everything in host pixels below is relative to its top-left corner (see presentOnce, hostPoint). */
+function viewport() {
+  const [w, h] = fullViewport();
+  if (performance.now() - safeReadAt > 500) readSafeInsets();
+  return [Math.max(1, w - safe.l - safe.r), Math.max(1, h - safe.t - safe.b)];
 }
 
 // Magnification: `zoom` multiplies the fit scale. On a narrow screen it is driven by how much
@@ -182,6 +203,44 @@ async function uploadBootState() {
     status("boot snapshot: " + await r.text());
   } catch (e) { status("snapshot failed: " + e.message); }
 }
+/* The last composited frame, as a PNG data URL (Safari's IndexedDB rejects Blobs), under a fixed
+   key so it can be read before the image's identity is known: it is only pixels, and it is shown
+   only until the restored guest paints. Saved whenever the state is saved. */
+const FRAME_KEY = "lastframe";
+async function saveFrame() {
+  try {
+    const pres = $("pres");
+    if (!pres || !pres.width || !desktopReady) return;
+    const url = pres.toDataURL("image/png");
+    const db = await idb();
+    await new Promise((res, rej) => {
+      const tx = db.transaction("state", "readwrite");
+      tx.objectStore("state").put({ url, at: Date.now(), w: pres.width, h: pres.height }, FRAME_KEY);
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+  } catch (e) { report("firstframe", "save failed: " + e.message); }
+}
+async function loadFrame() {
+  try {
+    const db = await idb();
+    const rec = await new Promise((res, rej) => {
+      const tx = db.transaction("state", "readonly");
+      const q = tx.objectStore("state").get(FRAME_KEY);
+      q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+    });
+    if (!rec || !rec.url) return;
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = rec.url; });
+    firstFrame = img;
+    firstFrameUntil = performance.now() + 30000;       // a restore that takes longer shows the guest
+  } catch (e) { /* no frame: the page opens on the guest's own first paint */ }
+}
+loadFrame();
+// Hide and pagehide are not always given time to finish (a navigation cuts IndexedDB work short),
+// so the frame is also saved every 20 s while the desktop is up and something has changed.
+window.pvSaveFrame = saveFrame;
+let frameSavedSig = 0;
+setInterval(() => { if (!document.hidden && desktopReady && wd.frameSig !== frameSavedSig) { frameSavedSig = wd.frameSig; saveFrame(); } }, 20000);
 async function clearState() {
   await stateKeyReady;
   const db = await idb();
@@ -229,9 +288,10 @@ emulator.add_listener("emulator-ready", async () => {
       await emulator.restore_state(snap);
       status("restored");
       restored = true;
-    } catch (e) { status("restore failed, cold boot"); }
+    } catch (e) { status("restore failed, cold boot"); firstFrameUntil = 0; }
   } else {
     status("booting");
+    firstFrameUntil = 0;                                 // a cold boot shows its own DOS and logo
   }
   emulator.run();
   if (restored) setTimeout(() => sendCommand(CMD_REPUBLISH, 0), 300);
@@ -268,20 +328,28 @@ const layerPos = {};                 // layer key -> host position, moved by dra
 const layerZoom = {};                // layer key -> { z, px, py }: pinch zoom and pan of the client area
 
 const pvLog = [];
-window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, log: pvLog.slice(-40) });
+/* Watchdog bookkeeping: PVMON's heartbeat (`PVH <tick>`, once a second once the guest ships it),
+   the last input event, and the last time the composite changed. See watchdog() below. */
+const wd = { lastBeat: 0, beats: 0, lastInput: 0, lastChange: 0, lastBundle: 0, frameSig: 0, inputs: [] };
+function noteInput(s) { wd.lastInput = performance.now(); wd.inputs.push(`${Math.round(wd.lastInput)} ${s}`); if (wd.inputs.length > 20) wd.inputs.shift(); }
+window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, log: pvLog.slice(-50), wd, wantKeyboard, keyboardHeld, kbd: kbdTrace.slice(-10),
+                          firstFrame: !!firstFrame, firstFrameShown, safe, cursorShown: guestCursorShown, cmdQueue: cmdQueue.length });
 emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
-  let m = /^PVD (\d+) (\d+)(?: (\d+))?(?: v(\d+))?/.exec(line);
+  if (pvLog.length > 200) pvLog.splice(0, pvLog.length - 150);
+  let m = /^PVH/.exec(line);
+  if (m) { wd.lastBeat = performance.now(); wd.beats++; return; }
+  m = /^PVD (\d+) (\d+)(?: (\d+))?(?: v(\d+))?/.exec(line);
   if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18, ver: m[4] ? +m[4] : 0 }; return; }
   if (/^PVP-BEGIN /.test(line)) { printJob = []; return; }
   if (/^PVP /.test(line)) { if (printJob) printJob.push(line.slice(4)); return; }
   if (/^PVP-END/.test(line)) { if (printJob) finishPrintJob(printJob.join("")); printJob = null; return; }
   m = /^PVK (\d)/.exec(line);
-  if (m) { if (m[1] === "1") { wantKeyboard = true; syncKeyboard(); } else if (!keyboardHeld) { wantKeyboard = false; syncKeyboard(); } return; }
+  if (m) { guestWantsKeyboard(m[1] === "1"); return; }
   if (/^PVA/.test(line)) {
     desktopReady = true;
     shellHeightSent = 0;
-    if (touchDevice) setTimeout(() => sendCommand(CMD_CURSOR, 0), 500);   // an arrow means nothing to a finger
+    if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
     if (params.get("mkstate") && !restored) { uploadBootState(); return; }
     launchFromUrl();
     return;
@@ -325,7 +393,7 @@ function launchFromUrl() {
   const seg = location.pathname.split("/").filter(Boolean).pop() || "";
   const key = (q || (/^[a-z]+$/i.test(seg) && !/\./.test(seg) ? seg : "")).toLowerCase();
   const cmd = APPS[key] || (q && /^[A-Z0-9_.\\: -]+$/i.test(q) ? q : null);
-  if (cmd) emulator.bus.send("pv-command-string", [CMD_RUN, cmd]);
+  if (cmd) sendCommandString(CMD_RUN, cmd);
 }
 
 /* Printing: the guest's PostScript driver prints to a file, PVMON ships it here base64-encoded,
@@ -407,12 +475,15 @@ async function finishPrintJob(b64) {
    sticky for one key. The bar is only visible while the soft keyboard is up, docked to its top
    edge (the visual viewport's bottom), and it never takes the focus away from the hidden input. */
 const KEYBAR = [
+  ["⌄", "hide"], null,
   ["Esc", [0x01]], ["Tab", [0x0F]], ["Ctrl", "ctrl"], ["Alt", "alt"], null,
   ["←", [0xE0, 0x4B]], ["↑", [0xE0, 0x48]], ["↓", [0xE0, 0x50]], ["→", [0xE0, 0x4D]], null,
   ["Home", [0xE0, 0x47]], ["End", [0xE0, 0x4F]], ["PgUp", [0xE0, 0x49]], ["PgDn", [0xE0, 0x51]], ["Ins", [0xE0, 0x52]], ["Del", [0xE0, 0x53]], null,
   ["F1", [0x3B]], ["F2", [0x3C]], ["F3", [0x3D]], ["F4", [0x3E]], ["F5", [0x3F]], ["F6", [0x40]], ["F7", [0x41]], ["F8", [0x42]], ["F9", [0x43]], ["F10", [0x44]],
 ];
-const sticky = { ctrl: false, alt: false };
+/* Modifier state: 0 off, 1 armed for the next key (one tap), 2 locked (a second tap; stays until
+   tapped again). Shown on the bar as `.on` and `.lock`. */
+const sticky = { ctrl: 0, alt: 0 };
 function sendScancodes(codes, down) {
   // make: codes as given; break: last byte | 0x80 (E0 prefix kept)
   const seq = down ? codes : codes.map((c, i) => i === codes.length - 1 ? c | 0x80 : c);
@@ -424,8 +495,20 @@ function keybarPress(codes) {
   sendScancodes(codes, true); sendScancodes(codes, false);
   if (sticky.alt) sendScancodes([0x38], false);
   if (sticky.ctrl) sendScancodes([0x1D], false);
-  sticky.ctrl = sticky.alt = false;
+  if (sticky.ctrl === 1) sticky.ctrl = 0;                   // armed modifiers are spent; locked ones stay
+  if (sticky.alt === 1) sticky.alt = 0;
+  noteInput(`key ${codes.map(c => c.toString(16)).join(" ")}`);
   updateKeybar();
+}
+/* The hide key: the user dismisses the keyboard, and the guest's next PVK 1 (a new focus) is what
+   brings it back, not the focus that is already there. */
+function hideKeyboard(reason) {
+  keyboardHeld = false; wantKeyboard = false; kbdSuppressedUntil = performance.now() + 1500;
+  clearTimeout(kbdBlurTimer);
+  const inp = $("kbd");
+  if (inp && document.activeElement === inp) inp.blur();
+  kbdLog(`hide (${reason})`);
+  setTimeout(updateKeybar, 100);
 }
 function buildKeybar() {
   const bar = $("keybar");
@@ -434,9 +517,11 @@ function buildKeybar() {
     if (!k) { const g = document.createElement("span"); g.className = "gap"; bar.appendChild(g); continue; }
     const b = document.createElement("button");
     b.textContent = k[0]; b.dataset.key = k[0];
+    if (k[1] === "hide") b.className = "hide";
     const act = ev => {
       ev.preventDefault();                                 // keep the hidden input focused
-      if (typeof k[1] === "string") { sticky[k[1]] = !sticky[k[1]]; updateKeybar(); }
+      if (k[1] === "hide") { hideKeyboard("bar"); return; }
+      if (typeof k[1] === "string") { sticky[k[1]] = (sticky[k[1]] + 1) % 3; updateKeybar(); }
       else keybarPress(k[1]);
     };
     b.addEventListener("touchstart", act, { passive: false });
@@ -457,7 +542,10 @@ function charScancode(ch) { return CHAR_SCANCODES[ch.toLowerCase()] || 0; }
 function updateKeybar() {
   const bar = $("keybar");
   if (!bar) return;
-  for (const b of bar.querySelectorAll("button")) b.classList.toggle("on", b.dataset.key === "Ctrl" ? sticky.ctrl : b.dataset.key === "Alt" ? sticky.alt : false);
+  for (const b of bar.querySelectorAll("button")) {
+    const st = b.dataset.key === "Ctrl" ? sticky.ctrl : b.dataset.key === "Alt" ? sticky.alt : 0;
+    b.classList.toggle("on", st === 1); b.classList.toggle("lock", st === 2);
+  }
   const up = keyboardUp();
   bar.classList.toggle("show", up);
   if (up) {
@@ -477,6 +565,14 @@ setInterval(updateKeybar, 1000);                       // belt and braces: keybo
    lets a page focus an input inside a user gesture, so the touch handlers also call this at the
    end of a tap, by which time PVMON has usually reported the new focus. */
 let wantKeyboard = false, keyboardHeld = false;
+let kbdBlurTimer = 0, kbdSuppressedUntil = 0;
+const kbdTrace = [];
+function kbdLog(msg) {
+  const vv = window.visualViewport;
+  const line = `${msg} active=${document.activeElement && document.activeElement.id || document.activeElement && document.activeElement.tagName} vvh=${vv ? Math.round(vv.height) : "?"}/${innerHeight} up=${keyboardUp()} want=${wantKeyboard} held=${keyboardHeld}`;
+  kbdTrace.push(line); if (kbdTrace.length > 40) kbdTrace.shift();
+  diag("kbd " + line);
+}
 function keyboardUp() {
   if (params.get("keybar") === "1") return true;                 // preview the bar on a desktop
   const k = $("kbd");
@@ -485,21 +581,144 @@ function keyboardUp() {
 /* With the keyboard up, the layer that has the focus is shifted so it sits above it. */
 function keyboardShift() {
   if (!keyboardUp()) return 0;
-  const vh = window.visualViewport.height;
+  const vh = window.visualViewport.height - safe.t;
   const focused = placed.filter(w => w.kind === "W" || w.kind === "O").slice(-1)[0];
   if (!focused) return 0;
   const bottom = focused.y + focused.hh;
   return bottom > vh ? Math.min(focused.y, bottom - vh + 8) : 0;
 }
+/* Focus the hidden input. Only works on iOS inside a touch gesture handler (touchend of the tap),
+   so the touch code calls this synchronously; calls from elsewhere are harmless no-ops there and
+   still work on desktops. An input that is focused but whose keyboard the user dismissed with the
+   keyboard's own key needs a blur first, or focus() does nothing. */
+function focusKeyboard(reason) {
+  const inp = $("kbd");
+  if (!inp) return false;
+  clearTimeout(kbdBlurTimer);
+  const wasActive = document.activeElement === inp;
+  if (wasActive && !keyboardUp() && touchDevice) inp.blur();
+  inp.value = "";
+  try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
+  kbdLog(`focus try (${reason}) wasActive=${wasActive}`);
+  setTimeout(() => kbdLog(`focus result (${reason})`), 350);
+  setTimeout(updateKeybar, 100);
+  return document.activeElement === inp;
+}
+/* The guest's word on whether it wants text (PVK). 1 keeps or refocuses; 0 releases after a short
+   debounce, so a tap that moves the focus from one Edit into another does not flicker. A manual
+   hold (caption long-press) overrides 0. */
+function guestWantsKeyboard(want) {
+  if (want) {
+    wantKeyboard = true;
+    clearTimeout(kbdBlurTimer);
+    if (performance.now() < kbdSuppressedUntil) { kbdLog("PVK 1 (suppressed after hide)"); return; }
+    kbdLog("PVK 1");
+    syncKeyboard();
+  } else {
+    wantKeyboard = false;
+    if (keyboardHeld) { kbdLog("PVK 0 (held)"); return; }
+    kbdLog("PVK 0");
+    clearTimeout(kbdBlurTimer);
+    kbdBlurTimer = setTimeout(() => { if (!wantKeyboard && !keyboardHeld) syncKeyboard(); }, 400);
+  }
+}
+/* After a tap that focused the input speculatively (the guest had not asked yet): if the guest has
+   still not asked once its reports have had time to arrive (the CBT hook reports focus changes at
+   once, PVMON's per-program list within ~200 ms; a phone's guest is slower), let it go again. */
+function speculativeRelease() {
+  clearTimeout(kbdBlurTimer);
+  kbdBlurTimer = setTimeout(() => {
+    if (wantKeyboard || keyboardHeld) return;
+    kbdLog("speculative focus released (no PVK 1)");
+    syncKeyboard();
+  }, 700);
+}
 function syncKeyboard() {
   const inp = $("kbd");
   if (!inp) return;
-  if (wantKeyboard && document.activeElement !== inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
-  else if (!wantKeyboard && document.activeElement === inp) inp.blur();
+  if ((wantKeyboard || keyboardHeld) && document.activeElement !== inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
+  else if (!wantKeyboard && !keyboardHeld && document.activeElement === inp) { inp.blur(); kbdLog("blur"); }
   setTimeout(updateKeybar, 100);
 }
+
+/* Audio unlock. iOS creates every AudioContext suspended until a user gesture resumes it, and
+   only touchend/click count as the gesture (touchstart does not on Chrome for iOS); a context also
+   goes "interrupted" when the app is backgrounded or a call comes in, and must be resumed again.
+   The phone's ring/silent switch mutes Web Audio unless the page has also played a media element,
+   so a silent <audio> loop is started in the same gesture. Nothing here is visible. */
+let audioUnlocked = false, audioLogged = "", silentEl = null;
+function audioCtx() { return emulator.speaker_adapter && emulator.speaker_adapter.audio_context || null; }
+function audioLog(why) {
+  const a = audioCtx();
+  const line = `${why}: state=${a ? a.state : "none"} rate=${a ? a.sampleRate : "?"} unlocked=${audioUnlocked} silent=${silentEl ? (silentEl.paused ? "paused" : "playing") : "none"}`;
+  if (line !== audioLogged) { audioLogged = line; report("audio", line); }
+}
+function unlockAudio(why) {
+  const a = audioCtx();
+  if (a) {
+    if (a.state !== "running") a.resume().then(() => audioLog(why + " resumed"), e => report("audio", `resume failed: ${e && e.message}`));
+    if (!a.onstatechange) a.onstatechange = () => audioLog("statechange");
+  }
+  if (!silentEl) {
+    try {
+      // 1 s of 8 kHz 8-bit silence as a WAV, looped; the media session this opens is what lets
+      // Web Audio through the ring/silent switch on iPhones.
+      const n = 8000, hdr = new Uint8Array(44 + n);
+      const dv = new DataView(hdr.buffer);
+      const str = (o, s) => { for (let i = 0; i < s.length; i++) hdr[o + i] = s.charCodeAt(i); };
+      str(0, "RIFF"); dv.setUint32(4, 36 + n, true); str(8, "WAVEfmt "); dv.setUint32(16, 16, true);
+      dv.setUint16(20, 1, true); dv.setUint16(22, 1, true); dv.setUint32(24, 8000, true); dv.setUint32(28, 8000, true);
+      dv.setUint16(32, 1, true); dv.setUint16(34, 8, true); str(36, "data"); dv.setUint32(40, n, true);
+      hdr.fill(0x80, 44);
+      silentEl = document.createElement("audio");
+      silentEl.setAttribute("playsinline", ""); silentEl.loop = true; silentEl.volume = 0.01;
+      silentEl.src = URL.createObjectURL(new Blob([hdr], { type: "audio/wav" }));
+    } catch (e) { silentEl = null; }
+  }
+  if (silentEl && silentEl.paused) silentEl.play().then(() => { audioUnlocked = true; audioLog(why + " media"); }, e => report("audio", `silent media failed: ${e && e.name}`));
+  audioLog(why);
+}
+for (const evn of ["touchend", "click", "keydown", "pointerup"])
+  document.addEventListener(evn, () => unlockAudio(evn), { capture: true, passive: true });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) unlockAudio("visible"); });
+window.addEventListener("focus", () => unlockAudio("focus"));
+window.addEventListener("pageshow", () => unlockAudio("pageshow"));
 const CMD_SCROLL = 7, CMD_CURSOR = 10;
 const touchDevice = ("ontouchstart" in window) || (window.matchMedia && matchMedia("(pointer: coarse)").matches);
+
+/* The guest pointer is hidden while the screen is being touched (an arrow under a finger means
+   nothing and its save-under fights the repaints) and shown again the moment a real mouse moves.
+   PVMON keeps the ShowCursor count where it was told (CMD_CURSOR 0/1); only transitions are sent. */
+let guestCursorShown = true;
+function setGuestCursor(show, force) {
+  if (!desktopReady) return;
+  if (!force && guestCursorShown === show) return;
+  guestCursorShown = show;
+  sendCommand(CMD_CURSOR, show ? 1 : 0);
+  diag(`cursor ${show ? "shown" : "hidden"}`);
+}
+
+/* Per-surface policy for one finger on a window's client area.
+     scroll  read-only / content surfaces: a drag scrolls the window (CMD_SCROLL, like two fingers)
+     drag    draw and drag surfaces: a drag is a pointer drag (cards, brushes, DOS box selection)
+   Keyed by the window title PVMON publishes (class names are not on the wire). Taps are clicks
+   everywhere. Unknown titles get pointer drag, the behaviour every Windows program expects. */
+const SURFACE_POLICY = [
+  [/\bHelp\b/, "scroll"], [/^Write\b/, "scroll"], [/^Notepad\b/, "scroll"], [/^Cardfile\b/, "scroll"],
+  [/^File Manager/, "scroll"], [/^Control Panel/, "scroll"], [/^Print Manager/, "scroll"], [/^Task List/, "scroll"],
+  [/^Calendar\b/, "scroll"], [/^Character Map/, "scroll"], [/^Media Player/, "scroll"], [/^Clipboard/, "scroll"],
+  [/^Solitaire/, "drag"], [/^Paintbrush/, "drag"], [/^Minesweeper/, "drag"], [/^Hearts/, "drag"], [/MS-DOS/, "drag"],
+  [/^Terminal/, "drag"], [/^Reversi/, "drag"],
+];
+function surfacePolicy(L) {
+  if (!L || L.kind !== "W") return "drag";
+  for (const [re, pol] of SURFACE_POLICY) if (re.test(L.title || "")) return pol;
+  return "drag";
+}
+/* Programs that never take text: a tap there does not even try the keyboard speculatively, so the
+   keyboard does not pop up for the guest to send away again on every card. */
+const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi)\b/;
+const KEYBOARD_TITLES = /MS-DOS|^Notepad\b|^Write\b|^Terminal\b|^Cardfile\b|^Calendar\b|^Calculator\b/;
 
 /* The shell column's height follows the visible viewport (browser toolbars come and go), so the
    desktop fills the phone with no letterbox. PVMON re-arranges Program Manager on request. */
@@ -518,7 +737,37 @@ function wantShellHeight(h) {
 }
 
 function layerKey(L) { return L.kind === "W" ? "s" + L.slot : L.kind + ":" + L.title; }
-function sendCommand(cmd, slot) { emulator.bus.send("pv-command", [cmd, slot]); }
+/* Host -> guest commands go through one register that PVMON polls every 40 ms and clears when it
+   has taken the command. Two sends inside one poll interval used to overwrite each other (a
+   CMD_CURSOR followed by a CMD_ACTIVATE lost the cursor command), so commands are queued and the
+   next one goes out only once the guest has acknowledged the last; consecutive scroll steps for
+   the same window and direction are merged. A guest that never acknowledges (hung) is not waited
+   for beyond two seconds, so the queue cannot wedge the host. */
+const cmdQueue = [];
+let cmdSentAt = 0;
+function guestBusy() { try { return emulator.v86.cpu.devices.vga.pv_cmd !== 0; } catch (e) { return false; } }
+function pumpCommands() {
+  if (!cmdQueue.length) return;
+  if (guestBusy() && performance.now() - cmdSentAt < 2000) return;
+  const c = cmdQueue.shift();
+  if (c.str !== undefined) emulator.bus.send("pv-command-string", [c.cmd, c.str]);
+  else emulator.bus.send("pv-command", [c.cmd, c.arg]);
+  cmdSentAt = performance.now();
+}
+function sendCommand(cmd, arg) {
+  if (cmd === CMD_SCROLL && cmdQueue.length) {
+    const last = cmdQueue[cmdQueue.length - 1];
+    if (last.cmd === CMD_SCROLL && (last.arg & 0xFFF) === (arg & 0xFFF)) {
+      last.arg = (arg & 0xFFF) | Math.min(15, (last.arg >> 12) + (arg >> 12)) << 12;
+      return;
+    }
+  }
+  cmdQueue.push({ cmd, arg });
+  pumpCommands();
+}
+function sendCommandString(cmd, str) { cmdQueue.push({ cmd, str }); pumpCommands(); }
+setInterval(pumpCommands, 20);
+window.pvCommandQueue = () => cmdQueue.slice();
 const CMD_ACTIVATE = 1, CMD_RESTORE = 2, CMD_CLOSE = 3, CMD_MINIMIZE = 4, CMD_RUN = 5, CMD_REPUBLISH = 6;
 
 /* The desktop view: which slice of the guest screen is the background, and at what scale. */
@@ -538,7 +787,9 @@ function chooseView(src) {
   const scale = vw > vh ? Math.min(vw / shell.w, vh / 480) : vw / shell.w;
   // While the soft keyboard is up the visible viewport is short; that must not re-arrange the
   // shell (it would thrash on every show/hide). Keep the column as it is and pan instead.
-  if (!keyboardUp()) wantShellHeight(vw > vh ? 0 : Math.round(vh / scale));
+  // In either orientation the column is arranged to the rows the viewport shows at this scale,
+  // so a rotation re-runs the shell sizing for the new geometry.
+  if (!keyboardUp()) wantShellHeight(Math.round(vh / scale));
   return { x: 0, y: 0, w: shell.w, h: shell.h, scale,
            ox: Math.round((vw - shell.w * scale) / 2) };
 }
@@ -604,17 +855,22 @@ function placeLayers(src) {
     const menuRow = inset.t - capRow;                        // menu bar, if the window has one
     const box = Math.max(12, shell.cap);                     // a caption box is square
     const hl = Math.round(inset.l * c), ht = Math.round(inset.t * c), hb = Math.round(inset.b * c);
-    const availW = vw - 2 * WIN_MARGIN - 2 * hl;
-    const availH = vh - 2 * WIN_MARGIN - ht - hb;
+    const availW = vw - 2 * hl;                        // edge to edge: a layer may fill the width
+    const availH = vh - ht - hb;
     const s = Math.min(c, availW / Math.max(1, L.gw), availH / Math.max(1, L.gh));
     const cw = Math.round(L.gw * s), ch = Math.round(L.gh * s);
     const hw = cw + 2 * hl, hh = ch + ht + hb;
     let p = layerPos[key];
     if (!p) {
       const owner = L.kind === "O" ? bySlot[L.slot] : null;
+      /* Default placement, no cascade: a new layer fills the width (x = 0 when it is as wide as
+         the viewport, centred when it is narrower) and sits just under the shell's caption strip,
+         so Program Manager's caption stays reachable behind it; a layer taller than that room is
+         top-aligned. The user can still drag it anywhere, including off the edges. */
+      const capStrip = Math.round(shell.cap * c) + Math.round(inset.l * c);
       p = layerPos[key] = owner
         ? { x: Math.round(owner.x + (owner.hw - hw) / 2), y: Math.round(owner.y + (owner.hh - hh) / 2) }
-        : { x: Math.round((vw - hw) / 2) + i * 16, y: Math.round(vh * 0.12) + i * 16 };
+        : { x: Math.max(0, Math.round((vw - hw) / 2)), y: Math.max(0, Math.min(capStrip, vh - hh)) };
     }
     // A window that fits stays entirely on screen; one that does not may hang off the edges, but
     // never so far that less than a thumb's width of it is left to grab.
@@ -627,7 +883,7 @@ function placeLayers(src) {
     const vis = { w: Math.min(L.gw, cw / zs), h: Math.min(L.gh, ch / zs) };   // guest px visible
     zp.px = Math.max(0, Math.min(L.gw - vis.w, zp.px));
     zp.py = Math.max(0, Math.min(L.gh - vis.h, zp.py));
-    const w = { ...L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb,
+    const w = { ...L, src: L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb,
                 zs, px: zp.px, py: zp.py, vw: vis.w, vh: vis.h };
     if (L.kind === "W") bySlot[L.slot] = w;
     out.push(w);
@@ -713,9 +969,59 @@ function drawWindow(g, src, w) {
   }
   if (hb > 0)
     blit(g, src, w.wx, w.gy + w.gh, Math.min(w.ww, Math.round(w.hw / c)), inset.b,
-                w.x, w.y + ht + w.ch, w.hw, hb);                  // the client, at the scale that fits
+                w.x, w.y + ht + w.ch, w.hw, hb);
+  /* The client, at the scale that fits. An owned dialog or a menu that physically overlaps this
+     window in guest VRAM is part of this capture too, and it is drawn again as its own layer: the
+     overlapping rectangles are masked out of the client blit (clipped away, so whatever is behind
+     the owner shows through until the child's own layer covers it), so a fallback placement never
+     shows two copies of a dialog. */
+  const holes = overlapsOf(w);
+  if (holes.length) {
+    g.save();
+    g.beginPath();
+    g.rect(w.x + hl, w.y + ht, Math.round(w.vw * w.zs), Math.round(w.vh * w.zs));
+    for (const h of holes) {
+      // guest rect -> host rect through this layer's client mapping, in the opposite winding
+      const x0 = w.x + hl + (h.x - (w.gx + w.px)) * w.zs, y0 = w.y + ht + (h.y - (w.gy + w.py)) * w.zs;
+      const x1 = x0 + h.w * w.zs, y1 = y0 + h.h * w.zs;
+      g.moveTo(x0, y0); g.lineTo(x0, y1); g.lineTo(x1, y1); g.lineTo(x1, y0); g.closePath();
+    }
+    g.clip("evenodd");
+  }
   blit(g, src, w.gx + w.px, w.gy + w.py, w.vw, w.vh, w.x + hl, w.y + ht,
        Math.round(w.vw * w.zs), Math.round(w.vh * w.zs));
+  if (holes.length) {
+    g.restore();
+    /* The hole is filled with the owner's own pixels after all: a one-pixel strip of its client
+       area bordering the hole (the row just above it, else below, else the column beside it),
+       stretched across. For a document or a dialog that is its background; for a canvas it is a
+       smear, which is still one dialog and not two. */
+    const cx0 = w.gx + w.px, cy0 = w.gy + w.py, cx1 = cx0 + w.vw, cy1 = cy0 + w.vh;
+    for (const h of holes) {
+      const dx = w.x + hl + (h.x - cx0) * w.zs, dy = w.y + ht + (h.y - cy0) * w.zs;
+      const dw = h.w * w.zs, dh = h.h * w.zs;
+      if (h.y - 1 >= cy0) blit(g, src, h.x, h.y - 1, h.w, 1, dx, dy, dw, dh);
+      else if (h.y + h.h < cy1) blit(g, src, h.x, h.y + h.h, h.w, 1, dx, dy, dw, dh);
+      else if (h.x - 1 >= cx0) blit(g, src, h.x - 1, h.y, 1, h.h, dx, dy, dw, dh);
+      else if (h.x + h.w < cx1) blit(g, src, h.x + h.w, h.y, 1, h.h, dx, dy, dw, dh);
+    }
+  }
+}
+/* Owned (PVO) and transient (PVT) windows that overlap layer `w`'s client area in guest screen
+   space, as guest rects clipped to the visible part of the client. Only children that are drawn as
+   their own layer count, so nothing is ever masked without a copy on top. */
+function overlapsOf(w) {
+  const out = [];
+  const cx0 = w.gx + w.px, cy0 = w.gy + w.py, cx1 = cx0 + w.vw, cy1 = cy0 + w.vh;
+  for (const L of layers) {
+    if (L === w.src || (L.kind !== "O" && L.kind !== "T")) continue;
+    if (L.kind === "O" && L.slot < 0) continue;                 // shell dialogs are not layers
+    if (L.kind === "O" && w.kind === "W" && L.slot !== w.slot) continue;
+    const x0 = Math.max(cx0, L.wx), y0 = Math.max(cy0, L.wy);
+    const x1 = Math.min(cx1, L.wx + L.ww), y1 = Math.min(cy1, L.wy + L.wh);
+    if (x1 > x0 && y1 > y0) out.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+  }
+  return out;
 }
 
 /* Microphone: the emulated Sound Blaster asks for capture the moment the guest issues a DMA
@@ -801,22 +1107,44 @@ function blit(g, src, sx, sy, sw, sh, dx, dy, dw, dh) {
   g.drawImage(src, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
+/* Instant first paint: the last composited frame of the previous visit (guest pixels, kept in
+   IndexedDB next to the snapshot) is shown until the restored guest has painted its desktop, so the
+   page never opens on black while the 2 MB snapshot downloads and restores. Never drawn over a
+   cold boot (that shows DOS and the logo, as it should). */
+let firstFrame = null, firstFrameUntil = 0, firstFrameShown = false;
+function drawFirstFrame(g, vw, vh) {
+  const img = firstFrame;
+  const sc = Math.min(vw / img.width, vh / img.height);
+  const dw = Math.round(img.width * sc), dh = Math.round(img.height * sc);
+  g.drawImage(img, Math.round((vw - dw) / 2), 0, dw, dh);
+  if (!firstFrameShown) { firstFrameShown = true; report("firstframe", `shown ${img.width}x${img.height} at ${Math.round(performance.now() - pageStart)}ms`); }
+}
 function presentOnce() {
   const src = document.querySelector("#screen_container canvas");
   const pres = $("pres");
-  if (src && src.width && pres) {
-    const [vw, vh] = viewport();
-    const dpr = window.devicePixelRatio || 1;
-    if (pres.width !== Math.round(vw * dpr) || pres.height !== Math.round(vh * dpr)) {
-      pres.width = Math.round(vw * dpr); pres.height = Math.round(vh * dpr);
-      pres.style.width = vw + "px"; pres.style.height = vh + "px";
-    }
+  if (!pres) return;
+  const [fw, fh] = fullViewport();
+  const [vw, vh] = viewport();
+  const dpr = window.devicePixelRatio || 1;
+  if (pres.width !== Math.round(fw * dpr) || pres.height !== Math.round(fh * dpr)) {
+    pres.width = Math.round(fw * dpr); pres.height = Math.round(fh * dpr);
+    pres.style.width = fw + "px"; pres.style.height = fh + "px";
+  }
+  const g = pres.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.imageSmoothingEnabled = false;
+  const guestUp = src && src.width && (desktopReady || !firstFrame || performance.now() > firstFrameUntil);
+  if (!guestUp && firstFrame) {
+    g.fillStyle = "#000"; g.fillRect(0, 0, fw, fh);
+    g.translate(safe.l, safe.t);
+    drawFirstFrame(g, vw, vh);
+    return;
+  }
+  if (src && src.width) {
     view = chooseView(src);
-    const g = pres.getContext("2d");
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.imageSmoothingEnabled = false;
     g.fillStyle = "#000";
-    g.fillRect(0, 0, vw, vh);
+    g.fillRect(0, 0, fw, fh);                            // the safe areas stay black: nothing there
+    g.translate(safe.l, safe.t);                         // everything else in the safe rectangle
     /* Until the shell has been arranged, show the whole guest screen (DOS, the Windows logo)
        rather than the desktop column: the user should not watch Program Manager being resized,
        and nothing drawn here is ever the host's own. A long timeout guards a guest that never
@@ -833,6 +1161,20 @@ function presentOnce() {
       if (shift) g.translate(0, -shift);
       for (const w of placed) drawWindow(g, src, w);  // back to front
       if (shift) g.translate(0, shift);
+    }
+    // Did the composite change? A cheap signature of a few hundred source pixels is enough for the
+    // watchdog to tell "the guest is painting" from "nothing has moved since the last input".
+    if ((frames & 7) === 0) {
+      try {
+        const sg = src.getContext("2d");
+        const step = Math.max(1, Math.floor(src.height / 24));
+        let sig = 0;
+        for (let y = 0; y < src.height; y += step) {
+          const row = sg.getImageData(0, y, Math.min(src.width, 1024), 1).data;
+          for (let i = 0; i < row.length; i += 64) sig = (sig * 31 + row[i] + row[i + 1] * 7 + row[i + 2] * 13) | 0;
+        }
+        if (sig !== wd.frameSig) { wd.frameSig = sig; wd.lastChange = performance.now(); }
+      } catch (e) {}
     }
   }
 }
@@ -1011,7 +1353,7 @@ async function placePointer(pt) {
     else absMisses = 0;
   }
   if (cursorSeq === seq) {
-    emulator.bus.send("pv-command-string", [CMD_SETPOS, `${Math.round(pt.x)},${Math.round(pt.y)}`]);
+    sendCommandString(CMD_SETPOS, `${Math.round(pt.x)},${Math.round(pt.y)}`);
     while (cursorSeq === seq && performance.now() - t0 < 800) await sleep(8);
   }
   const reported = cursorSeq !== seq;
@@ -1030,7 +1372,7 @@ function button(down, right) { diag(`button ${down ? "down" : "up"}${right ? " r
    actually touched, even though each layer is drawn at its own scale and offset. */
 function hostPoint(ev) {
   const r = $("pres").getBoundingClientRect();
-  return { px: ev.clientX - r.left, py: ev.clientY - r.top + keyboardShift() };
+  return { px: ev.clientX - r.left - safe.l, py: ev.clientY - r.top - safe.t + keyboardShift() };
 }
 
 /* The layer a press started in. While the finger is down every move is mapped through that same
@@ -1042,6 +1384,12 @@ function mapThrough(w, px, py) {
   const dx = px - w.x, dy = py - w.y;
   if (w.transient || w.shellCopy) return { x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
   return { x: Math.round(w.gx + w.px + (dx - w.hl) / w.zs), y: Math.round(w.gy + w.py + (dy - w.ht) / w.zs) };
+}
+/* A desktop hit that lands inside a shell-owned dialog (drawn in the desktop column, not as a
+   layer): its Edit controls are where text goes, so a tap there may summon the keyboard. */
+function insideShellDialog(hit) {
+  if (!hit || hit.kind !== "desktop") return false;
+  return layers.some(L => L.kind === "O" && L.slot < 0 && hit.x >= L.wx && hit.x < L.wx + L.ww && hit.y >= L.wy && hit.y < L.wy + L.wh);
 }
 function canvasPoint(ev, startOfPress) {
   const { px, py } = hostPoint(ev);
@@ -1105,7 +1453,7 @@ function installTouch() {
   const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
   const layerUnder = m => {
     const r = c.getBoundingClientRect();
-    const h = hitTest(m.x - r.left, m.y - r.top);
+    const h = hitTest(m.x - r.left - safe.l, m.y - r.top - safe.t + keyboardShift());
     return h.win && !h.win.transient && !h.win.shellCopy ? h.win : null;
   };
 
@@ -1124,11 +1472,19 @@ function installTouch() {
     }
   };
 
+  /* One finger on a content surface scrolls instead of dragging: the gesture starts as a possible
+     tap, and once the finger has travelled further than a tap allows it becomes a scroll of the
+     window the press started in (line messages through PVMON, like two fingers), never a pointer
+     drag. A finger that never travels is still a click. */
+  let oneScroll = null;
   const down = ev => {
     window.pvPhase = "down";
     consumed = pressStart(ev);
-    if (consumed) { diag(`down consumed=${consumed}`); return; }
+    if (consumed) { diag(`down consumed=${consumed}`); noteInput(`down ${consumed}`); return; }
     let pt = canvasPoint(ev, true);
+    { const { px, py } = hostPoint(ev);
+      const pol = pressLayer && !pressLayer.transient && !pressLayer.shellCopy && hitTest(px, py).kind === "client" ? surfacePolicy(pressLayer) : "drag";
+      oneScroll = pol === "scroll" ? { slot: pressLayer.slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title: pressLayer.title } : null; }
     // A quick second tap near the first is a double-click: Windows 3.1 only pairs clicks a few
     // pixels apart, and fingers do not repeat to the pixel, so the second tap reuses the first
     // tap's exact point.
@@ -1140,8 +1496,8 @@ function installTouch() {
       if (Math.hypot(px - lastTap.px, py - lastTap.py) < 16) pt = lastTap.pt;
     }
     { const { px, py } = hostPoint(ev); lastTap = { t: now, px, py, pt, dragged: false }; }
-    { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}`); }
-    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0 };
+    { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}${oneScroll ? " policy=scroll" : ""}`); noteInput(`down ${h.kind} ${pt.x},${pt.y} ${h.win && h.win.title || ""}`); }
+    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py) };
     pressActive = true;
     queue(async () => {
       await placePointer(pt);
@@ -1159,6 +1515,23 @@ function installTouch() {
     const G = g;
     if (consumed || !G || G.longFired) return;
     clearTimeout(G.timer);
+    if (oneScroll) {
+      const { px, py } = hostPoint(ev);
+      if (!oneScroll.scrolling && Math.hypot(px - oneScroll.startX, py - oneScroll.startY) > 8) {
+        oneScroll.scrolling = true; G.scrolled = true;
+        if (lastTap) lastTap.dragged = true;
+        diag(`scroll start slot=${oneScroll.slot} ${oneScroll.title}`);
+      }
+      if (oneScroll.scrolling) {
+        oneScroll.accX += px - oneScroll.lastX; oneScroll.accY += py - oneScroll.lastY;
+        const ny = Math.trunc(oneScroll.accY / SCROLL_STEP), nx = Math.trunc(oneScroll.accX / SCROLL_STEP);
+        const send = (dir, n) => { if (oneScroll.slot >= 0) sendCommand(CMD_SCROLL, oneScroll.slot | dir << 8 | Math.min(15, n) << 12); noteInput(`scroll ${dir} ${n}`); };
+        if (ny) { send(ny > 0 ? 1 : 2, Math.abs(ny)); oneScroll.accY -= ny * SCROLL_STEP; }   // finger down = content up = line up
+        if (nx) { send(nx > 0 ? 3 : 4, Math.abs(nx)); oneScroll.accX -= nx * SCROLL_STEP; }
+      }
+      oneScroll.lastX = px; oneScroll.lastY = py;
+      return;
+    }
     G.latest = canvasPoint(ev);
     if (!G.dragging) {
       G.dragging = true;
@@ -1169,11 +1542,37 @@ function installTouch() {
       });
     }
   };
-  const up = () => {
+  /* The keyboard decision at the end of a tap, made synchronously inside the gesture (iOS grants
+     focus only there). The guest's last word (PVK) or a manual hold wins; otherwise the input is
+     focused speculatively and released again if the guest does not ask within speculativeRelease's
+     window. Programs that never take text are left alone; ?kbtest=1 focuses on every tap. */
+  const tapKeyboard = (hit) => {
+    const title = hit && hit.win ? hit.win.title || "" : "";
+    const kbtest = params.get("kbtest") === "1";
+    let why = null;
+    if (kbtest) why = "kbtest";
+    else if (wantKeyboard || keyboardHeld) why = "want";
+    else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
+    else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
+    else if (hit && hit.win && KEYBOARD_TITLES.test(title)) why = "title";
+    else if (hit && (hit.kind === "client" || hit.kind === "desktop")) why = "speculative";
+    if (!why) {
+      // a tap on a program that does not want text while the keyboard is up: let the guest's PVK 0
+      // (focus moved) take it down; nothing to do here
+      kbdLog(`tap: no focus (${hit && hit.kind} "${title.slice(0, 20)}")`);
+      return;
+    }
+    if (performance.now() < kbdSuppressedUntil && why !== "kbtest") { kbdLog("tap: suppressed after hide"); return; }
+    focusKeyboard(`${why} "${title.slice(0, 20)}"`);
+    if (why === "speculative" || why === "title") speculativeRelease();
+  };
+  const up = (ev) => {
     window.pvPhase = "up";
     pressActive = false;
     const G = g;
-    diag(`up dragging=${G && G.dragging} longFired=${G && G.longFired} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
+    const S = oneScroll; oneScroll = null;
+    diag(`up dragging=${G && G.dragging} longFired=${G && G.longFired} scrolled=${!!(S && S.scrolling)} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
+    noteInput(`up drag=${!!(G && G.dragging)} scroll=${!!(S && S.scrolling)} consumed=${consumed}`);
     if (G) { G.active = false; clearTimeout(G.timer); }
     if (consumed) {
       // a caption tap that did not turn into a drag is a click on the caption: it activates
@@ -1181,10 +1580,17 @@ function installTouch() {
       if (consumed === "drag" && chromeDrag && !chromeDrag.moved && !chromeDrag.toggled) {
         const pt = chromeDrag.guest;
         queue(async () => { await placePointer(pt); button(true, false); await sleep(60); button(false, false); });
+        if (ev && ev.type === "touchend") tapKeyboard({ kind: "chrome", win: placed.find(w => w.key === chromeDrag.key) });
+      } else if (chromeDrag && chromeDrag.toggled && ev && ev.type === "touchend") {
+        // the long-press toggle fired in a timer, outside the gesture: the focus itself happens
+        // here, on the release, which is still inside it
+        if (keyboardHeld) focusKeyboard("hold"); else hideKeyboard("hold");
       }
       consumed = null; chromeDrag = null; return;
     }
     if (!G) return;
+    if (S && S.scrolling) return;                       // a scroll ends with nothing pressed
+    if (!G.dragging && !G.longFired && ev && ev.type === "touchend") tapKeyboard(G.hit);
     queue(async () => {
       if (G.dragging) { button(false, false); diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
       if (G.longFired) return;
@@ -1193,8 +1599,11 @@ function installTouch() {
   };
 
   c.addEventListener("touchstart", ev => {
-    try { const a = emulator.speaker_adapter && emulator.speaker_adapter.audio_context; if (a && a.state === "suspended") a.resume(); } catch (e) {}
+    unlockAudio("touchstart");
+    setGuestCursor(false);
     if (ev.touches.length === 2) {
+      noteInput("two-finger start");
+      oneScroll = null;
       const G = g;
       if (G) { G.active = false; clearTimeout(G.timer); if (G.dragging) queue(async () => button(false, false)); g = null; }
       const m = mid(ev.touches);
@@ -1249,17 +1658,21 @@ function installTouch() {
     const wasTwo = !!twoFinger;
     twoFinger = null;
     // A two-finger gesture that began as a single-finger press must still release that press.
-    if (!wasTwo || pressActive) up();
-    setTimeout(syncKeyboard, 350);          // still inside iOS's gesture grace period
+    // The keyboard decision happens inside up(), synchronously in this handler: iOS grants focus
+    // only inside the gesture, not in a timer afterwards.
+    if (!wasTwo || pressActive) up(ev);
+    unlockAudio("touchend");
   };
   c.addEventListener("touchend", end, { passive: false });
   c.addEventListener("touchcancel", end, { passive: false });
 
-  // The same gestures with a mouse, since the v86 canvas itself is off-screen in this mode.
+  // The same gestures with a mouse, since the v86 canvas itself is off-screen in this mode. A real
+  // mouse brings the guest pointer back (a finger hides it).
   let mouseDown = false;
-  c.addEventListener("mousedown", ev => { ev.preventDefault(); mouseDown = true; down(ev); });
+  c.addEventListener("mousedown", ev => { ev.preventDefault(); mouseDown = true; setGuestCursor(true); down(ev); });
   window.addEventListener("mousemove", ev => { if (mouseDown) move(ev); });
-  window.addEventListener("mouseup", () => { if (!mouseDown) return; mouseDown = false; up(); });
+  window.addEventListener("mouseup", ev => { if (!mouseDown) return; mouseDown = false; up(ev); });
+  window.addEventListener("pointermove", ev => { if (ev.pointerType === "mouse") setGuestCursor(true); }, { passive: true });
   c.addEventListener("contextmenu", ev => ev.preventDefault());
 }
 
@@ -1282,11 +1695,74 @@ function installKeyboard() {
 
 /* --------------------------------------------------------------------------------- session */
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { saveState(emulator); return; }
+  if (document.hidden) { saveFrame(); saveState(emulator); return; }
   // A hidden page can report a zero-size viewport, so the mode picked at load may be the
   // fallback rather than the real one. Re-evaluate as soon as we are on screen again.
   pump();
 });
+
+/* Rotation: the guest layout is fixed, so only the host changes. The shell column is re-arranged
+   to the rows the new viewport shows (chooseView -> wantShellHeight), the safe areas are re-read,
+   and the layers are placed afresh for the new width (their default placement rule, not the
+   positions that fit the old orientation). */
+let lastOrient = null;
+function onOrientation() {
+  const [w, h] = fullViewport();
+  const o = w > h ? "landscape" : "portrait";
+  readSafeInsets();
+  if (lastOrient && o !== lastOrient) {
+    for (const k of Object.keys(layerPos)) delete layerPos[k];
+    for (const k of Object.keys(layerZoom)) delete layerZoom[k];
+    shellHeightSent = 0;                                 // force the shell sizing to be re-sent
+    report("orient", `${o} ${w}x${h} safe=${JSON.stringify(safe)}`);
+  }
+  lastOrient = o;
+  pump();
+}
+window.addEventListener("orientationchange", () => { onOrientation(); setTimeout(onOrientation, 300); });
+if (screen.orientation) screen.orientation.addEventListener("change", () => { onOrientation(); setTimeout(onOrientation, 300); });
+window.addEventListener("resize", onOrientation);
+onOrientation();
+
+/* Watchdog (PLAN Fix 4). If the page is visible and the guest's heartbeat stops for 5 s, or input
+   arrived and nothing on the screen changed for 5 s afterwards, one diagnostics bundle goes to the
+   dev server: CPU state, idle counters, the protocol tail, the recent input, the layers, and a PNG
+   of the composite. At most one bundle a minute. Until PVMON ships the heartbeat (`PVH`) only the
+   input-without-change rule can fire. */
+function cpuSnapshot() {
+  try {
+    const cpu = emulator.v86.cpu;
+    const r = cpu.reg32, s = cpu.sreg;
+    const hex = v => (v >>> 0).toString(16).padStart(8, "0");
+    const idle = i => { try { return cpu.wm.exports.pv_idle_stat(i); } catch (e) { return "?"; } };
+    return { eax: hex(r[0]), ecx: hex(r[1]), edx: hex(r[2]), ebx: hex(r[3]), esp: hex(r[4]), ebp: hex(r[5]), esi: hex(r[6]), edi: hex(r[7]),
+             eip: hex(cpu.instruction_pointer[0]), prev_ip: hex(cpu.previous_ip[0]), cs: s[1].toString(16), ds: s[3].toString(16), ss: s[2].toString(16),
+             flags: hex(cpu.flags[0]), IF: !!(cpu.flags[0] & 0x200), VM: !!(cpu.flags[0] & 0x20000), in_hlt: cpu.in_hlt[0],
+             cr0: cpu.cr ? hex(cpu.cr[0]) : "?", idle_halted: idle(0), idle_passed: idle(1) };
+  } catch (e) { return { error: String(e) }; }
+}
+let wdLastMipsIc = 0, wdLastMipsAt = 0, wdMips = 0;
+function watchdog(force) {
+  const now = performance.now();
+  if ((document.hidden && !force) || !desktopReady) return;
+  try { const ic = emulator.get_instruction_counter() >>> 0; if (wdLastMipsAt) wdMips = ((ic - wdLastMipsIc) >>> 0) / (now - wdLastMipsAt) / 1000; wdLastMipsIc = ic; wdLastMipsAt = now; } catch (e) {}
+  const beatStale = wd.beats > 0 && now - wd.lastBeat > 5000;
+  const inputStuck = wd.lastInput && now - wd.lastInput > 5000 && wd.lastChange < wd.lastInput && now - wd.lastInput < 20000;
+  if (!beatStale && !inputStuck) return;
+  if (now - wd.lastBundle < 60000) return;
+  wd.lastBundle = now;
+  const bundle = {
+    why: beatStale ? `heartbeat silent ${Math.round(now - wd.lastBeat)}ms` : `input ${Math.round(now - wd.lastInput)}ms ago, no frame change since`,
+    at: new Date().toISOString(), mips: +wdMips.toFixed(2), running: emulator.is_running && emulator.is_running(),
+    cpu: cpuSnapshot(), protocol: pvLog.slice(-50), inputs: wd.inputs.slice(-20), kbd: kbdTrace.slice(-10),
+    layers: layers.map(l => `${l.kind}${l.slot >= 0 ? l.slot : ""} ${l.wx},${l.wy} ${l.ww}x${l.wh} ${l.title}`),
+    vp: fullViewport(), safe, keyboard: keyboardUp(), phase: window.pvPhase,
+  };
+  report("WATCHDOG", JSON.stringify(bundle));
+  try { fetch("/__shot", { method: "POST", body: $("pres").toDataURL("image/png") }).then(r => r.text()).then(n => report("WATCHDOG", "shot " + n)).catch(() => {}); } catch (e) {}
+}
+setInterval(watchdog, 1000);
+window.pvWatchdog = () => { wd.lastBundle = 0; wd.lastInput = performance.now() - 6000; wd.lastChange = 0; watchdog(true); };
 
 // Browsers throttle timers in a hidden tab almost to a stop, which freezes the emulator.
 // Opt in to a worker heartbeat (?keepalive=1) when a session must survive being backgrounded;
@@ -1308,6 +1784,7 @@ try {
   window.pvHeartbeat = true;
   hb.onmessage = () => {
     runSleepers();
+    pumpCommands();
     if (document.hidden) {
       const now = performance.now();
       if (now - lastPump > 100) { lastPump = now; pump(); }
@@ -1321,7 +1798,7 @@ try {
 } catch (e) { /* no worker: timers only */ }
 
 
-window.addEventListener("pagehide", () => saveState(emulator));
+window.addEventListener("pagehide", () => { saveFrame(); saveState(emulator); });
 // A phone in portrait can have a readable desktop or a stable screen, not both; let the choice
 // be made explicitly rather than by the page changing size underneath whatever is open.
 
@@ -1336,8 +1813,13 @@ emulator.add_listener("emulator-started", () => { installTouch(); installKeyboar
 setTimeout(() => { installTouch(); installKeyboard(); }, 3000);
 
 // Not on localhost: during development the worker only gets in the way (stale code, and dead
-// pooled connections after a server restart made every GET fail with ERR_FAILED).
-if ("serviceWorker" in navigator && location.protocol !== "file:" &&
+// pooled connections after a server restart made every GET fail with ERR_FAILED). Registration
+// needs a secure context, so over plain http on the LAN this rejects quietly and nothing changes.
+// The scope is the site root so the clean paths (/solitaire) are controlled too; the server must
+// send `Service-Worker-Allowed: /` for web/sw.js (the dev server does).
+if ("serviceWorker" in navigator && location.protocol === "https:" &&
     !/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
+  navigator.serviceWorker.register("sw.js", { scope: "/" })
+    .catch(() => navigator.serviceWorker.register("sw.js").catch(() => {}));
 }
+window.addEventListener("beforeinstallprompt", ev => ev.preventDefault());   // no install banner: nothing drawn by the host
