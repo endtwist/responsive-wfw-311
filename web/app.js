@@ -679,7 +679,21 @@ function setZoom(z, anchor) {
  */
 
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+/* Time-based waits run off the worker heartbeat (see the bottom of the file): a hidden tab throttles
+   setTimeout to once a second or worse, which would stall pointer steering the moment the page is
+   backgrounded. Falls back to setTimeout until the worker is up. */
+const sleepers = [];
+function sleep(ms) {
+  return new Promise(r => {
+    if (window.pvHeartbeat) sleepers.push({ at: performance.now() + ms, r });
+    else setTimeout(r, ms);
+  });
+}
+function runSleepers() {
+  const now = performance.now();
+  for (let i = sleepers.length - 1; i >= 0; i--) if (sleepers[i].at <= now) sleepers.splice(i, 1)[0].r();
+}
+const diag = params.get("diag") ? (m => report("diag", m)) : (() => {});
 
 /* Steer the guest pointer to a point. The stock PS/2 driver is relative, so the whole distance
    is sent as one burst of packets (mouse acceleration is off, so mickeys are pixels), then the
@@ -719,14 +733,19 @@ function steerTo(pt) {
    motion of a drag, where it is the right tool. */
 const CMD_SETPOS = 9;
 async function placePointer(pt) {
-  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) { diag(`place: bad target ${JSON.stringify(pt)}`); return; }
   const seq = cursorSeq, t0 = performance.now();
   emulator.bus.send("pv-command-string", [CMD_SETPOS, `${Math.round(pt.x)},${Math.round(pt.y)}`]);
   while (cursorSeq === seq && performance.now() - t0 < 350) await sleep(8);
-  if (guestCursor && (Math.abs(guestCursor.x - pt.x) > 1 || Math.abs(guestCursor.y - pt.y) > 1)) await steerTo(pt);
+  const reported = cursorSeq !== seq;
+  diag(`place ${pt.x},${pt.y} reported=${reported} after ${Math.round(performance.now() - t0)}ms cursor=${JSON.stringify(guestCursor)}`);
+  if (guestCursor && (Math.abs(guestCursor.x - pt.x) > 1 || Math.abs(guestCursor.y - pt.y) > 1)) {
+    await steerTo(pt);
+    diag(`steered -> ${JSON.stringify(guestCursor)}`);
+  }
 }
 
-function button(down, right) { emulator.bus.send("mouse-click", [down && !right, false, down && right]); }
+function button(down, right) { diag(`button ${down ? "down" : "up"}${right ? " right" : ""}`); emulator.bus.send("mouse-click", [down && !right, false, down && right]); }
 
 /* A press is resolved against the composited layers: a title bar drags that window about, a dock
    entry restores an application, and anything else becomes a guest click at the pixel the user
@@ -779,8 +798,9 @@ function installTouch() {
   const down = ev => {
     window.pvPhase = "down";
     consumed = pressStart(ev);
-    if (consumed) return;
+    if (consumed) { diag(`down consumed=${consumed}`); return; }
     const pt = canvasPoint(ev);
+    { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}`); }
     longFired = false; dragging = false;
     queue(async () => {
       await placePointer(pt);
@@ -804,6 +824,7 @@ function installTouch() {
   };
   const up = () => {
     window.pvPhase = "up";
+    diag(`up dragging=${dragging} longFired=${longFired} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
     clearTimeout(pressTimer);
     if (consumed) { consumed = null; chromeDrag = null; return; }
     queue(async () => {
@@ -933,7 +954,9 @@ try {
   let lastPump = 0;
   const hb = new Worker(src);
   setInterval(() => hb.postMessage(window.pvPhase || ""), 1000);
+  window.pvHeartbeat = true;
   hb.onmessage = () => {
+    runSleepers();
     if (document.hidden) {
       const now = performance.now();
       if (now - lastPump > 100) { lastPump = now; pump(); }
