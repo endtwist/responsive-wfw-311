@@ -1016,3 +1016,16 @@ into the visible icon row. The shell takes part in z-order (`PVS`), pinch zooms 
 area, and the page reports errors, a heartbeat and main-thread stalls to the dev server
 (`shots/devicelog.txt`). Blur on the phone: canvas backing store now matches whole-pixel CSS
 size and `image-rendering: pixelated` guards against Safari resampling.
+
+**2026-09-02 — device trace, and how testing is done now.** `?diag=1` traces every input step to
+the dev server log; the iPhone's trace showed (a) `SetCursorPos` reports arriving after the 350 ms
+wait (the guest on a phone is slow), so presses now wait up to 1.2 s and never click before the
+pointer is confirmed; (b) a drag whose finger left the small Solitaire layer being re-hit-tested
+against the desktop, which flung the pointer into the shell column: moves now map through the
+layer the press started in; (c) Safari's IndexedDB rejecting a Blob (snapshots stored as bytes);
+(d) a right-click after every tap (long-press timer armed after touchend). PVMON reports its
+version in `PVD` and the heartbeat carries MIPS, so a stale snapshot or a slow guest is visible in
+the log. Testing: synthetic `TouchEvent`s through the real handlers in the (hidden, throttled) pane,
+with the app's `sleep()` driven by the worker heartbeat so background throttling cannot stall it;
+regression = tap, card drag (incl. off-layer), caption drag, desktop tap, menu, Program Manager to
+front, minimise/restore.
