@@ -46,7 +46,8 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 21     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 22     /* reported in PVD so the host log shows which build a snapshot holds */
+#define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -69,13 +70,31 @@ static HINSTANCE g_hInst;
 static HINSTANCE g_hookDll;
 typedef BOOL (FAR PASCAL *HOOKINSTALL)(void);
 typedef void (FAR PASCAL *HOOKREMOVE)(void);
+typedef void (FAR PASCAL *HOOKSETSHELL)(int, int);
+static unsigned g_shellW, g_shellH;
+/* The hook DLL enforces the geometry invariant in every task; it needs the shell column's
+   runtime height, which only the host knows and PVMON receives (CMD_SHELLSIZE). */
+static void hook_set_shell(void)
+{
+    HOOKSETSHELL set;
+    if (!g_hookDll) return;
+    set = (HOOKSETSHELL)GetProcAddress(g_hookDll, "PvHookSetShell");
+    if (set) set((int)g_shellW, (int)g_shellH);
+}
 static void install_hook(void)
 {
     HOOKINSTALL inst;
     g_hookDll = LoadLibrary("PVHOOK.DLL");
     if ((UINT)g_hookDll < 32) { g_hookDll = NULL; dbg("pvmon: PVHOOK.DLL not found"); return; }
     inst = (HOOKINSTALL)GetProcAddress(g_hookDll, "PvHookInstall");
-    dbg(inst && inst() ? "pvmon: CBT hook installed (windows are born in their slots)" : "pvmon: CBT hook failed");
+    dbg(inst && inst() ? "pvmon: hooks installed (windows are born in their slots and clamped to the frame)" : "pvmon: CBT hook failed");
+    hook_set_shell();
+}
+static void heartbeat(void)
+{
+    char b[24];
+    wsprintf(b, "PVH %lu", GetTickCount());
+    dbg(b);
 }
 static void remove_hook(void)
 {
@@ -92,8 +111,7 @@ static void remove_hook(void)
    own. Windows has no idea -- as far as it is concerned this is one big screen and the windows
    are simply somewhere on it. That is what gives each application its own framebuffer without
    Windows having any notion of one. */
-static unsigned g_shellW, g_shellH;
-#define SLOT_W   640               /* each application gets a full-width slot of its own */
+#define SLOT_W   640              /* each application gets a full-width slot of its own */
 #define ICON_ROW  76         /* desktop rows kept free for minimised icons (32px icon + title) */
 #define MAX_SLOTS 3          /* shell column + this many application columns */
 static char g_lastPub[256];         /* last line published to the host, to avoid repeats */
@@ -135,6 +153,9 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
     if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
     if (is_transient(hwnd, cls, sizeof(cls))) return TRUE;   /* leave menus where they pop up */
     isShell = lstrcmp(cls, "Progman") == 0;
+    /* Phone layout: applications are placed by publish_layout and a zoomed window is already
+       clamped to its column by the hook; refilling "the screen" here would be the 2560x970 one. */
+    if (g_shellW && (!isShell || IsZoomed(hwnd))) return TRUE;
     GetWindowRect(hwnd, &rc);
     w = rc.right - rc.left; h = rc.bottom - rc.top;
     x = rc.left; y = rc.top;
@@ -212,6 +233,7 @@ static UINT find_menu_command(HWND hwnd, const char *want)
     return 0;
 }
 
+static BOOL g_arrangePending;   /* the shell was iconic when its column changed: arrange on restore */
 static void arrange_shell(void)
 {
     HWND pm, mdi, active;
@@ -219,6 +241,11 @@ static void arrange_shell(void)
     int cx = GetSystemMetrics(SM_CXSCREEN), cy = GetSystemMetrics(SM_CYSCREEN);
     pm = FindWindow("Progman", NULL);
     if (!pm) return;
+    /* A minimised window's rectangle IS its icon: sizing it to the column here (the phone's
+       browser bars come and go, so CMD_SHELLSIZE arrives at any time) turned Program Manager's
+       icon into a column-sized iconic window with the icon lost in the middle of it. */
+    if (IsIconic(pm)) { g_arrangePending = TRUE; return; }
+    g_arrangePending = FALSE;
     /* On a narrow display the shell is kept to a comfortable strip rather than the whole screen,
        so the host can magnify that strip and still show all of it. */
     if (g_shellW && (unsigned)cx > g_shellW) cx = (int)g_shellW;
@@ -686,6 +713,17 @@ BOOL CALLBACK __export FindApp(HWND hwnd, LPARAM lParam)
         if (o && IsIconic(o)) return TRUE;                    /* belongs to something in the dock */
     }
     r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->owner = GetWindow(hwnd, GW_OWNER);
+    if (!r->owner && lstrcmp(cls, "#32770") == 0) {
+        /* an unowned dialog belongs to its task's main window if it has one: WinOldAp's
+           "Application still active" box is owned by nothing but is the DOS window's */
+        HTASK t = GetWindowTask(hwnd);
+        HWND h; char c[24];
+        for (h = GetWindow(GetDesktopWindow(), GW_CHILD); h; h = GetWindow(h, GW_HWNDNEXT)) {
+            if (h == hwnd || !IsWindowVisible(h) || GetWindowTask(h) != t || GetWindow(h, GW_OWNER)) continue;
+            if (GetClassName(h, c, sizeof(c)) <= 0 || c[0] == '#' || lstrcmp(c, "ComboLBox") == 0) continue;
+            r->owner = h; break;
+        }
+    }
     if (IsIconic(hwnd)) r->kind = 'I';
     else if (r->owner && IsWindow(r->owner) && IsWindowVisible(r->owner)) r->kind = 'O';
     else r->kind = 'A';
@@ -722,6 +760,47 @@ static int owner_slot(HWND owner)
         owner = GetWindow(owner, GW_OWNER);
     }
     return -1;
+}
+
+/* Owned windows are placed once, when first seen; a dialog the program then moves itself is left
+   alone unless it leaves its owner's column. */
+static HWND g_owned[24];
+static BOOL owned_seen(HWND hwnd)               /* TRUE the first time hwnd is seen */
+{
+    int i, free = -1;
+    for (i = 0; i < 24; i++) {
+        if (g_owned[i] == hwnd) return FALSE;
+        if (free < 0 && (g_owned[i] == NULL || !IsWindow(g_owned[i]))) free = i;
+    }
+    if (free >= 0) g_owned[free] = hwnd;
+    return TRUE;
+}
+
+/* Dialogs wider than the phone are reported once each, so the list of stock dialogs that
+   overflow at the 20 px system font is known rather than guessed. */
+static HWND g_wide[16];
+static void report_wide(HWND hwnd, int w, int h)
+{
+    int i, free = -1;
+    char line[96], title[32], mod[16], path[128], *base, *p; int n;
+    HINSTANCE inst;
+    for (i = 0; i < 16; i++) {
+        if (g_wide[i] == hwnd) return;
+        if (free < 0 && (g_wide[i] == NULL || !IsWindow(g_wide[i]))) free = i;
+    }
+    if (free < 0) return;
+    g_wide[free] = hwnd;
+    title[0] = 0; mod[0] = 0;
+    GetWindowText(hwnd, title, sizeof(title));
+    inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
+    if (inst && GetModuleFileName(inst, path, sizeof(path))) {
+        base = path;
+        for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
+        for (n = 0; base[n] && base[n] != '.' && n < 15; n++) mod[n] = base[n];
+        mod[n] = 0;
+    }
+    wsprintf(line, "PVQ wide %s \"%s\" %dx%d", (LPSTR)mod, (LPSTR)title, w, h);
+    dbg(line);
 }
 
 /* Keep an application inside its slot. Maximising is one tap away and would make the window as
@@ -772,6 +851,9 @@ static void apply_initial_size(HWND hwnd, int slotX)
     }
     if (free < 0) return;
     g_sized[free] = hwnd;
+    /* A program whose main window is a dialog template (Task List, Sound Recorder...) laid its
+       controls out once, for its own size: resizing it only crops or strands them. */
+    if (GetClassName(hwnd, key, sizeof(key)) > 0 && lstrcmp(key, "#32770") == 0) return;
     inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
     if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return;
     base = path;
@@ -802,25 +884,63 @@ static void apply_initial_size(HWND hwnd, int slotX)
                  SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+/* Fixed-layout programs (the hook's rule, mirrored): a dialog-template main window, or a module
+   in [PVMon] KeepSize. They are never resized, only kept inside their column. */
+static BOOL fixed_layout(HWND hwnd)
+{
+    char cls[24], path[128], keep[128], *base, *p, *k;
+    HINSTANCE inst;
+    if (GetClassName(hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0) return TRUE;
+    inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
+    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return FALSE;
+    base = path;
+    for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
+    for (p = base; *p && *p != '.'; p++) ;
+    *p = 0;
+    GetProfileString("PVMon", "KeepSize", "", keep, sizeof(keep));
+    for (k = keep; *k; ) {
+        char *e = k; int n;
+        while (*e && *e != ' ' && *e != ',') e++;
+        n = (int)(e - k);
+        if (n == lstrlen(base) && lstrcmpi_n(k, base, n)) return TRUE;
+        k = e; while (*k == ' ' || *k == ',') k++;
+    }
+    return FALSE;
+}
+
 static void park(HWND hwnd, int slot)
 {
     RECT rc;
     int slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     apply_initial_size(hwnd, slotX);
+    GetWindowRect(hwnd, &rc);
     if (IsZoomed(hwnd)) {
+        /* The hook makes "maximised" mean the phone frame at the top of the column, so a zoomed
+           window is left zoomed (its maximise box toggles back). Only a window zoomed past the
+           frame, which means the hook missed it, is restored and sized to the frame by hand. */
+        if (rc.right - rc.left <= (int)g_shellW && rc.bottom - rc.top <= (int)g_shellH &&
+            rc.left >= slotX && rc.right <= slotX + (int)SLOT_W) return;
         ShowWindow(hwnd, SW_RESTORE);
-        SetWindowPos(hwnd, NULL, slotX, 0, (int)SLOT_W, max_height_for(hwnd),
+        SetWindowPos(hwnd, NULL, slotX, 0, (int)g_shellW, min(max_height_for(hwnd), (int)g_shellH),
                      SWP_NOZORDER | SWP_NOACTIVATE);
         return;
     }
-    GetWindowRect(hwnd, &rc);
-    if (rc.right - rc.left > (int)SLOT_W || rc.bottom - rc.top > screenH) {
-        SetWindowPos(hwnd, NULL, slotX, 0,
-                     min(rc.right - rc.left, (int)SLOT_W),
-                     min(rc.bottom - rc.top, screenH),
-                     SWP_NOZORDER | SWP_NOACTIVATE);
-    } else if (rc.left < slotX || rc.left >= slotX + (int)SLOT_W || rc.top < 0) {
+    /* The invariant's last line of defence: a resizable program that has sized itself past the
+       phone frame (the hook clamps every path it sees) is brought back to it; a fixed-layout
+       program is only kept inside its 640-wide column. */
+    {
+        BOOL fixed = fixed_layout(hwnd);
+        int maxW = fixed ? (int)SLOT_W : (int)g_shellW;
+        int maxH = fixed ? screenH : min((int)g_shellH, max_height_for(hwnd));
+        if (rc.right - rc.left > maxW || rc.bottom - rc.top > maxH) {
+            SetWindowPos(hwnd, NULL, slotX, 0,
+                         min(rc.right - rc.left, maxW), min(rc.bottom - rc.top, maxH),
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            return;
+        }
+    }
+    if (rc.left < slotX || rc.left >= slotX + (int)SLOT_W || rc.top < 0) {
         SetWindowPos(hwnd, NULL, slotX, 0, 0, 0,
                      SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
     }
@@ -895,11 +1015,17 @@ static void publish_layout(void)
        a dialog on its owner, but some applications place theirs in screen coordinates, and a
        dialog left in the shell column would show through on the desktop. */
     for (i = 0; i < g_nWnds; i++)
-        if (g_wnds[i].kind == 'S' && IsZoomed(g_wnds[i].hwnd)) {
-            /* the shell maximised (a double-tap on its caption) would span the whole 2560-column
-               screen; "maximised" for the shell means its column */
-            ShowWindow(g_wnds[i].hwnd, SW_RESTORE);
-            arrange_shell();
+        if (g_wnds[i].kind == 'S' && !IsIconic(g_wnds[i].hwnd)) {
+            RECT src;
+            GetWindowRect(g_wnds[i].hwnd, &src);
+            if (g_arrangePending) arrange_shell();          /* its column changed while it was an icon */
+            else if (IsZoomed(g_wnds[i].hwnd) &&
+                     (src.right > (int)g_shellW || src.bottom > (int)g_shellH - ICON_ROW)) {
+                /* the hook makes the shell's maximised rectangle its column; a shell zoomed past
+                   it means the hook was not there, so fall back to restore-and-arrange */
+                ShowWindow(g_wnds[i].hwnd, SW_RESTORE);
+                arrange_shell();
+            }
         }
     for (i = 0; i < g_nWnds; i++)
         if (g_wnds[i].kind == 'A' || g_wnds[i].kind == 'I') {
@@ -910,14 +1036,28 @@ static void publish_layout(void)
        shell column is only as tall as the phone shows, so icons are moved up into the free row
        at the bottom of the column. Windows keeps drawing them; only where changes. */
     {
-        int n = 0;
+        /* Icons sit in cells of SM_CXICONSPACING (WIN.INI IconSpacing=100) across the column, so
+           the centred label under each fits inside the column too; a fourth icon starts a second
+           row above. The position goes through SetWindowPlacement, which is how USER itself
+           places an icon, so the icon title follows it (a bare SetWindowPos left titles behind). */
+        int n = 0, cell = GetSystemMetrics(SM_CXICONSPACING), per;
+        if (cell < 64) cell = 100;
+        per = (int)g_shellW / cell; if (per < 1) per = 1;
         for (i = 0; i < g_nWnds; i++) {
-            RECT rc;
+            RECT rc; WINDOWPLACEMENT wp; int x, y, cx = GetSystemMetrics(SM_CXICON);
             if (g_wnds[i].kind != 'I' && !(g_wnds[i].kind == 'S' && IsIconic(g_wnds[i].hwnd))) continue;
             GetWindowRect(g_wnds[i].hwnd, &rc);
-            if (rc.bottom > (int)g_shellH || rc.left >= (int)g_shellW) {
-                int x = 8 + n * 96, y = (int)g_shellH - ICON_ROW + 4;
-                SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            x = (n % per) * cell + (cell - cx) / 2;
+            y = (int)g_shellH - ICON_ROW + 4 - (n / per) * ICON_ROW;
+            if (y < 0) y = 0;
+            if (rc.left != x || rc.top != y) {
+                wp.length = sizeof(wp);
+                if (GetWindowPlacement(g_wnds[i].hwnd, &wp)) {
+                    wp.flags |= WPF_SETMINPOSITION; wp.ptMinPosition.x = x; wp.ptMinPosition.y = y;
+                    wp.showCmd = SW_SHOWMINNOACTIVE;
+                    SetWindowPlacement(g_wnds[i].hwnd, &wp);
+                } else
+                    SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
             }
             n++;
         }
@@ -925,20 +1065,39 @@ static void publish_layout(void)
     for (i = 0; i < g_nWnds; i++)
         if (g_wnds[i].kind == 'O') {
             RECT rc, orc;
-            int slotX, w, h, x, y;
-            slot = owner_slot(g_wnds[i].owner);
-            if (slot < 0) continue;
-            slotX = (int)SLOT_W * (slot + 1);
+            int slotX, colR, frameH, w, h, x, y;
+            BOOL fresh = owned_seen(g_wnds[i].hwnd);
             GetWindowRect(g_wnds[i].hwnd, &rc);
-            if (rc.left >= slotX && rc.right <= slotX + (int)SLOT_W) continue;
             w = rc.right - rc.left; h = rc.bottom - rc.top;
-            GetWindowRect(g_wnds[i].owner, &orc);
-            x = (orc.left + orc.right - w) / 2;  y = (orc.top + orc.bottom - h) / 2;
-            if (x + w > slotX + (int)SLOT_W) x = slotX + (int)SLOT_W - w;
+            slot = owner_slot(g_wnds[i].owner);
+            if (slot < 0) {
+                /* owned by the shell (or by something in the desktop column): it must be inside
+                   the shell column, which is the only part of the desktop the phone shows */
+                if (rc.left >= 0 && rc.right <= (int)g_shellW && rc.top >= 0 && rc.bottom <= (int)g_shellH) continue;
+                GetWindowRect(g_wnds[i].owner, &orc);
+                if (orc.left >= (int)SLOT_W) continue;          /* owner parked elsewhere: not ours */
+                x = ((int)g_shellW - w) / 2; y = (orc.top + orc.bottom - h) / 2;
+                slotX = 0; colR = (int)g_shellW; frameH = (int)g_shellH;
+            } else {
+                slotX = (int)SLOT_W * (slot + 1); colR = slotX + (int)SLOT_W;
+                frameH = GetSystemMetrics(SM_CYSCREEN);
+                if (!fresh && rc.left >= slotX && rc.right <= colR) continue;
+                /* The hook places dialogs at birth where they do not cover their owner (below it
+                   when the column has room, else to its right), so the owner's captured client
+                   area no longer shows the dialog a second time. This is the fallback for
+                   dialogs it did not see (CW_USEDEFAULT, or an owner parked since), once each. */
+                GetWindowRect(g_wnds[i].owner, &orc);
+                if (orc.bottom + h <= frameH)   { x = orc.left;  y = orc.bottom; }
+                else if (orc.right + w <= colR) { x = orc.right; y = orc.top; }
+                else { x = (orc.left + orc.right - w) / 2; y = (orc.top + orc.bottom - h) / 2; }
+            }
+            if (x + w > colR) x = colR - w;
             if (x < slotX) x = slotX;
-            if (y + h > (int)g_shellH) y = (int)g_shellH - h;
+            if (y + h > frameH) y = frameH - h;
             if (y < 0) y = 0;
-            SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            if (x != rc.left || y != rc.top)
+                SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            if (w > (int)g_shellW) report_wide(g_wnds[i].hwnd, w, h);
         }
 
     /* A compact fingerprint of the layout, published only when it changes. */
@@ -1045,7 +1204,7 @@ static void enforce_cursor(void)
     if (!g_hideCursor) ShowCursor(TRUE);             /* undo the probe */
 }
 
-static void run_host_command(void)
+static void run_host_command_1(void)
 {
     unsigned cmd = rd(R_CMD), arg;
     HWND hwnd;
@@ -1057,10 +1216,12 @@ static void run_host_command(void)
            toolbars vary), so the desktop fills the phone edge to edge with no letterboxing. */
         char b[64];
         if (arg >= 300 && arg <= (unsigned)GetSystemMetrics(SM_CYSCREEN)) g_shellH = arg;
+        hook_set_shell();
         arrange_shell();
         wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
         dbg(b);
         g_lastPub[0] = 0;
+        heartbeat();
         return;
     }
     if (cmd == CMD_REPUBLISH) {
@@ -1162,6 +1323,15 @@ static void run_host_command(void)
     g_lastPub[0] = 0;                               /* force a fresh publish */
 }
 
+/* Every handled command is followed by a heartbeat, so the host sees at once that the guest
+   took it (and can tell a wedged guest from a slow one). */
+static void run_host_command(void)
+{
+    if (!rd(R_CMD)) return;
+    run_host_command_1();
+    heartbeat();
+}
+
 /* Find dialogs that overflow the screen and reflow them. */
 static HWND g_wideDlg;
 
@@ -1178,10 +1348,15 @@ BOOL CALLBACK __export FindWideDialog(HWND hwnd, LPARAM lParam)
        composited over it at their own scale and must not be touched, wherever they happen to be
        when we see them (Hearts creates its welcome dialog in the desktop column first). */
     if (g_shellW) {
+        /* Only the shell's own dialogs (Run, its Browse, Exit Windows...) are reflowed: an owner
+           chain ending at Program Manager. An unowned dialog window is a program (Task List) and
+           is parked in a slot like any other, never reflowed. */
         HWND o = GetWindow(hwnd, GW_OWNER);
         char ocls[16];
-        if (rc.left >= (int)SLOT_W) return TRUE;
-        if (o && (GetClassName(o, ocls, sizeof(ocls)) <= 0 || lstrcmp(ocls, "Progman") != 0)) return TRUE;
+        int hops;
+        if (rc.left >= (int)SLOT_W || !o) return TRUE;
+        for (hops = 0; o && hops < 8 && GetWindow(o, GW_OWNER); hops++) o = GetWindow(o, GW_OWNER);
+        if (GetClassName(o, ocls, sizeof(ocls)) <= 0 || lstrcmp(ocls, "Progman") != 0) return TRUE;
     }
     if (rc.right - rc.left > (int)lParam - 2 * DLG_MARGIN || rc.left < 0 || rc.right > (int)lParam) {
         g_wideDlg = hwnd; return FALSE;
@@ -1253,7 +1428,7 @@ static void poll(HWND hwnd)
         static unsigned n;
         run_host_command();
         if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); enforce_cursor(); }
-        if (n % 25 == 0) ship_print_job();              /* about once a second */
+        if (n % HEARTBEAT_POLLS == 0) { heartbeat(); ship_print_job(); }   /* about once a second */
     }
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
