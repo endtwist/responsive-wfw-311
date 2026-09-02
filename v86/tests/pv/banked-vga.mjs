@@ -12,6 +12,7 @@ const cpu = {
     io: { register_write() {}, register_read() {}, register_write_consecutive() {}, mmap_register() {} },
     devices: { pci: { register_device() {} } },
     flags: [0],
+    protected_mode: [0], cr: new Int32Array(8), cpl: new Uint8Array(1),
     svga_allocate_memory: () => 0,
     svga_mark_dirty() {},
     svga_dirty_bitmap_min_offset: [0], svga_dirty_bitmap_max_offset: [0],
@@ -128,6 +129,38 @@ wr(0x2004, 0x55); eq(svga[(7 << 16) + 0x2004], 0x55, "chain-4 plain write after 
 // --- 7. DISPI bank register 5 (VBE BANK) sets both banks
 dispi(5, 2);
 eq(vga.svga_read_bank_offset, 2 << 16, "BANK sets read bank"); eq(vga.svga_bank_offset, 2 << 16, "BANK sets write bank");
+
+// --- 8. the hypervisor's view: ring-0 / V86-mode accesses with paging on (WIN386's VDD lending
+//     "spare" window pages to a DOS box as text and font memory) go to pv_text_mem, never to
+//     the frame buffer; ring 3 (the display driver) and real mode (DOS programs) are unchanged
+const FLAG_VM = 1 << 17;
+const ctx = (pe, pg, cpl, vm) => { cpu.protected_mode[0] = pe; cpu.cr[0] = (pe ? 1 : 0) | (pg ? 0x80000000 : 0); cpu.cpl[0] = cpl; cpu.flags[0] = vm ? FLAG_VM : 0; };
+svga.fill(0x22); vga.pv_text_mem.fill(0);
+seq(4, 0x04); seq(2, 0x0F); gr(5, 0x00); gr(8, 0xFF); gr(3, 0);          // planar, write mode 0, all planes
+dispi(0x18, 0); dispi(0x19, 0);
+ctx(1, 1, 3, 0); wr(0xF000, 0x33);                                        // display driver: row 60 of bank group 0
+for(let p = 0; p < 4; p++) eq(svga[0x3C000 + p], 0x33, `ring 3 planar write reaches the frame buffer, plane ${p}`);
+eq(vga.pv_text_mem[0x3C000], 0, "ring 3 write does not touch the text store");
+ctx(1, 1, 0, 0); wr(0xF001, 0x20);                                        // the VDD clearing a text page it lent out
+for(let p = 0; p < 4; p++) eq(vga.pv_text_mem[0x3C004 + p], 0x20, `ring 0 planar write lands in the text store, plane ${p}`);
+eq(svga[0x3C004], 0x22, "ring 0 write leaves the frame buffer alone");
+ctx(1, 1, 3, 1); seq(2, 0x04); wr(0xF002, 0x55);                          // a DOS VM's font load (plane 2 only)
+eq(vga.pv_text_mem[0x3C008 + 2], 0x55, "V86 write lands in the text store, plane 2"); eq(vga.pv_text_mem[0x3C008], 0, "map mask honoured in the text store");
+eq(svga[0x3C008 + 2], 0x22, "V86 write leaves the frame buffer alone");
+seq(2, 0x0F);
+gr(4, 2); eq(rd(0xF002), 0x55, "V86 planar read comes from the text store (read map select)");
+gr(4, 0); eq(rd(0xF001), 0x20, "ring-0/V86 read of a text-store pixel group");
+eq(vga.latch_dword >>> 0, 0x20202020, "text store read loads the latches");
+ctx(1, 1, 3, 0); eq(rd(0xF000), 0x33, "ring 3 read comes from the frame buffer");
+ctx(0, 0, 0, 0); wr(0xF003, 0x44);                                        // real mode (a DOS program on the bare adapter)
+eq(svga[0x3C00C], 0x44, "real-mode write reaches the frame buffer"); eq(vga.pv_text_mem[0x3C00C], 0, "real-mode write does not touch the text store");
+ctx(1, 0, 0, 0); wr(0xF003, 0x45);                                        // protected mode without paging (no hypervisor)
+eq(svga[0x3C00C], 0x45, "ring 0 without paging reaches the frame buffer");
+seq(4, 0x0C); ctx(1, 1, 3, 1); wr(0x1234, 0x66);                          // chained addressing in V86 mode
+eq(vga.pv_text_mem[0x1234], 0x66, "V86 chain-4 write lands in the text store"); eq(svga[0x1234], 0x22, "frame buffer untouched");
+eq(rd(0x1234), 0x66, "V86 chain-4 read comes from the text store");
+ctx(1, 1, 3, 0); eq(rd(0x1234), 0x22, "ring 3 chain-4 read comes from the frame buffer");
+ctx(0, 0, 0, 0);
 
 console.log(`${checks - failures}/${checks} checks passed`);
 process.exit(failures ? 1 : 0);
