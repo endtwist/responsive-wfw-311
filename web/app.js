@@ -332,7 +332,12 @@ emulator.add_listener("emulator-ready", async () => {
     try { await withTimeout(clearLocalSnapshot(), 3000); } catch (e) { boot.errors.push("reset: " + (e && e.message)); }
     bootStep("reset");
   }
-  let snap = params.get("fresh") || params.get("reset") || boot.retry ? null : await loadState();
+  // IndexedDB itself can hang on iOS Chrome (the first boot after a blocked delete never returned
+  // from the open): never let the boot wait on it for more than 3 s.
+  let snap = null;
+  if (!(params.get("fresh") || params.get("reset") || boot.retry)) {
+    try { snap = await withTimeout(loadState(), 3000); } catch (e) { boot.errors.push("loadState: " + (e && e.message)); bootStep("local snapshot skipped: " + (e && e.message)); }
+  }
   if (snap) { boot.path = "local"; boot.localBytes = snap.byteLength; bootStep(`local snapshot ${snap.byteLength}`); }
   if (!snap && !params.get("fresh") && !params.get("mkstate")) {
     snap = await loadShippedState();
