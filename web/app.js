@@ -7,6 +7,17 @@ import { V86 } from "../v86/src/browser/starter.js";
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
+const setText = (id, s) => { const el = $(id); if (el) el.textContent = s; };
+/* The page draws nothing of its own (the rule: the host composites guest pixels and translates
+   input). The old development toolbar (status, mode, zoom, save, fresh boot) exists only with
+   ?dev=1, built here so index.html carries no chrome at all. */
+if (params.get("dev") === "1") {
+  const bar = document.createElement("div"); bar.id = "bar";
+  bar.innerHTML = '<span id="status">loading</span><span id="mode"></span><span id="zoom"></span>' +
+    '<button id="zoomout">&minus;</button><button id="zoomin">+</button><button id="zoomfit">fit</button>' +
+    '<button id="kbdbtn">keyboard</button><button id="savebtn">save</button><button id="resetbtn">fresh boot</button>';
+  document.body.appendChild(bar);
+}
 /* Which disk image and boot snapshot to use come from image/current.json, written by the image
    build, so a session always pairs a snapshot with the exact image it was made from. ?hda=
    overrides for development. */
@@ -113,14 +124,38 @@ const WIN_MARGIN = 8;
 function narrow() { const [vw, vh] = viewport(); return Math.min(vw, vh) < 600; }
 const SHELL_H = 970;             // shell column height, fixed so the boot snapshot always fits
 
+/* Desktop mode (SPEC 2026-09-02). A wide viewport gets Windows as the desktop it always was: the
+   guest is re-moded to the viewport's size, shown 1:1 with no layers or slots, and PVMON is told
+   (CMD_DESKTOP 1) to stop parking windows, to drop the hook's geometry clamps and to give Program
+   Manager a normal window. The guest says which layout it is in with every PVD line (D or P), and
+   the host asks for the other whenever the viewport disagrees: a browser window resized narrow,
+   a tablet rotated, a phone's snapshot opened on a laptop. The boot snapshot is made in the
+   phone layout (?mkstate=1 forces it, as does ?phone=1), so a desktop visit restores it and
+   switches; the mode request for the viewport's size waits for the guest to report the switch,
+   or the re-mode would find PVMON still parking windows in columns. */
+const forcePhone = params.get("mkstate") === "1" || params.get("phone") === "1";
+function wantDesktop() { return !narrow() && !forcePhone; }
+let guestDesktop = null;         // the guest's layout per its last PVD: true desktop, false phone, null unknown
+const CMD_DESKTOP = 11;
+let desktopCmdAt = 0;
+function syncDesktopMode() {
+  if (guestDesktop === null || guestDesktop === wantDesktop()) return;
+  if (performance.now() - desktopCmdAt < 3000) return;                 // one request in flight
+  desktopCmdAt = performance.now();
+  sendCommand(CMD_DESKTOP, wantDesktop() ? 1 : 0);
+  report("mode", `guest is ${guestDesktop ? "desktop" : "phone"}, viewport wants ${wantDesktop() ? "desktop" : "phone"}: CMD_DESKTOP sent`);
+}
+
 function computeMode() {
   const [vw, vh] = viewport();
-  if (narrow()) return { w: SLOT_W * (1 + MAX_SLOTS), h: SHELL_H, zoom: 1, shellH: SHELL_H };
-  let scale = Math.max(1, MIN_W / vw, MIN_H / vh);
-  scale = Math.min(scale, MAX_W / vw, MAX_H / vh);
-  const w = Math.max(MIN_W, Math.min(MAX_W, Math.floor(vw * scale / 8) * 8));
-  const h = Math.max(MIN_H, Math.min(MAX_H, Math.floor(vh * scale / 2) * 2));
-  return { w, h, zoom: scale, shellH: 0 };
+  // The phone layout, and a wide viewport until the guest has switched to desktop mode.
+  if (!wantDesktop() || guestDesktop !== true) return { w: SLOT_W * (1 + MAX_SLOTS), h: SHELL_H, zoom: 1, shellH: SHELL_H };
+  // Desktop: one guest pixel per CSS pixel (the canvas is painted nearest-neighbour at the device
+  // pixel ratio, so it is crisp on HiDPI too), the size a multiple of 8 x 2 within the adapter's
+  // limits. Windows 3.x wants at least 640 columns; a smaller window scales the screen down.
+  const w = Math.max(MIN_W, Math.min(MAX_W, Math.floor(vw / 8) * 8));
+  const h = Math.max(MIN_H, Math.min(MAX_H, Math.floor(vh / 2) * 2));
+  return { w, h, zoom: 1, shellH: 0 };
 }
 
 const initial = computeMode();
@@ -290,7 +325,7 @@ window.emulator = emulator;
 if (params.get("selftest")) import("./selftest.js").then(m => m.run());              // app tour (PLAN.md Fix 5)
 if (params.get("remote")) import("./remote.js").then(m => m.run(params.get("remote"))); // parked-phone remote control
 
-function status(msg) { $("status").textContent = msg; }
+function status(msg) { boot.status = msg; setText("status", msg); }
 
 /* Boot watchdog. A phone once sat on a black screen with the status stuck at "loading": the
    emulator never started (is_running() false, instruction counter 0) and nothing was logged; a
@@ -298,14 +333,14 @@ function status(msg) { $("status").textContent = msg; }
    is recorded here; 15 s after load with the emulator not running, or 40 s without the desktop
    after a snapshot restore, a BOOTFAIL bundle goes to the dev server, the local snapshot and frame
    are wiped and the page restarts from the shipped snapshot -- once (loop guard in the URL). */
-const boot = { path: "none", localBytes: 0, shippedBytes: 0, errors: [], steps: [], retry: params.get("bootretry") === "1" };
+const boot = { path: "none", localBytes: 0, shippedBytes: 0, errors: [], steps: [], retry: params.get("bootretry") === "1", status: "loading" };
 function bootStep(s) { boot.steps.push(`${Math.round(performance.now())} ${s}`); }
 window.addEventListener("unhandledrejection", ev => boot.errors.push("rejection: " + String(ev.reason && (ev.reason.stack || ev.reason)).slice(0, 300)));
 window.addEventListener("error", ev => boot.errors.push(`error: ${ev.message} @${ev.filename}:${ev.lineno}`));
 async function bootFail(why) {
   let running = false, ic = 0;
   try { running = !!(emulator.is_running && emulator.is_running()); ic = emulator.get_instruction_counter() >>> 0; } catch (e) {}
-  const bundle = { why, status: $("status").textContent, running, ic, path: boot.path, localBytes: boot.localBytes, shippedBytes: boot.shippedBytes,
+  const bundle = { why, status: boot.status, running, ic, path: boot.path, localBytes: boot.localBytes, shippedBytes: boot.shippedBytes,
                    restored, desktopReady, retry: boot.retry, errors: boot.errors.slice(-10), steps: boot.steps.slice(-20), protocol: pvLog.slice(-10),
                    vp: fullViewport(), hidden: document.hidden, ua: navigator.userAgent };
   report("BOOTFAIL", JSON.stringify(bundle));
@@ -370,6 +405,8 @@ emulator.add_listener("emulator-ready", async () => {
   }
   emulator.run();
   bootStep("run");
+  // The snapshot restores the adapter's mode registers too (host size, generation): ask again.
+  requestMode(true);
   if (restored) setTimeout(() => sendCommand(CMD_REPUBLISH, 0), 300);
  } catch (e) {
   boot.errors.push("boot: " + (e && (e.stack || e.message || e)));
@@ -391,7 +428,7 @@ emulator.add_listener("screen-set-size", s => {
     setTimeout(() => location.replace(u.toString()), 400);
     return;
   }
-  $("mode").textContent = `${s[0]}x${s[1]}`;
+  setText("mode", `${s[0]}x${s[1]}`);
   emulator.screen_set_scale(1, 1);
   fitCanvas();
   // Give the guest a moment to paint the new size, then drop the held frame.
@@ -425,21 +462,34 @@ const pvLog = [];
    the last input event, and the last time the composite changed. See watchdog() below. */
 const wd = { lastBeat: 0, beats: 0, lastInput: 0, lastChange: 0, lastBundle: 0, frameSig: 0, inputs: [] };
 function noteInput(s) { wd.lastInput = performance.now(); wd.inputs.push(`${Math.round(wd.lastInput)} ${s}`); if (wd.inputs.length > 20) wd.inputs.shift(); }
-window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, log: pvLog.slice(-50), wd, wantKeyboard, keyboardHeld, kbd: kbdTrace.slice(-10),
+window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, guestDesktop, wantDesktop: wantDesktop(), mode: lastReq,
+                          log: pvLog.slice(-50), wd, wantKeyboard, keyboardHeld, kbd: kbdTrace.slice(-10),
                           firstFrame: !!firstFrame, firstFrameShown, safe, cursorShown: guestCursorShown, cmdQueue: cmdQueue.length });
 emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
   if (pvLog.length > 200) pvLog.splice(0, pvLog.length - 150);
   let m = /^PVH/.exec(line);
   if (m) { wd.lastBeat = performance.now(); wd.beats++; return; }
-  m = /^PVD (\d+) (\d+)(?: (\d+))?(?: v(\d+))?/.exec(line);
-  if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18, ver: m[4] ? +m[4] : 0 }; return; }
+  m = /^PVD (\d+) (\d+)(?: (\d+))?(?: v(\d+))?(?: ([DP]))?/.exec(line);
+  if (m) {
+    shell = { w: +m[1], h: +m[2], cap: +m[3] || 18, ver: m[4] ? +m[4] : 0 };
+    if (m[5]) {                                     // PVMON v34+: which layout the guest is in
+      const was = guestDesktop;
+      guestDesktop = m[5] === "D";
+      if (was !== guestDesktop) { report("mode", `guest reports ${guestDesktop ? "desktop" : "phone"} layout`); requestMode(true); }
+      syncDesktopMode();
+    }
+    return;
+  }
   if (/^PVP-BEGIN /.test(line)) { printJob = []; return; }
   if (/^PVP /.test(line)) { if (printJob) printJob.push(line.slice(4)); return; }
   if (/^PVP-END/.test(line)) { if (printJob) finishPrintJob(printJob.join("")); printJob = null; return; }
   m = /^PVK (\d)/.exec(line);
   if (m) { guestWantsKeyboard(m[1] === "1"); return; }
   if (/^PVA/.test(line)) {
+    // A wide viewport with the guest still in the phone layout: not ready yet. PVMON publishes
+    // PVA again once it has switched and arranged the desktop (finish_mode_switch).
+    if (wantDesktop() && shell.ver >= 34 && guestDesktop !== true) { syncDesktopMode(); return; }
     desktopReady = true;
     shellHeightSent = 0;
     if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
@@ -785,6 +835,10 @@ function focusKeyboard(reason) {
    debounce, so a tap that moves the focus from one Edit into another does not flicker. A manual
    hold (caption long-press) overrides 0. */
 function guestWantsKeyboard(want) {
+  /* A device with a real keyboard needs no hidden input: v86's own keyboard adapter takes the
+     page's key events (scancodes, so Esc, arrows and F-keys work as they do on a PC); focusing the
+     contenteditable as well would deliver every character twice. */
+  if (!touchDevice) { kbdLog(`PVK ${want ? 1 : 0} (hardware keyboard: ignored)`); return; }
   if (want) {
     wantKeyboard = true;
     clearTimeout(kbdBlurTimer);
@@ -981,9 +1035,12 @@ let placed = [];                     // the composited windows, as drawn, front-
 
 function chooseView(src) {
   const [vw, vh] = viewport();
-  if (!narrow() || !shell.h) {                      // wide display: just show the whole screen
-    const scale = Math.min(vw / src.width, vh / src.height);
-    return { x: 0, y: 0, w: src.width, h: src.height, scale, ox: 0 };
+  if (!narrow() || !shell.h) {
+    /* Desktop mode: the whole screen, 1:1, centred (the mode is the viewport rounded down to 8 x 2,
+       so a few columns at the edges stay black). A screen larger than the viewport, which is only
+       the moment between a resize and the guest's re-mode, is scaled to fit instead. */
+    const scale = Math.min(1, vw / src.width, vh / src.height);
+    return { x: 0, y: 0, w: src.width, h: src.height, scale, ox: Math.max(0, Math.floor((vw - src.width * scale) / 2)) };
   }
   /* Portrait: the whole shell column fits the screen. Landscape: fitting the column's full
      height would make everything tiny, so the desktop is scaled to show its top 480 rows (caption,
@@ -1399,7 +1456,7 @@ function present() {
     let ic = 0; try { ic = emulator.get_instruction_counter() >>> 0; } catch (e) {}
     const mips = lastIc ? ((ic - lastIc) >>> 0) / (now - lastBeatAt) / 1000 : 0;
     lastIc = ic; lastBeatAt = now;
-    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} layers=${layers.map(l => l.kind + ":" + (l.title || "").slice(0, 14)).join("|")} ready=${desktopReady} mips=${mips.toFixed(1)} pvmon=${shell.ver || "?"}`);
+    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} mode=${guestDesktop === null ? "?" : guestDesktop ? "D" : "P"}${lastReq ? ` ${lastReq.w}x${lastReq.h}` : ""} layers=${layers.map(l => l.kind + ":" + (l.title || "").slice(0, 14)).join("|")} ready=${desktopReady} mips=${mips.toFixed(1)} pvmon=${shell.ver || "?"}`);
   }
   requestAnimationFrame(present);
 }
@@ -1521,7 +1578,7 @@ function requestMode(force) {
   lastReq = { w, h };
   holdLastFrame();
   emulator.bus.send("pv-request-mode", [w, h]);
-  $("zoom").textContent = scale === 1 ? "" : `scale ${scale.toFixed(2)}`;
+  setText("zoom", scale === 1 ? "" : `scale ${scale.toFixed(2)}`);
   fitCanvas();
 }
 // The debounce deliberately avoids setTimeout: a hidden page throttles timers almost to a
@@ -1530,6 +1587,8 @@ function requestMode(force) {
 let pending = null, pendingSince = 0;
 function pump() {
   fitCanvas();
+  document.documentElement.classList.toggle("phone", narrow());
+  syncDesktopMode();                                   // the viewport crossed the phone/desktop line
   const m = computeMode();
   if (!pending || pending.w !== m.w || pending.h !== m.h) { pending = m; pendingSince = performance.now(); return; }
   if (performance.now() - pendingSince < 300) return;                     // still settling
@@ -1564,7 +1623,7 @@ function fitCanvas() {
   c.style.width = w + "px";
   c.style.height = h + "px";
   c.style.imageRendering = scale >= 1 && Number.isInteger(scale) ? "pixelated" : "auto";
-  $("zoom").textContent = zoom === 1 ? "" : zoom.toFixed(1) + "x";
+  setText("zoom", zoom === 1 ? "" : zoom.toFixed(1) + "x");
 }
 
 function setZoom(z, anchor) {
@@ -1647,7 +1706,14 @@ const CMD_SETPOS = 9;
    applications are. If no report comes (an image without the driver), PVMON's SetCursorPos is
    the fallback. */
 let absPointer = params.get("relmouse") ? false : true, absMisses = 0;
+/* The size USER scales an absolute (normalised) mouse position by. Measured (tools/desktop-probe.mjs):
+   it is the screen Windows started at, not the current mode. USER keeps its own copy for the mouse
+   that neither the live re-mode's metric patching nor FakeScreen reaches, so after a re-mode to
+   1280x800 a position normalised to 1280x800 landed at twice the x. Windows always starts in the
+   phone layout here (the host requests that mode until the guest reports the switch), so in
+   desktop mode the base is the phone screen; in the phone layout the canvas is that screen. */
 function screenSize() {
+  if (guestDesktop === true) return [SLOT_W * (1 + MAX_SLOTS), SHELL_H];
   const src = document.querySelector("#screen_container canvas");
   return src && src.width ? [src.width, src.height] : [SLOT_W * (1 + MAX_SLOTS), SHELL_H];
 }
@@ -1791,8 +1857,8 @@ function installTouch() {
   touchInstalled = true;
   // Button events are serialised behind the pointer: a press that lands while the pointer is
   // still moving would drag whatever is under it.
-  let chain = Promise.resolve();
-  const queue = fn => (chain = chain.then(fn).catch(() => {}));
+  let chain = Promise.resolve(), queued = 0;
+  const queue = fn => { queued++; chain = chain.then(fn).catch(() => {}).then(() => { queued--; }); };
   let consumed = null, pressActive = false;
 
   /* One press = one pipeline: place the pointer, (maybe) press, follow the finger, release.
@@ -1841,7 +1907,9 @@ let hoverSurface = false;
     { const { px, py } = hostPoint(ev);
       const h0 = hitTest(px, py);
       let pol = "drag", slot = -1, title = "";
-      if (pressLayer && !pressLayer.transient && !pressLayer.shellCopy && h0.kind === "client") { pol = surfacePolicy(pressLayer); slot = pressLayer.slot; title = pressLayer.title; }
+      // Scroll and pan surfaces are the phone layout's: on the desktop every drag is a pointer drag.
+      if (!narrow()) pol = "drag";
+      else if (pressLayer && !pressLayer.transient && !pressLayer.shellCopy && h0.kind === "client") { pol = surfacePolicy(pressLayer); slot = pressLayer.slot; title = pressLayer.title; }
       else if (insideShellDialog(h0) && tallShellDialogBottom(view.h) > view.h) { pol = "pan"; title = "shell dialog"; }   // a tall shell dialog: pan the column
       else if (insideShellClient(h0)) { pol = "scroll"; slot = SHELL_SCROLL_SLOT; title = "Program Manager"; }   // PVMON targets the active group
       shellPan = pol === "pan" ? { startY: py, base: shellPanY, panning: false } : null;
@@ -1859,12 +1927,15 @@ let hoverSurface = false;
     }
     { const { px, py } = hostPoint(ev); lastTap = { t: now, px, py, pt, dragged: false }; }
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}${oneScroll ? " policy=scroll" : ""}`); noteInput(`down ${h.kind} ${pt.x},${pt.y} ${h.win && h.win.title || ""}`); }
-    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py), scrollSurface: !!oneScroll, hover: hoverSurface };
+    // A real mouse has buttons of its own: its right button is the right button, a held left
+    // button is a held left button (never a long-press right click).
+    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py), scrollSurface: !!oneScroll, hover: hoverSurface,
+                    mouse: ev.type === "mousedown", right: ev.type === "mousedown" && ev.button === 2 };
     pressActive = true;
     queue(async () => {
       await placePointer(pt);
       if (!G.active || G.dragging) return;
-      if (G.scrollSurface) return;                         // on a scroll surface the hold is decided on the release (or becomes a drag)
+      if (G.scrollSurface || G.mouse) return;              // on a scroll surface the hold is decided on the release (or becomes a drag)
       G.timer = setTimeout(() => queue(async () => {          // long press is the right button
         if (!G.active || G.dragging) return;
         G.longFired = true;
@@ -1916,7 +1987,7 @@ let hoverSurface = false;
       G.dragging = true;
       if (lastTap) lastTap.dragged = true;
       queue(async () => {                       // after the pointer has been placed: press, then follow
-        if (!G.hover) { button(true, false); await sleep(30); }   // a hover surface (SkiFree) just moves the pointer
+        if (!G.hover) { button(true, G.right); await sleep(30); }   // a hover surface (SkiFree) just moves the pointer
         await follow(G);
       });
     }
@@ -1995,9 +2066,9 @@ let hoverSurface = false;
     }
     if (!G.dragging && !G.longFired && ev && ev.type === "touchend") tapKeyboard(G.hit);
     queue(async () => {
-      if (G.dragging) { if (!G.hover) button(false, false); diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
+      if (G.dragging) { if (!G.hover) button(false, G.right); diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
       if (G.longFired) return;
-      button(true, false); await sleep(60); button(false, false);   // tap is a left click
+      button(true, G.right); await sleep(60); button(false, G.right);   // tap is a left click (a mouse: its own button)
     });
   };
 
@@ -2080,8 +2151,24 @@ let hoverSurface = false;
   // The same gestures with a mouse, since the v86 canvas itself is off-screen in this mode. A real
   // mouse brings the guest pointer back (a finger hides it).
   let mouseDown = false;
-  c.addEventListener("mousedown", ev => { ev.preventDefault(); mouseDown = true; setGuestCursor(true); down(ev); });
-  window.addEventListener("mousemove", ev => { if (mouseDown) move(ev); });
+  c.addEventListener("mousedown", ev => { if (ev.button !== 0 && ev.button !== 2) return; ev.preventDefault(); mouseDown = true; setGuestCursor(true); down(ev); });
+  /* Desktop mode: the guest pointer follows the mouse while no button is down (menus highlight,
+     the cursor takes the shape of what it is over), through the same absolute placement a press
+     uses, coalesced so a fast sweep never queues up behind the guest. Never while a press pipeline
+     is still running: a click must land where it was pressed. */
+  let hoverTarget = null, hovering = null;
+  const hover = ev => {
+    if (narrow() || mouseDown || pressActive || queued || !desktopReady) return;
+    const { px, py } = hostPoint(ev);
+    const h = hitTest(px, py);
+    hoverTarget = { x: h.x, y: h.y };
+    if (hovering) return;
+    hovering = (async () => {
+      try { while (hoverTarget && !mouseDown && !queued) { const t = hoverTarget; hoverTarget = null; await placePointer(t); } }
+      finally { hovering = null; hoverTarget = null; }
+    })();
+  };
+  window.addEventListener("mousemove", ev => { if (mouseDown) move(ev); else if (ev.target === c) hover(ev); });
   window.addEventListener("mouseup", ev => { if (!mouseDown) return; mouseDown = false; up(ev); });
   window.addEventListener("pointermove", ev => { if (ev.pointerType === "mouse") setGuestCursor(true); }, { passive: true });
   c.addEventListener("contextmenu", ev => ev.preventDefault());
@@ -2093,7 +2180,7 @@ let hoverSurface = false;
 function installKeyboard() {
   const inp = $("kbd");
   buildKeybar(); updateKeybar();
-  $("kbdbtn").onclick = () => { kbdClear(inp); inp.focus(); };
+  if ($("kbdbtn")) $("kbdbtn").onclick = () => { kbdClear(inp); inp.focus(); };
   inp.addEventListener("input", ev => {
     if (ev.isComposing) return;                          // wait for the composition to end
     const text = kbdRead(inp);
@@ -2226,12 +2313,13 @@ window.addEventListener("pagehide", () => { saveFrame(); saveState(emulator); })
 // A phone in portrait can have a readable desktop or a stable screen, not both; let the choice
 // be made explicitly rather than by the page changing size underneath whatever is open.
 
-$("zoomin").onclick = () => setZoom(zoom * 1.25);
-$("zoomout").onclick = () => setZoom(zoom / 1.25);
-$("zoomfit").onclick = () => { setZoom(1); autoZoom = true; contentW && applyAutoZoom();
-  const b = $("screen_container"); b.scrollLeft = 0; b.scrollTop = 0; };
-$("savebtn").onclick = () => saveState(emulator);
-$("resetbtn").onclick = async () => { await clearState(); location.search = "?fresh=1"; };
+if ($("bar")) {                                        // ?dev=1 only
+  $("zoomin").onclick = () => setZoom(zoom * 1.25);
+  $("zoomout").onclick = () => setZoom(zoom / 1.25);
+  $("zoomfit").onclick = () => { setZoom(1); autoZoom = true; const b = $("screen_container"); b.scrollLeft = 0; b.scrollTop = 0; };
+  $("savebtn").onclick = () => saveState(emulator);
+  $("resetbtn").onclick = async () => { await clearState(); location.search = "?fresh=1&dev=1"; };
+}
 
 emulator.add_listener("emulator-started", () => { installTouch(); installKeyboard(); fitCanvas(); });
 setTimeout(() => { installTouch(); installKeyboard(); }, 3000);

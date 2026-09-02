@@ -52,6 +52,12 @@ static int g_hookClamp = 1;
    600-tall owner in a 760 frame) lands centred on its owner and is captured twice. */
 static int g_realH;
 static int real_h(void) { return g_realH ? g_realH : GetSystemMetrics(SM_CYSCREEN); }
+/* Desktop mode (PvHookSetDesktop, from PVMON on the host's CMD_DESKTOP): a wide viewport shows the
+   whole screen 1:1, so there is no phone frame to keep windows inside, no slot columns and nothing
+   to clamp. shell_w() answers 0 and every geometry path below passes the message through untouched;
+   only the focus report (PVK) keeps running. A runtime switch, since a browser window is resized
+   and a tablet rotated: the same hook serves both modes without a rebuild. */
+static int g_desktop;
 
 /* The WH_CALLWNDPROC hook's lParam points at the message's parameters as SendMessage pushed
    them (Windows 3.1 has no CWPSTRUCT typedef of its own). */
@@ -137,6 +143,7 @@ static void pv_dbg(const char FAR *s)
 
 static int shell_w(void)
 {
+    if (g_desktop) return 0;                                   /* desktop mode: nothing is clamped */
     if (!g_shellW) g_shellW = GetProfileInt("PVMon", "ShellWidth", 0);
     return g_shellW;
 }
@@ -736,7 +743,7 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
 LRESULT CALLBACK __export PvCwpProc(int code, WPARAM wParam, LPARAM lParam)
 {
     CWP16 FAR *m = (CWP16 FAR *)lParam;
-    if (code >= 0 && m && g_shellW) {
+    if (code >= 0 && m && shell_w()) {
         if (m->message == WM_GETMINMAXINFO && m->lParam) clamp_minmax(m->hwnd, (MINMAXINFO FAR *)m->lParam);
         else if (m->message == WM_WINDOWPOSCHANGING && m->lParam) clamp_windowpos(m->hwnd, (WINDOWPOS FAR *)m->lParam);
         else if (m->message == WM_WINDOWPOSCHANGED && m->lParam) {
@@ -798,6 +805,13 @@ BOOL FAR PASCAL __export PvHookInstall(void)
 
 /* The shell column's runtime size (the host knows the real viewport; PVMON relays it). */
 void FAR PASCAL __export PvHookSetReal(int w, int h) { if (h > 0) g_realH = h; }
+/* Desktop mode on (1) or off (0): see g_desktop. */
+void FAR PASCAL __export PvHookSetDesktop(int on)
+{
+    if ((on != 0) == (g_desktop != 0)) return;
+    g_desktop = on != 0;
+    pv_dbg(g_desktop ? "pvhook: desktop mode, geometry clamps off" : "pvhook: phone mode, geometry clamps on");
+}
 void FAR PASCAL __export PvHookSetShell(int w, int h)
 {
     if (w > 0) g_shellW = w;

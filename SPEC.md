@@ -966,7 +966,24 @@ caption and menu bar matches; the caption strip is cropped around its centre, ne
 
 Host->guest command channel: DISPI 0x1A command / 0x1B argument / 0x1C command string (one byte
 per read). Commands: activate, restore, close, minimise (a slot), run (WinExec a command line),
-republish (after a snapshot restore). `/solitaire`, `/hearts`, ... or `?run=` launch an app the
+republish (after a snapshot restore). Full table (PVMON `CMD_*`, `guest/pvmon/pvmon.c`):
+
+| # | Command | Argument | Effect |
+|---|---|---|---|
+| 1 | `CMD_ACTIVATE` | slot | restore if iconic, bring to top, activate |
+| 2 | `CMD_RESTORE` | slot | `SW_RESTORE` + activate |
+| 3 | `CMD_CLOSE` | slot | cancel its visible `#32770` dialogs, then `WM_CLOSE` |
+| 4 | `CMD_MINIMIZE` | slot | `SW_MINIMIZE` |
+| 5 | `CMD_RUN` | string (0x1C) | `WinExec` the command line |
+| 6 | `CMD_REPUBLISH` | - | `PVD`, `PVA`, then the full layer list (after a snapshot restore) |
+| 7 | `CMD_SCROLL` | `slot \| dir<<8 \| lines<<12` (slot 15 = shell) | `WM_VSCROLL`/`WM_HSCROLL` line messages |
+| 8 | `CMD_SHELLSIZE` | shell column height | re-arrange Program Manager to the rows the phone shows; re-applies FakeScreen |
+| 9 | `CMD_SETPOS` | string `x,y` | `SetCursorPos`, position reported back through 0x14/0x15 |
+| 10 | `CMD_CURSOR` | 0 / 1 | hide / show the pointer (`ShowCursor` count held there) |
+| 11 | `CMD_DESKTOP` | 1 / 0 | desktop mode on / phone layout back (2026-09-02, below): no slots, no parking, hook clamps off, metrics real, Program Manager a normal window; `PVD` answers with the mode letter and `PVA` follows once the host's mode has settled |
+
+`PVD w h cap vN M` carries the shell column, the caption height, PVMON's version and (v34+) the
+layout letter `M` = `P` phone / `D` desktop. `/solitaire`, `/hearts`, ... or `?run=` launch an app the
 moment `PVA` arrives. `image/boot.state.gz` (2.1 MB gzipped, made with `?fresh=1&mkstate=1`,
 posted to the dev server's `/__state`) is restored on a cold visit: desktop up in a few seconds
 instead of a minute. Local snapshots are keyed by the image's size and mtime, since a stale one
@@ -1993,3 +2010,81 @@ in pvhook.c, `fakescreen=`/`hookclamp=` in build-image.sh, `tools/probe.mjs`.
   right down/up in the gesture's timer, `web/app.js` `installTouch`), so hold to flip, tap to build.
   The headless tour only sends the left button (`mouse-click [down,false,false]`); the long-press
   → right-button path is exercised by the pane/phone, not by `tour.mjs`.
+
+### 2026-09-02 — desktop mode: a wide viewport gets the real Windows desktop (PVMON v34)
+Josh: "we need to fix desktop". A laptop browser showed the phone layout scaled down (a 352-column
+shell and Solitaire in a 640 slot inside a 2560x970 screen shrunk to fit) under an HTML development
+toolbar. Now a viewport whose smaller side is 600 CSS px or more is a desktop: the guest is re-moded
+to the viewport's size and composited 1:1, and Windows is left to be Windows.
+
+**Guest (`CMD_DESKTOP` 11, arg 1/0; PVMON v34, PVHOOK).** One runtime switch, `set_desktop_mode()`:
+`g_shellW` goes to 0 (every phone-layout path in PVMON keys off it: parking, the icon row, owned-window
+placement, the zoomed-shell check, `WM_USER+1`), `g_phoneW` keeps the column width for the way back,
+the FakeScreen metrics go back to the real screen (`set_screen_metrics(g_realW, g_realH)`, factored
+out of `apply_fake_screen`), and the hook is told (`PvHookSetDesktop`: `shell_w()` answers 0, so
+HCBT_CREATEWND birth sizing, WM_GETMINMAXINFO / WM_WINDOWPOSCHANGING clamps, the HCBT_ACTIVATE
+self-size clamp and the dialog placement all pass the message through; `PvCwpProc` now guards on
+`shell_w()` too, or it posted `WM_USER+1` for every resize). Only the focus report (`PVK`) keeps
+running in the hook. The arrangement is deferred (`g_modeSwitch`): the host asks for the viewport's
+size right after the switch, so `finish_mode_switch()` runs from `poll()` once the mode has settled
+(after the live re-mode, or after `SETTLE_POLLS` polls if no re-mode came): `arrange_shell()`'s desktop
+branch restores a zoomed Program Manager, sizes it to two thirds of the screen (480..900 x 360..640),
+centred, restores the MDI-maximised group, posts Window > Cascade and Window > Arrange Icons,
+`fit_windows()` brings every window that was in a slot column back on to the screen (nothing else is
+moved: a Notepad sized 352x600 for the phone stays that size, a normal window), `ArrangeIconicWindows`
+puts minimised icons back along the real bottom, and `PVA` is published again. A desktop resize
+(`live_remode` with `g_desktop`) only clamps windows on screen; the phone path still calls
+`arrange_shell()`. `CMD_DESKTOP 0` reverses it: `g_shellW` back, `apply_fake_screen()`, hook clamps
+on, and the next publish parks every application in a slot again (`park()`'s "sized past the frame"
+rule shrinks what the desktop let grow). `PVD` now ends with the layout letter (`P`/`D`);
+`CMD_SHELLSIZE` in desktop mode only stores the height. `publish_layout()` still assigns slots and
+publishes `PVW/PVO/PVT/PVS` in desktop mode, so `pvState()` reports layers and `CMD_ACTIVATE/CLOSE`
+by slot keep working; the host just does not composite them as layers.
+
+**Host (`web/app.js`, `web/index.html`).** The toolbar is gone from `index.html`; `?dev=1` builds it
+(`#bar`, same ids) and every reference is null-safe (`setText`). `wantDesktop()` = `!narrow()` unless
+`?mkstate=1` or `?phone=1` (the boot snapshot is always made in the phone layout). `guestDesktop` is
+the guest's letter from `PVD`; `syncDesktopMode()` (every `pump()`, every `PVD`, `PVA`) sends
+`CMD_DESKTOP` whenever the viewport and the guest disagree, at most one in flight per 3 s.
+`computeMode()` returns the phone mode until the guest reports `D`, then the viewport rounded down to
+8 x 2 within 640x400..2560x1600 at one guest pixel per CSS pixel (crisp on HiDPI: the canvas is
+painted nearest-neighbour at the DPR; 2x was rejected because a 1440x900 retina viewport would want
+2880 columns, past the adapter). The snapshot restores the adapter's mode registers, so
+`requestMode(true)` is re-sent after `emulator.run()`. `PVA` on a wide viewport with the guest still
+in the phone layout is not "ready" (v34+): the switch's own `PVA` is, so `/solitaire` launches into
+the desktop. `chooseView()` composites the whole screen at `min(1, fit)`, centred. Input: a real
+mouse's right button is the right button and a held left button never becomes a long-press right
+click (`G.mouse`, `G.right`); hover moves the guest pointer (absolute placement, coalesced, never
+while a press pipeline is queued); the phone's scroll/pan surface policies apply only when
+`narrow()`; on a device without touch the hidden input is never focused (`guestWantsKeyboard`
+returns): v86's own keyboard adapter delivers scancodes, so Esc, arrows, F-keys and Alt chords work,
+and focusing the contenteditable as well typed every character twice.
+
+**Measured.** USER scales an absolute (`SF_ABSOLUTE`) mouse position by the screen size Windows
+*started* at, not the current mode: after the re-mode to 1280x800 a position normalised to 1280x800
+landed at exactly 2x (`297,96 -> 595,117`); normalised to 2560x970 it landed on the pixel. USER keeps
+a copy for the mouse that neither `patch_user_metrics` nor FakeScreen reaches. Windows always starts
+in the phone layout here (the host requests that mode until the guest reports `D`), so
+`screenSize()` uses the phone screen as the base in desktop mode (`tools/desktop-probe.mjs`,
+`shots/desk-probe-1280.txt`).
+
+**Verified** (the Browser pane was at its tab cap all session, so two headless harnesses were written
+instead): `tools/desktop-probe.mjs` (v86 in node: restore -> `CMD_DESKTOP 1` -> mode request ->
+`PVA`, Solitaire, pointer, resize, back to phone; frame buffer to PNG, `shots/desk-*.png`) at
+1280x800 and 1440x900: Program Manager `213,133 853x533` / `270,150 900x600`, Solitaire `0,0 593x471`
+(USER's own placement, no slot), resize to 1120x700 re-modes in place, back to phone: shell `0,0
+352x672`, Solitaire parked at `640,0`. `tools/desktop-pane.mjs` (the real page in headless Chromium
+via puppeteer, `shots/pane-*.png`) at 1280x800: 14/14 — no `#bar`, guest `D`, screen = viewport,
+`view.scale` 1, hover `298,391` -> guest `298,391`, a click on Solitaire's menu bar opens the Game
+menu (`PVT 4,83 111x147`), Esc through v86's keyboard closes it, a window resize to 1120x700 re-modes,
+a 390x844 viewport switches the guest back to the phone layout (Solitaire `640,0`, shell `0,0
+352x674`), wide again re-enters desktop mode. Phone path: `node tools/tour.mjs --apps NOTEPAD,SOL`
+pass=16 fail=1 (`dlgfit 604x318`, the COMMDLG Open box wider than the frame, as before). Image
+`work-phone-20260902-171333.img` + `boot-20260902-171333.state.gz` (rebased on main: SkiFree in the image) (snapshot made headless with
+`tools/probe.mjs --state none --save`).
+
+Open: on a device with touch *and* a wide viewport (iPad) the hidden input is still focused on
+`PVK 1`, as on the phone; Program Manager's desktop rectangle is not persisted to PROGMAN.INI
+(each desktop switch re-centres it; a user's own move survives resizes since `live_remode` only
+clamps); the DPI stays the snapshot's 120 on the desktop (large fonts), a `?fresh=1` desktop boot
+gets 96.

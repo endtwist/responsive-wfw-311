@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 33     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 34     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -101,6 +101,25 @@ static unsigned g_shellW, g_shellH;
    GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN) answers the phone frame, so PVMON's own geometry
    (slot columns, the re-mode check against the host's size) must read these instead. */
 static unsigned g_realW, g_realH;
+/* Desktop mode (CMD_DESKTOP 1, SPEC 2026-09-02): a wide viewport shows the whole screen 1:1, so
+   Windows runs as the ordinary desktop it always was: no shell column, no slot parking, no hook
+   clamps, the screen metrics real, Program Manager a normal window. g_shellW is 0 while it lasts
+   (every phone-layout path keys off it) and g_phoneW keeps the column width for the way back
+   (CMD_DESKTOP 0: a browser window resized narrow, a tablet rotated). g_modeSwitch marks a switch
+   whose arrangement waits for the host's mode to settle (poll), so windows are laid out once, for
+   the screen they will be shown on, and PVA is published when that is done. */
+static BOOL g_desktop;
+static unsigned g_phoneW;
+static BOOL g_modeSwitch;
+static unsigned g_switchPolls;   /* polls since the switch: the host's mode request gets a moment to arrive */
+typedef void (FAR PASCAL *HOOKSETDESKTOP)(int);
+static void hook_set_desktop(void)
+{
+    HOOKSETDESKTOP set;
+    if (!g_hookDll) return;
+    set = (HOOKSETDESKTOP)GetProcAddress(g_hookDll, "PvHookSetDesktop");
+    if (set) set(g_desktop ? 1 : 0);
+}
 /* The hook DLL enforces the geometry invariant in every task; it needs the shell column's
    runtime height, which only the host knows and PVMON receives (CMD_SHELLSIZE). */
 static void hook_set_shell(void)
@@ -112,6 +131,16 @@ static void hook_set_shell(void)
     /* the real frame buffer height: the slot columns are that tall whatever FakeScreen says */
     set = (HOOKSETSHELL)GetProcAddress(g_hookDll, "PvHookSetReal");
     if (set) set((int)g_realW, (int)g_realH);
+    hook_set_desktop();
+}
+/* PVD: the shell column (width, height, caption height), our version and the mode (D desktop,
+   P phone), so the host can tell which layout the guest is in and ask for the other. */
+static void send_pvd(void)
+{
+    char b[72];
+    wsprintf(b, "PVD %u %u %d v%d %c", g_desktop ? g_phoneW : g_shellW, g_shellH,
+             GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION, g_desktop ? 'D' : 'P');
+    dbg(b);
 }
 static void install_hook(void)
 {
@@ -209,7 +238,7 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
        width and it re-laid its tableau into a column of overlapping cards. Applications of this
        era lay out to their own window size, so a window that no longer fits is better left its
        own size and pinned to the top left than resized into nonsense. */
-    if (isShell) { x = 0; y = 0; }
+    if (isShell && !g_desktop) { x = 0; y = 0; }
     else if (g_shellW) return TRUE;   /* applications are placed by publish_layout, not here */
     if (x + w > (int)g_fitW) x = (int)g_fitW - w;
     if (y + h > (int)g_fitH) y = (int)g_fitH - h;
@@ -281,6 +310,32 @@ static void arrange_shell(void)
        icon into a column-sized iconic window with the icon lost in the middle of it. */
     if (IsIconic(pm)) { g_arrangePending = TRUE; return; }
     g_arrangePending = FALSE;
+    if (g_desktop) {
+        /* Desktop mode: Program Manager is an ordinary window again, roughly the size Windows 3.1
+           gave it on a first run (two thirds of the screen, centred), the group that the phone
+           layout kept maximised inside it restored, icons re-arranged. Nothing else on the desktop
+           is parked; fit_windows only brings windows that were in a slot column back on screen. */
+        int w = cx * 2 / 3, h = cy * 2 / 3;
+        if (w < 480) w = min(480, cx); if (w > 900) w = 900;
+        if (h < 360) h = min(360, cy); if (h > 640) h = 640;
+        if (IsZoomed(pm)) ShowWindow(pm, SW_RESTORE);
+        SetWindowPos(pm, NULL, (cx - w) / 2, (cy - h) / 2, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        mdi = GetWindow(pm, GW_CHILD);
+        if (mdi) {
+            active = (HWND)(WORD)SendMessage(mdi, WM_MDIGETACTIVE, 0, 0L);
+            if (active && IsZoomed(active)) SendMessage(mdi, WM_MDIRESTORE, (WPARAM)active, 0L);
+            SendMessage(mdi, WM_MDIICONARRANGE, 0, 0L);
+        }
+        /* Window > Cascade: the open group (sized for the 352 column) fills the client area the way
+           a first-run Program Manager shows Main; then Arrange Icons re-grids its items. */
+        idArrange = find_menu_command(pm, "Cascade");
+        if (idArrange) PostMessage(pm, WM_COMMAND, idArrange, 0L);
+        idArrange = find_menu_command(pm, "Arrange");
+        if (idArrange) PostMessage(pm, WM_COMMAND, idArrange, 0L);
+        fit_windows(g_prevW, g_prevH);
+        dbgnum("pvmon: arranged desktop shell to", w, h);
+        return;
+    }
     /* On a narrow display the shell is kept to a comfortable strip rather than the whole screen,
        so the host can magnify that strip and still show all of it. */
     if (g_shellW && (unsigned)cx > g_shellW) cx = (int)g_shellW;
@@ -587,20 +642,25 @@ static void patch_user_metrics(unsigned w, unsigned h)
    Applied at start-up and again on CMD_SHELLSIZE (the frame height follows the browser's bars).
    The locations come from find_user_state, which must run before the first application does. */
 static unsigned g_fakeScreen;
-static void apply_fake_screen(void)
+/* SM_CXSCREEN/SM_CYSCREEN (and the FULLSCREEN pair, which is the screen less the caption: the
+   difference is kept) set to w x h: the phone frame under FakeScreen, the real screen again in
+   desktop mode. */
+static void set_screen_metrics(unsigned w, unsigned h)
 {
     WORD __far *met;
+    if (!g_patchReady || !w || !h) return;
+    met = PVFP(g_userDS, g_offSysMet);
+    met[SM_CXFULLSCREEN] = (WORD)(w - (met[SM_CXSCREEN] - met[SM_CXFULLSCREEN]));
+    met[SM_CYFULLSCREEN] = (WORD)(h - (met[SM_CYSCREEN] - met[SM_CYFULLSCREEN]));
+    met[SM_CXSCREEN] = (WORD)w;
+    met[SM_CYSCREEN] = (WORD)h;
+}
+static void apply_fake_screen(void)
+{
     unsigned w = g_shellW, h = g_shellH;
     char buf[112];
     if (!g_fakeScreen || !g_patchReady || !w || !h) return;
-    met = PVFP(g_userDS, g_offSysMet);
-    if (g_fakeScreen & 1) {
-        /* the full-screen metrics are the screen less the caption: keep the difference */
-        met[SM_CXFULLSCREEN] = (WORD)(w - (met[SM_CXSCREEN] - met[SM_CXFULLSCREEN]));
-        met[SM_CYFULLSCREEN] = (WORD)(h - (met[SM_CYSCREEN] - met[SM_CYFULLSCREEN]));
-        met[SM_CXSCREEN] = (WORD)w;
-        met[SM_CYSCREEN] = (WORD)h;
-    }
+    if (g_fakeScreen & 1) set_screen_metrics(w, h);
     if (g_fakeScreen & 2) {
         int i; WORD base = (WORD)GetDesktopWindow();
         for (i = 0; i < g_nDeskRc; i++) {
@@ -633,6 +693,41 @@ static void apply_fake_screen(void)
                  (int)g_realW - 100, a.x, b.x, c.x);
         dbg(buf);
     }
+}
+/* CMD_DESKTOP: switch between the phone layout and desktop mode (see g_desktop). The metrics go
+   back to the real screen (or to the phone frame again), the hook is told, and the arrangement is
+   left to finish_mode_switch once the host's mode has settled: the host asks for the viewport's
+   size right after this, and the windows should be laid out once, for that screen. */
+static void set_desktop_mode(BOOL on)
+{
+    if (on == g_desktop) { send_pvd(); return; }
+    g_desktop = on;
+    if (on) {
+        g_phoneW = g_shellW; g_shellW = 0;
+        if (g_fakeScreen & 1) set_screen_metrics(g_realW, g_realH);
+    } else {
+        g_shellW = g_phoneW;
+        apply_fake_screen();
+    }
+    hook_set_shell();                                    /* PvHookSetDesktop is part of it */
+    g_modeSwitch = TRUE; g_switchPolls = 0;
+    g_lastPub[0] = 0;
+    dbgnum(on ? "pvmon: desktop mode, metrics" : "pvmon: phone mode, metrics",
+           (unsigned)GetSystemMetrics(SM_CXSCREEN), (unsigned)GetSystemMetrics(SM_CYSCREEN));
+    send_pvd();
+}
+/* The screen is now what the host will show: arrange the shell (desktop: a normal window; phone:
+   the column), bring every window on to it, publish, and tell the host the desktop is ready (PVA:
+   it composites, launches the URL's program and, on a phone, sends the column height). */
+static void finish_mode_switch(BOOL remoded)
+{
+    g_modeSwitch = FALSE;
+    if (!remoded) { g_prevW = 0; g_prevH = 0; }          /* fit_windows: nothing to refill */
+    arrange_shell();
+    if (g_desktop) ArrangeIconicWindows(GetDesktopWindow());   /* icons back along the real bottom */
+    g_lastPub[0] = 0;
+    dbg("PVA");
+    heartbeat();
 }
 /* A program that calls ClipCursor(NULL) gets USER's idea of the screen, which under FakeScreen may
    be the phone frame: the pointer could then never reach a slot column. Put the real one back. */
@@ -1223,7 +1318,7 @@ static void publish_layout(void)
                 HWND mdi = GetWindow(g_wnds[i].hwnd, GW_CHILD);
                 if (mdi) SendMessage(mdi, WM_MDIICONARRANGE, 0, 0L);
             }
-            else if (IsZoomed(g_wnds[i].hwnd) &&
+            else if (g_shellW && IsZoomed(g_wnds[i].hwnd) &&
                      (src.right > (int)g_shellW || src.bottom > (int)g_shellH - ICON_ROW)) {
                 /* the hook makes the shell's maximised rectangle its column; a shell zoomed past
                    it means the hook was not there, so fall back to restore-and-arrange */
@@ -1233,13 +1328,14 @@ static void publish_layout(void)
         }
     for (i = 0; i < g_nWnds; i++)
         if (g_wnds[i].kind == 'A' || g_wnds[i].kind == 'I') {
-            slot = slot_of(g_wnds[i].hwnd);
-            if (slot >= 0 && g_wnds[i].kind == 'A') park(g_wnds[i].hwnd, slot);
+            slot = slot_of(g_wnds[i].hwnd);               /* slots are still assigned: the host's handles */
+            if (slot >= 0 && g_wnds[i].kind == 'A' && !g_desktop) park(g_wnds[i].hwnd, slot);
         }
     /* Windows arranges minimised icons along the bottom of the 970-row screen, but the visible
        shell column is only as tall as the phone shows, so icons are moved up into the free row
-       at the bottom of the column. Windows keeps drawing them; only where changes. */
-    {
+       at the bottom of the column. Windows keeps drawing them; only where changes. (Desktop mode:
+       Windows arranges its own icons, and dialogs sit where their programs put them.) */
+    if (!g_desktop) {
         /* Icons sit in cells of SM_CXICONSPACING (WIN.INI IconSpacing=100) across the column, so
            the centred label under each fits inside the column too; a fourth icon starts a second
            row above. An icon is placed when it is first seen minimised, or when it has left the
@@ -1290,6 +1386,7 @@ static void publish_layout(void)
             if (slotk >= 0) { g_iconPos[slotk].hwnd = g_wnds[i].hwnd; g_iconPos[slotk].x = rc.left; g_iconPos[slotk].y = rc.top; }
         }
     }
+    if (!g_desktop)
     for (i = 0; i < g_nWnds; i++)
         if (g_wnds[i].kind == 'O') {
             RECT rc, orc;
@@ -1423,6 +1520,7 @@ static void ship_print_job(void)
 #define CMD_SHELLSIZE 8    /* arg: shell column height; the host knows the real viewport, we do not */
 #define CMD_SETPOS   9     /* string "x,y": put the pointer there (absolute, for a tap) */
 #define CMD_CURSOR   10    /* arg 0: hide the pointer (touch screen), 1: show it */
+#define CMD_DESKTOP  11    /* arg 1: desktop mode (whole screen 1:1, no columns or clamps), 0: phone layout */
 
 static BOOL g_hideCursor = FALSE;
 static void enforce_cursor(void)
@@ -1468,26 +1566,24 @@ static void run_host_command_1(void)
     if (cmd == CMD_SHELLSIZE) {
         /* The shell column is arranged to the height the host can actually show (browser
            toolbars vary), so the desktop fills the phone edge to edge with no letterboxing. */
-        char b[64];
         if (arg >= 300 && arg <= (unsigned)(int)g_realH) g_shellH = arg;
         GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
+        if (g_desktop) { send_pvd(); return; }          /* kept for the way back; no column to arrange */
         apply_fake_screen();
         hook_set_shell();
         arrange_shell();
-        wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
-        dbg(b);
+        send_pvd();
         g_lastPub[0] = 0;
         heartbeat();
         return;
     }
     if (cmd == CMD_REPUBLISH) {
-        char b[64];
-        wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
-        dbg(b);
+        send_pvd();
         dbg("PVA");
         g_lastPub[0] = 0;
         return;
     }
+    if (cmd == CMD_DESKTOP) { set_desktop_mode(arg != 0); return; }
     if (cmd == CMD_SCROLL) {
         /* Two-finger scrolling from the host: arg = slot | direction << 8 | lines << 12, slot byte
            15 meaning the shell (Program Manager's active group). The thing that scrolls is found in order: the
@@ -1674,7 +1770,9 @@ static BOOL live_remode(unsigned w, unsigned h)
     SetCursorPos(pt.x, pt.y);
     ShowCursor(TRUE);
     InvalidateRect(NULL, NULL, TRUE);        /* repaint everything we can reach */
-    arrange_shell();
+    if (g_modeSwitch) return TRUE;           /* finish_mode_switch arranges for the new screen */
+    if (g_desktop) fit_windows(g_prevW, g_prevH);   /* a desktop resize: windows stay where they are, on screen */
+    else arrange_shell();
     return TRUE;
 }
 
@@ -1694,7 +1792,7 @@ static void poll(HWND hwnd)
     if (w < 320 || h < 200) return;
     g_hostW = w; g_hostH = h;
     if (g_dlgReflow) check_dialogs();
-    if (g_shellW) {
+    if (g_shellW || g_desktop) {
         static unsigned n;
         run_host_command();
         /* the hook published a list of its own (a dialog came or went): ours must follow, even if
@@ -1708,8 +1806,8 @@ static void poll(HWND hwnd)
     curH = (int)g_realH;
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
     if (w != g_wantW || h != g_wantH) { g_wantW = w; g_wantH = h; g_stable = 0; return; }
-    if (w == curW && h == curH) { g_stable = 0; return; }
-    if (g_live && w == g_doneW && h == g_doneH) { g_stable = 0; return; }
+    if (w == curW && h == curH) { g_stable = 0; if (g_modeSwitch && ++g_switchPolls >= SETTLE_POLLS) finish_mode_switch(FALSE); return; }
+    if (g_live && w == g_doneW && h == g_doneH) { g_stable = 0; if (g_modeSwitch && ++g_switchPolls >= SETTLE_POLLS) finish_mode_switch(FALSE); return; }
     if (++g_stable < SETTLE_POLLS) return;
     dbgnum("pvmon: host wants", w, h);
     if (g_live && live_remode(w, h)) {
@@ -1717,6 +1815,7 @@ static void poll(HWND hwnd)
            remember what we applied instead of comparing against it, or we would keep
            re-triggering and fall through to the restart below. */
         g_doneW = w; g_doneH = h; g_stable = 0;
+        if (g_modeSwitch) finish_mode_switch(TRUE);
         return;
     }
     dbgnum("pvmon: exiting Windows from", curW, curH);
@@ -1753,13 +1852,11 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         /* The screen is now one row of columns, so the shell column is the full screen height
            unless SYSTEM.INI says otherwise. */
         if (!g_shellH) g_shellH = (unsigned)(int)g_realH;
-        if (g_shellW) {
-            char b[64];
-            /* The caption height lets the host tell the caption row of the chrome apart from
-               the menu row below it, so each can be composited on its own terms. */
-            wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
-            dbg(b);
-        }
+        g_phoneW = g_shellW;
+        /* The caption height lets the host tell the caption row of the chrome apart from the menu
+           row below it, so each can be composited on its own terms; the mode letter tells it
+           whether this is the phone layout or the desktop (CMD_DESKTOP switches). */
+        if (g_shellW) send_pvd();
         if (g_live) dbg("pvmon: live re-mode enabled");
         if (g_live || g_fakeScreen) find_user_state();
         if (g_shellW) apply_fake_screen();          /* before the shell and the first program size themselves */

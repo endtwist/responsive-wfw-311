@@ -27,7 +27,8 @@
   #pres { position:fixed; inset:0; z-index:1; touch-action:none; display:block; image-rendering: pixelated; }
   #screen_container canvas { display:block; touch-action:none;
                              transition: width .18s ease-out, height .18s ease-out; }
-  /* the previous frame, held over the top across a resize so the screen does not flash */
+  /* The page draws nothing of its own on any display: the desktop is the whole viewport (the old
+     development toolbar only exists with ?dev=1, built by app.js). */
   #bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:10px; align-items:center;
          padding:6px 10px calc(6px + env(safe-area-inset-bottom)); background:rgba(0,0,0,.75);
          z-index:2; font-size:11px; }
@@ -37,8 +38,6 @@
      does not zoom the page when it takes the focus. */
   #kbd { position:fixed; left:0; top:0; width:2px; height:2px; padding:0; border:0; margin:0; opacity:0.01;
          font-size:16px; pointer-events:none; z-index:0; background:transparent; color:transparent; caret-color:transparent; }
-/* On a phone the page shows nothing of its own: no toolbar, the desktop is the whole viewport. */
-.phone #bar { display: none; }
 .phone #pres { height: 100dvh; }
 /* Keyboard accessory bar: the one piece of host chrome, docked to the top of the soft keyboard
    for the keys iOS does not have (Esc, Tab, arrows, F-keys, Ctrl/Alt). Hidden otherwise. */
@@ -72,15 +71,4 @@
   <canvas style="display:none"></canvas>
 </div>
 <input id="kbd" type="text" inputmode="text" enterkeyhint="enter" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="keyboard input">
-<div id="bar">
-  <span id="status">loading</span>
-  <span id="mode"></span>
-  <span id="zoom"></span>
-  <button id="zoomout">&minus;</button>
-  <button id="zoomin">+</button>
-  <button id="zoomfit">fit</button>
-  <button id="kbdbtn">keyboard</button>
-  <button id="savebtn">save</button>
-  <button id="resetbtn">fresh boot</button>
-</div>
 <script type="module" src="app.js"></script>

@@ -8,6 +8,7 @@
 #                         repo, JEZZ.EXE "JezzBall" is picked up when dropped in — see SPEC 2026-09-02)
 # then apply SYSTEM.INI edits via tools/inied.py.
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
+#        Desktop mode (SPEC 2026-09-02) is a runtime switch (CMD_DESKTOP): the image is always the phone layout.
 #        [fakescreen=1|0] ([PVMon] FakeScreen: USER reports the phone frame as the screen, SPEC 2026-09-02) [hookclamp=1|0] (0 = PVHOOK measuring mode, never ship)
 #        [spooler=yes|no] [printer=PSCRIPT|TTY]  -- which of the two installed printers is the default:
 #        "PDF Printer" (PSCRIPT.DRV, HP LaserJet III PostScript, graphics) or "Text Printer" (TTY.DRV,
