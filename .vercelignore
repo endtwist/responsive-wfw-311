@@ -1,0 +1,34 @@
+# What the Vercel deployment carries: the page (web/), the v86 ES modules the page imports
+# (v86/src, v86/lib), the wasm and the BIOSes, and exactly the disk image + boot snapshot named
+# by image/current.json. tools/deploy.sh rewrites the two stamped image lines from current.json.
+.claude
+.git
+.vercel
+node_modules
+guest
+tools
+shots
+build
+*.md
+.DS_Store
+package.json
+package-lock.json
+
+image/*
+!image/current.json
+!image/boot-20260902-153606.state.gz
+!image/parts
+image/parts/*
+!image/parts/work-phone-20260902-153606
+
+v86/*
+!v86/src
+!v86/lib
+!v86/build
+!v86/bios
+v86/src/rust
+v86/build/*
+!v86/build/v86.wasm
+v86/bios/*
+!v86/bios/seabios.bin
+!v86/bios/vgabios.bin

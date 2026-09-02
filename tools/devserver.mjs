@@ -166,6 +166,17 @@ http.createServer((req, res) => {
   // The service worker is registered with scope "/" from /web/sw.js: allowed here, and a real
   // deployment must send the same header (or serve sw.js from the root).
   if (url === "/web/sw.js") headers["Service-Worker-Allowed"] = "/";
+  // The committed manifest is the production one (start_url "/"). A phone installed from the dev
+  // server is the parked remote-control device, so here the start_url carries the dev query.
+  if (url === "/web/manifest.webmanifest") {
+    const m = JSON.parse(fs.readFileSync(file, "utf8"));
+    m.start_url = "/?remote=phone&diag=1";
+    const body = JSON.stringify(m, null, 2);
+    delete headers["Last-Modified"];
+    headers["Content-Length"] = Buffer.byteLength(body);
+    res.writeHead(200, headers);
+    return res.end(req.method === "HEAD" ? undefined : body);
+  }
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
   if (range) {
     let start = range[1] === "" ? Math.max(0, size - Number(range[2])) : Number(range[1]);
