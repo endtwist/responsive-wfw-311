@@ -1878,3 +1878,71 @@ no Browser-pane tab was free).
   made in the same minutes from a tree without `vercel.json`/parts (404s on wasm, BIOSes, image;
   worker rejected for scope). Whoever deploys must run `tools/deploy.sh` from a tree that has the
   image built, or production regresses to that state.
+
+### 2026-09-02 — FakeScreen: what Windows does when it believes the screen is 352 x shellH (PVMON v33)
+Experiment (this entry's task): make USER report the phone frame as the screen while the frame
+buffer stays 2560x970, and measure, path by path, what changes natively and what breaks. PVMON
+already locates USER's `rgwSysMet`, the desktop window's rectangles and GDI's cached GDIINFO for
+the live re-mode (`find_user_state`); `apply_fake_screen()` writes the phone frame into them at
+start-up and on every `CMD_SHELLSIZE`. `[PVMon] FakeScreen` is a bit mask so each copy was measured
+alone: 1 = `SM_CXSCREEN/SM_CYSCREEN` (+`SM_CX/CYFULLSCREEN`, caption difference kept), 2 = the
+desktop window rectangles, 4 = GDI `HORZRES/VERTRES`. `[PVMon] HookClamp=0` is the measuring mode
+of PVHOOK: the WM_GETMINMAXINFO / WM_WINDOWPOSCHANGING / HCBT_ACTIVATE size clamps are off and
+the hook logs what USER offered (`pvhook: minmax <cls> default max WxH at x,y track WxH`), a
+CW_USEDEFAULT position is left to USER's cascade. PVMON itself now reads the real size from
+`g_realW/H` (cached before anything is patched): with the metrics faked, `poll()`'s comparison
+against the host's mode would otherwise have exited Windows on the first tick.
+
+Measured headless (`tools/probe.mjs`, new: boots v86 in node cold from an image in about 10 s, no
+pane, runs a step list over the bus, saves a boot snapshot with `--save`; `shots/probe-*.txt`),
+variants ctl (nothing faked), fs1 (1, clamps off), fs3 (1+2), fs7 (1+2+4), p1 (1, clamps on),
+p5 (1+4, clamps on):
+
+| Path | Faked metrics (1) | Desktop rect (2) | GDI caps (4) | Verdict |
+|---|---|---|---|---|
+| Maximise (`WM_GETMINMAXINFO` defaults) | `2568x978 at -4,-4 track 2568x978` for Notepad, Write, Paintbrush, File Manager, Control Panel, Solitaire, Calculator, the DOS box, Program Manager | same | same | USER's defaults come from a cached table (the "screen pair" `find_screen_pair` hunts for), not from `rgwSysMet`, the desktop rect or GDI. Faking that table would also cap `ptMaxTrackSize` for every window (Character Map 785, Hearts 540 would be clamped). **The hook's clamp stays.** |
+| Paintbrush default window | 1280x892 (clamps on), 1280x849 (clamps off) | 1280x849 | 1280x849 | Half the *real* width in every variant: Paintbrush does not read any of the three. **Per-app `Size.PBRUSH` stays.** |
+| Control Panel | born 352x339 natively (`first seen "Control Panel" 0,0 352x339`; ctl: `pvhook: clamp CtlPanelClass 471x283 -> 352x283`) | - | - | Lays its icon grid out to `SM_CXSCREEN`: the one stock program that sizes itself right with the fake. `DefaultSize` then makes it 352x600 as before. |
+| Menus / popups | Notepad File menu `644,83 140x196`, File Manager `682,83 247x340` — identical to ctl | same | same | USER does not clamp popups to `rgwSysMet`: a menu at x=644 stays at x=644. **Safe.** |
+| Pointer clipping | `pointer probe to x=2460: as-is 2460, after ClipCursor(NULL) 2460, after ClipCursor(real) 2460`; absolute taps at 2000,500 land | same | same | The cursor clip rectangle follows neither copy. **Safe** (`keep_cursor_free()` re-clips to the real frame buffer if a program's `ClipCursor(NULL)` ever shrinks it; it never fired). |
+| Painting outside the fake screen | Notepad at 640,0 paints (`pix 640,0 352x600: 5 colours`) | **nothing paints**: `pix 640,0 352x600: 1 colours, top 247:100%` for Notepad, Paintbrush, the DOS box | as (1) | USER clips every top-level window's visible region to the desktop rectangles. **Bit 2 is fatal; the desktop rect must stay real.** |
+| MessageBox centring | Notepad's save box `640,535 352x225` below its owner (hook) | - | - | Owned dialogs are placed by the hook at birth whatever the screen says; unchanged. |
+| CW_USEDEFAULT cascade (clamps off) | Notepad `4,0`, Write `172,172`, Control Panel `0,215`, DOS box `260,258`, second Notepad `308,301` | same | same | The cascade wraps inside the fake screen as expected; irrelevant with the hook on (it puts every application at x=640). |
+| Task List | centres itself on the fake screen (x<0), the hook's HCBT_ACTIVATE rule moves it to a column: `1280,0 370x264` | - | - | Unchanged result. |
+| Solitaire 593x471, Hearts 540x480 (+ welcome 531x252), Character Map 785x278, Calculator 293x349, DOS box 352x360, File Manager, Write | identical to ctl | - | - | Lay out by window size, as predicted. |
+| Owned dialog placement in a slot (hook `place_owned`, `clamp_windowpos`) | with (1) alone the hook read `GetSystemMetrics(SM_CYSCREEN)` = 760 as the column height, so Notepad's Open box (318 tall) no longer fitted below a 600-tall owner and was centred on it: tour `dlgsep FAIL 640,141,604,318/640,0,352,600` | - | - | Fixed: PVMON passes the real height (`PvHookSetReal`), the hook's slot-column geometry uses `real_h()`. |
+
+So the hybrid is: `SM_CXSCREEN/SM_CYSCREEN` (and FULLSCREEN) faked, desktop rectangles and the
+cursor clip real, the hook's maximise clamp and birth sizing kept (they are not redundant: USER's
+maximise defaults and Paintbrush's default do not follow the metrics), the hook told the real
+column height. GDI caps (4) changed nothing measurable either way and stay off. What the fake buys
+natively is small: Control Panel's grid, anything that centres on the screen landing inside the
+shell column instead of at x≈1100 (system-modal boxes PVMON cannot move), and CW_USEDEFAULT
+positions inside the frame; it removes none of the existing clamps.
+
+Tour comparison (`node tools/tour.mjs`, headless, same tour code, both images built from this
+branch after rebasing on main's PVMON v32 → v33; ctl2 = `fakescreen=0`, p1b = `fakescreen=1`,
+`hookclamp=1` both; earlier pre-rebase runs: main v31 baseline 139/9, p1 135/10 before the
+`PvHookSetReal` fix, p5 (1+4) 140/11):
+
+| | ctl2 (FakeScreen=0) | p1b (FakeScreen=1) |
+|---|---|---|
+| TOUR-END | pass=146 fail=5 time=170s | pass=146 fail=5 time=170s |
+| failures | CALENDAR `winexec=2` (not in the image), PBRUSH `fit 640x424>352x760` ×1 | identical |
+| NOTEPAD dlg | dlg/dlg1/dlgsep/dlgclose pass (Open box `640,600 604x318` below the owner) | identical |
+| TERMINAL | fit pass (v32 clamps it at birth) | pass |
+| CONTROL | 352x600 (`DefaultSize`), born `352x283` clamped | 352x600, born `352x339` natively |
+| every other row | pass / `info:fixed` as in the v31 table | identical |
+
+Identical pass/fail, so per the rule set for this experiment FakeScreen is **on by default**
+(`build-image.sh fakescreen=1`, WIN.INI `[PVMon] FakeScreen=1`; `fakescreen=0` turns it off,
+`hookclamp=0` is measuring only and must never ship: without the clamps USER maximises to
+2568x978 and PVMON's park() has to restore it). Nothing in PVHOOK was removed: the measurement
+shows none of its clamps is made redundant by the metrics (maximise, Paintbrush, Terminal all size
+from elsewhere). Recommendation: keep the invariant where it is (PVHOOK), treat FakeScreen as a
+cheap correctness improvement for programs that read `GetSystemMetrics` (Control Panel's grid,
+screen-centred system-modal boxes now land in the shell column, CW_USEDEFAULT inside the frame),
+and do not pursue the desktop-rect or tracking-table fakes: the first blanks every slot column, the
+second would cap every window at the frame. Diff kept to new functions plus switches:
+`apply_fake_screen`/`keep_cursor_free`/`g_realW,H` in pvmon.c, `g_hookClamp`/`real_h`/`PvHookSetReal`
+in pvhook.c, `fakescreen=`/`hookclamp=` in build-image.sh, `tools/probe.mjs`.

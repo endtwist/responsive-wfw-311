@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 32     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 33     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -97,6 +97,10 @@ static HOOKTAKEDIRTY g_takeDirty;
    the scheduler. Such windows are left alone even while IsWindow still says yes. */
 static BOOL is_dead(HWND h) { return g_isDead ? g_isDead(h) : FALSE; }
 static unsigned g_shellW, g_shellH;
+/* The frame buffer's real size, read once before anything is patched. With FakeScreen on (below)
+   GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN) answers the phone frame, so PVMON's own geometry
+   (slot columns, the re-mode check against the host's size) must read these instead. */
+static unsigned g_realW, g_realH;
 /* The hook DLL enforces the geometry invariant in every task; it needs the shell column's
    runtime height, which only the host knows and PVMON receives (CMD_SHELLSIZE). */
 static void hook_set_shell(void)
@@ -105,6 +109,9 @@ static void hook_set_shell(void)
     if (!g_hookDll) return;
     set = (HOOKSETSHELL)GetProcAddress(g_hookDll, "PvHookSetShell");
     if (set) set((int)g_shellW, (int)g_shellH);
+    /* the real frame buffer height: the slot columns are that tall whatever FakeScreen says */
+    set = (HOOKSETSHELL)GetProcAddress(g_hookDll, "PvHookSetReal");
+    if (set) set((int)g_realW, (int)g_realH);
 }
 static void install_hook(void)
 {
@@ -217,8 +224,8 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
 static void fit_windows(unsigned prevW, unsigned prevH)
 {
     FARPROC proc;
-    g_fitW = GetSystemMetrics(SM_CXSCREEN);
-    g_fitH = GetSystemMetrics(SM_CYSCREEN);
+    g_fitW = (int)g_realW;
+    g_fitH = (int)g_realH;
     g_prevW = prevW; g_prevH = prevH;
     proc = MakeProcInstance((FARPROC)FitWindow, g_hInst);
     if (!proc) return;
@@ -266,7 +273,7 @@ static void arrange_shell(void)
 {
     HWND pm, mdi, active;
     UINT idArrange;
-    int cx = GetSystemMetrics(SM_CXSCREEN), cy = GetSystemMetrics(SM_CYSCREEN);
+    int cx = (int)g_realW, cy = (int)g_realH;
     pm = FindWindow("Progman", NULL);
     if (!pm) return;
     /* A minimised window's rectangle IS its icon: sizing it to the column here (the phone's
@@ -568,6 +575,78 @@ static void patch_user_metrics(unsigned w, unsigned h)
     }
 }
 
+/* FakeScreen (SPEC 2026-09-02): make Windows believe the screen is the phone frame while the
+   frame buffer stays the wide row of columns. Programs size and place themselves from
+   GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN): Paintbrush opens at half the screen, maximise fills
+   the screen, message boxes and Task List centre on it, CW_USEDEFAULT cascades across it. With
+   the metrics faked all of that happens natively for a 352-column screen and the per-app clamps
+   become redundant. WIN.INI [PVMon] FakeScreen is a bit mask so each copy can be measured alone:
+     1  rgwSysMet SM_CXSCREEN/SM_CYSCREEN and SM_CXFULLSCREEN/SM_CYFULLSCREEN (the phone frame)
+     2  the desktop window's rectangles (USER clips window painting and cursor movement to them)
+     4  GDI's cached HORZRES/VERTRES (GetDeviceCaps)
+   Applied at start-up and again on CMD_SHELLSIZE (the frame height follows the browser's bars).
+   The locations come from find_user_state, which must run before the first application does. */
+static unsigned g_fakeScreen;
+static void apply_fake_screen(void)
+{
+    WORD __far *met;
+    unsigned w = g_shellW, h = g_shellH;
+    char buf[112];
+    if (!g_fakeScreen || !g_patchReady || !w || !h) return;
+    met = PVFP(g_userDS, g_offSysMet);
+    if (g_fakeScreen & 1) {
+        /* the full-screen metrics are the screen less the caption: keep the difference */
+        met[SM_CXFULLSCREEN] = (WORD)(w - (met[SM_CXSCREEN] - met[SM_CXFULLSCREEN]));
+        met[SM_CYFULLSCREEN] = (WORD)(h - (met[SM_CYSCREEN] - met[SM_CYFULLSCREEN]));
+        met[SM_CXSCREEN] = (WORD)w;
+        met[SM_CYSCREEN] = (WORD)h;
+    }
+    if (g_fakeScreen & 2) {
+        int i; WORD base = (WORD)GetDesktopWindow();
+        for (i = 0; i < g_nDeskRc; i++) {
+            WORD __far *rc = PVFP(g_userDS, base + g_deskRc[i]);
+            rc[2] = (WORD)w; rc[3] = (WORD)h;
+        }
+    }
+    if ((g_fakeScreen & 4) && g_gdiDS) {
+        WORD __far *caps = PVFP(g_gdiDS, g_offCaps);
+        caps[HORZRES / 2] = (WORD)w;
+        caps[VERTRES / 2] = (WORD)h;
+    }
+    wsprintf(buf, "pvmon: fake screen %u: metrics %dx%d full %dx%d, real %ux%u", g_fakeScreen,
+             GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+             GetSystemMetrics(SM_CXFULLSCREEN), GetSystemMetrics(SM_CYFULLSCREEN), g_realW, g_realH);
+    dbg(buf);
+    {   /* Can the pointer still reach the slot columns? USER clips it to a rectangle of its own;
+           measure what that rectangle follows: as it is, after ClipCursor(NULL), after an explicit
+           ClipCursor of the real frame buffer. */
+        POINT was, a, b, c; RECT r;
+        GetCursorPos(&was);
+        SetCursorPos((int)g_realW - 100, 400); GetCursorPos(&a);
+        ClipCursor(NULL);
+        SetCursorPos((int)g_realW - 100, 400); GetCursorPos(&b);
+        r.left = 0; r.top = 0; r.right = (int)g_realW; r.bottom = (int)g_realH;
+        ClipCursor(&r);
+        SetCursorPos((int)g_realW - 100, 400); GetCursorPos(&c);
+        SetCursorPos(was.x, was.y);
+        wsprintf(buf, "pvmon: pointer probe to x=%d: as-is %d, after ClipCursor(NULL) %d, after ClipCursor(real) %d",
+                 (int)g_realW - 100, a.x, b.x, c.x);
+        dbg(buf);
+    }
+}
+/* A program that calls ClipCursor(NULL) gets USER's idea of the screen, which under FakeScreen may
+   be the phone frame: the pointer could then never reach a slot column. Put the real one back. */
+static void keep_cursor_free(void)
+{
+    RECT rc, r;
+    if (!g_fakeScreen) return;
+    GetClipCursor(&rc);
+    if (rc.right >= (int)g_realW && rc.bottom >= (int)g_realH) return;
+    r.left = 0; r.top = 0; r.right = (int)g_realW; r.bottom = (int)g_realH;
+    ClipCursor(&r);
+    dbgnum("pvmon: cursor clip was", (unsigned)rc.right, (unsigned)rc.bottom);
+}
+
 /* Phase 3 step 3a: ask the driver to re-mode the adapter underneath a running Windows.
    The driver updates its own surface state and GDI's copy of the screen BITMAP. GDI's
    cached device caps and USER's screen metrics are still the old size at this point, so
@@ -810,6 +889,13 @@ static int slot_of(HWND hwnd)
         if (free < 0 && slot_free(i)) free = i;   /* a closed program's window lingers hidden while its task exits */
     if (free < 0) return -1;
     g_slotWnd[free] = hwnd;
+    {   /* where the program (and USER) put it before PVMON touched it: the measure of what the
+           screen metrics made it do */
+        char t[24], b[80]; t[0] = 0; GetWindowText(hwnd, t, sizeof(t));
+        wsprintf(b, "pvmon: first seen \"%s\" %d,%d %dx%d%s", (LPSTR)t, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                 (LPSTR)(IsZoomed(hwnd) ? " zoomed" : ""));
+        dbg(b);
+    }
     return free;
 }
 static BOOL double_slot(HWND hwnd, int slot) { return slot >= 0 && slot + 1 < MAX_SLOTS && g_slotWnd[slot + 1] == hwnd; }
@@ -907,14 +993,14 @@ static int max_height_for(HWND hwnd)
     char path[128], key[48], *base, *p;
     HINSTANCE inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
     int h;
-    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return GetSystemMetrics(SM_CYSCREEN);
+    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return (int)g_realH;
     base = path;
     for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
     for (p = base; *p && *p != '.'; p++) ;
     *p = 0;
     wsprintf(key, "MaxHeight.%s", (LPSTR)base);
     h = GetProfileInt("PVMon", key, 0);
-    return (h > 100 && h < GetSystemMetrics(SM_CYSCREEN)) ? h : GetSystemMetrics(SM_CYSCREEN);
+    return (h > 100 && h < (int)g_realH) ? h : (int)g_realH;
 }
 
 /* Per-module initial size, applied once per window: [PVMon] Size.WINOA386=400x340 makes a
@@ -987,7 +1073,7 @@ static void apply_initial_size(HWND hwnd, int slotX)
     for (p = val; *p >= '0' && *p <= '9'; p++) w = w * 10 + (*p - '0');
     if (*p == 'x') for (p++; *p >= '0' && *p <= '9'; p++) h = h * 10 + (*p - '0');
     if (w < 100 || h < 60) return;
-    SetWindowPos(hwnd, NULL, slotX, 0, min(w, (int)SLOT_W), min(h, GetSystemMetrics(SM_CYSCREEN)),
+    SetWindowPos(hwnd, NULL, slotX, 0, min(w, (int)SLOT_W), min(h, (int)g_realH),
                  SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -1015,7 +1101,7 @@ static void park(HWND hwnd, int slot)
 {
     RECT rc;
     int slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
-    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    int screenH = (int)g_realH;
     BOOL fixed, keep;
     int colW, maxW, maxH;
     apply_initial_size(hwnd, slotX);
@@ -1223,7 +1309,7 @@ static void publish_layout(void)
                 slotX = 0; colR = (int)g_shellW; frameH = (int)g_shellH;
             } else {
                 slotX = (int)SLOT_W * (slot + 1); colR = slotX + (int)SLOT_W;
-                frameH = GetSystemMetrics(SM_CYSCREEN);
+                frameH = (int)g_realH;
                 if (!fresh && rc.left >= slotX && rc.right <= colR) continue;
                 /* The hook places dialogs at birth where they do not cover their owner (below it
                    when the column has room, else to its right), so the owner's captured client
@@ -1383,8 +1469,9 @@ static void run_host_command_1(void)
         /* The shell column is arranged to the height the host can actually show (browser
            toolbars vary), so the desktop fills the phone edge to edge with no letterboxing. */
         char b[64];
-        if (arg >= 300 && arg <= (unsigned)GetSystemMetrics(SM_CYSCREEN)) g_shellH = arg;
+        if (arg >= 300 && arg <= (unsigned)(int)g_realH) g_shellH = arg;
         GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
+        apply_fake_screen();
         hook_set_shell();
         arrange_shell();
         wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
@@ -1543,7 +1630,7 @@ BOOL CALLBACK __export FindWideDialog(HWND hwnd, LPARAM lParam)
 static void check_dialogs(void)
 {
     FARPROC proc;
-    int screenW = g_shellW ? (int)g_shellW : GetSystemMetrics(SM_CXSCREEN);
+    int screenW = g_shellW ? (int)g_shellW : (int)g_realW;
     g_wideDlg = NULL;
     proc = MakeProcInstance((FARPROC)FindWideDialog, g_hInst);
     if (!proc) return;
@@ -1568,14 +1655,16 @@ static BOOL live_remode(unsigned w, unsigned h)
        pixels underneath. Re-moding with the cursor drawn leaves that state describing a
        screen that no longer exists, and USER's mouse path then stalls: mouse bytes stop
        being read from the controller entirely. Hide it across the change and show it after. */
-    g_prevW = GetSystemMetrics(SM_CXSCREEN);
-    g_prevH = GetSystemMetrics(SM_CYSCREEN);
+    g_prevW = (int)g_realW;
+    g_prevH = (int)g_realH;
     ShowCursor(FALSE);
     r = Escape(hdc, PV_REMODE, 0, NULL, NULL);
     ReleaseDC(NULL, hdc);
     dbgnum("pvmon: live re-mode returned", (unsigned)r, 0);
     if (r <= 0) { ShowCursor(TRUE); return FALSE; }
     patch_user_metrics(w, h);
+    g_realW = w; g_realH = h;
+    apply_fake_screen();
     /* Put the pointer somewhere that exists on the new screen and let USER recompute its
        clip rectangle from the metrics we just patched. */
     GetCursorPos(&pt);
@@ -1612,11 +1701,11 @@ static void poll(HWND hwnd)
            what we see is what we last said, or the host keeps the hook's snapshot (a closed DOS
            box "still published") */
         if (g_takeDirty && g_takeDirty()) g_lastPub[0] = 0;
-        if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); enforce_cursor(); }
+        if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); enforce_cursor(); keep_cursor_free(); }
         if (n % HEARTBEAT_POLLS == 0) { heartbeat(); ship_print_job(); }   /* about once a second */
     }
-    curW = GetSystemMetrics(SM_CXSCREEN);
-    curH = GetSystemMetrics(SM_CYSCREEN);
+    curW = (int)g_realW;
+    curH = (int)g_realH;
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
     if (w != g_wantW || h != g_wantH) { g_wantW = w; g_wantH = h; g_stable = 0; return; }
     if (w == curW && h == curH) { g_stable = 0; return; }
@@ -1647,7 +1736,10 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     case WM_CREATE: {
         HDC hdc; TEXTMETRIC tm; char buf[80];
         g_lastGen = rd(R_GEN);
+        g_realW = (unsigned)GetSystemMetrics(SM_CXSCREEN);
+        g_realH = (unsigned)GetSystemMetrics(SM_CYSCREEN);
         g_live = GetProfileInt("PVMon", "Live", 0) != 0;
+        g_fakeScreen = (unsigned)GetProfileInt("PVMon", "FakeScreen", 0);
         /* Shell dialogs wider than the column are reflowed only when what falls off is a column of
            buttons (Run 483 -> 327); anything else (About Program Manager 505x360, values beside
            labels) is left as laid out at x=0, clipped at the right. */
@@ -1657,10 +1749,10 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         g_shellH = (unsigned)GetProfileInt("PVMon", "ShellHeight", 0);
         /* The screen is now one row of columns, so the shell column is the full screen height
            unless WIN.INI says otherwise. */
-        if (!g_shellH) g_shellH = (unsigned)GetSystemMetrics(SM_CYSCREEN);
+        if (!g_shellH) g_shellH = (unsigned)(int)g_realH;
         /* The screen is now one row of columns, so the shell column is the full screen height
            unless SYSTEM.INI says otherwise. */
-        if (!g_shellH) g_shellH = (unsigned)GetSystemMetrics(SM_CYSCREEN);
+        if (!g_shellH) g_shellH = (unsigned)(int)g_realH;
         if (g_shellW) {
             char b[64];
             /* The caption height lets the host tell the caption row of the chrome apart from
@@ -1668,11 +1760,13 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
             dbg(b);
         }
-        if (g_live) { dbg("pvmon: live re-mode enabled"); find_user_state(); }
+        if (g_live) dbg("pvmon: live re-mode enabled");
+        if (g_live || g_fakeScreen) find_user_state();
+        if (g_shellW) apply_fake_screen();          /* before the shell and the first program size themselves */
         if (g_shellW) install_hook();
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);
-        dbgnum("pvmon: up, screen", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        dbgnum("pvmon: up, screen", (int)g_realW, (int)g_realH);
         /* What GDI actually ended up with: driver DPI vs the font SYSTEM.INI loaded. If these
            disagree, text metrics and layout will not match the glyphs being drawn. */
         hdc = GetDC(hwnd);

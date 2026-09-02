@@ -5,13 +5,14 @@
 #   changes/root/*     -> C:\
 # then apply SYSTEM.INI edits via tools/inied.py.
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
+#        [fakescreen=1|0] ([PVMon] FakeScreen: USER reports the phone frame as the screen, SPEC 2026-09-02) [hookclamp=1|0] (0 = PVHOOK measuring mode, never ship)
 #        [spooler=yes|no] [printer=PSCRIPT|TTY]  -- which of the two installed printers is the default:
 #        "PDF Printer" (PSCRIPT.DRV, HP LaserJet III PostScript, graphics) or "Text Printer" (TTY.DRV,
 #        Generic / Text Only); both print to the file port C:\PRINT.PRN, which PVMON ships to the host.
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; esac; done
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
@@ -54,7 +55,7 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 W=$SHELLW; [ "$W" = 0 ] && W=352
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH" \
+  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
   "windows.device=$( [ "$PRINTER" = TTY ] && echo "Text Printer,TTY" || echo "PDF Printer,PSCRIPT" ),C:\\PRINT.PRN" \
@@ -81,7 +82,7 @@ mcopy -n $M ::/WINDOWS/PROGMAN.INI $TMP/PROGMAN.INI
 python3 ../tools/winini.py $TMP/PROGMAN.INI "Settings.Window=0 0 $W $(( ${SHELLH:-760} - 88 )) 1"
 mcopy -o $M $TMP/PROGMAN.INI ::/WINDOWS/PROGMAN.INI
 rm -rf $TMP
-echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD live=$LIVE"
+echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD live=$LIVE fakescreen=$FAKESCREEN hookclamp=$HOOKCLAMP"
 # Immutable builds: a running session must never see its disk change underneath it (a snapshot
 # restored from one build over another build's image gives "Segment Load Failure"). Each build is
 # cloned to a stamped name and current.json names the image and the matching boot snapshot the

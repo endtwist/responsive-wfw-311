@@ -42,6 +42,16 @@ static HHOOK g_cbt, g_cwp, g_mouse;
 static int g_tapOpens = -1;          /* [PVMon] TapOpens: a single tap opens Program Manager items */
 static BOOL g_installed;
 static int g_shellW, g_shellH;       /* the phone frame, from PVMON (runtime) or WIN.INI */
+/* [PVMon] HookClamp=0 switches the size clamps off (WM_GETMINMAXINFO, WM_WINDOWPOSCHANGING, the
+   HCBT_ACTIVATE self-size clamp, the CW_USEDEFAULT birth position) and logs what USER would have
+   done instead: the measuring mode for FakeScreen (SPEC 2026-09-02). Birth sizing stays. */
+static int g_hookClamp = 1;
+/* The frame buffer's real height (PvHookSetReal, from PVMON). Under FakeScreen GetSystemMetrics
+   answers the phone frame, but the slot columns are as tall as the frame buffer: an owned dialog
+   goes below its owner only if the real column has room, or Notepad's Open box (318 tall under a
+   600-tall owner in a 760 frame) lands centred on its owner and is captured twice. */
+static int g_realH;
+static int real_h(void) { return g_realH ? g_realH : GetSystemMetrics(SM_CYSCREEN); }
 
 /* The WH_CALLWNDPROC hook's lParam points at the message's parameters as SendMessage pushed
    them (Windows 3.1 has no CWPSTRUCT typedef of its own). */
@@ -133,7 +143,7 @@ static int shell_w(void)
 static int shell_h(void)
 {
     if (!g_shellH) g_shellH = GetProfileInt("PVMon", "ShellHeight", 0);
-    if (!g_shellH) g_shellH = GetSystemMetrics(SM_CYSCREEN);
+    if (!g_shellH) g_shellH = GetSystemMetrics(SM_CYSCREEN);   /* boot: nothing is faked yet */
     return g_shellH;
 }
 
@@ -363,7 +373,7 @@ static void place_owned(HWND owner, int w, int h, int FAR *px, int FAR *py)
         x = (orc.left + orc.right - w) / 2;
         y = (orc.top + orc.bottom - h) / 2;
     } else {
-        colX = (orc.left / SLOT_W) * SLOT_W; colR = colX + SLOT_W; frameH = GetSystemMetrics(SM_CYSCREEN);
+        colX = (orc.left / SLOT_W) * SLOT_W; colR = colX + SLOT_W; frameH = real_h();
         if (orc.bottom + h <= frameH)      { x = orc.left;  y = orc.bottom; }
         else if (orc.right + w <= colR)    { x = orc.right; y = orc.top; }
         else { x = (orc.left + orc.right - w) / 2; y = (orc.top + orc.bottom - h) / 2; }
@@ -492,11 +502,13 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
                 w = rc.right - rc.left; ht = rc.bottom - rc.top;
                 if (w > maxW || ht > maxH) {
                     char line[80];
-                    wsprintf(line, "pvhook: %s sized itself %dx%d, clamped to %dx%d", (LPSTR)cls, w, ht,
+                    wsprintf(line, "pvhook: %s sized itself %dx%d, %s to %dx%d", (LPSTR)cls, w, ht,
+                             (LPSTR)(g_hookClamp ? "clamped" : "NOT clamped (HookClamp=0)"),
                              w > maxW ? maxW : w, ht > maxH ? maxH : ht);
                     pv_dbg(line);
-                    SetWindowPos(h, NULL, rc.left, rc.top, w > maxW ? maxW : w, ht > maxH ? maxH : ht,
-                                 SWP_NOZORDER | SWP_NOACTIVATE);
+                    if (g_hookClamp)
+                        SetWindowPos(h, NULL, rc.left, rc.top, w > maxW ? maxW : w, ht > maxH ? maxH : ht,
+                                     SWP_NOZORDER | SWP_NOACTIVATE);
                 }
             }
         }
@@ -540,7 +552,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
         HWND hwnd = (HWND)wParam;
         LPCBT_CREATEWND cbt = (LPCBT_CREATEWND)lParam;
         LPCREATESTRUCT cs = cbt->lpcs;
-        char cls[24], mod[16], key[32], val[24];
+        char cls[24], mod[16], key[64], val[24];
         int w, h;
         WinInfo *wi;
         if (!shell_w()) goto pass;                                /* not the phone layout */
@@ -581,6 +593,12 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             if (cs->cx > max_w_for(wi)) cs->cx = max_w_for(wi);
             if (cs->cy > frame_h_for(wi, FALSE)) cs->cy = frame_h_for(wi, FALSE);
         }
+        if (cs->cx == CW_USEDEFAULT || cs->x == CW_USEDEFAULT) {
+            wsprintf(key, "pvhook: %s born CW_USEDEFAULT %s%s", (LPSTR)mod, (LPSTR)(cs->x == CW_USEDEFAULT ? "pos " : ""),
+                     (LPSTR)(cs->cx == CW_USEDEFAULT ? "size" : ""));
+            pv_dbg(key);
+            if (!g_hookClamp && cs->x == CW_USEDEFAULT) goto pass;    /* measuring: USER's cascade, PVMON parks it */
+        }
         cs->x = SLOT_W; cs->y = 0;
     }
 pass:
@@ -606,13 +624,26 @@ static void clamp_minmax(HWND hwnd, MINMAXINFO FAR *mmi)
     if (GetWindow(hwnd, GW_OWNER)) return;                       /* dialogs do not maximise */
     if (GetClassName(hwnd, cls, sizeof(cls)) <= 0 || transient_class(cls)) return;
     isShell = lstrcmp(cls, "Progman") == 0;
+    if (!g_hookClamp) {
+        /* measuring: what USER offers (its defaults come from the screen metrics), once per change */
+        static HWND lastH; static int lastX, lastY;
+        if (hwnd != lastH || mmi->ptMaxSize.x != lastX || mmi->ptMaxSize.y != lastY) {
+            char line[96];
+            lastH = hwnd; lastX = mmi->ptMaxSize.x; lastY = mmi->ptMaxSize.y;
+            wsprintf(line, "pvhook: minmax %s default max %dx%d at %d,%d track %dx%d (not clamped)", (LPSTR)cls,
+                     mmi->ptMaxSize.x, mmi->ptMaxSize.y, mmi->ptMaxPosition.x, mmi->ptMaxPosition.y,
+                     mmi->ptMaxTrackSize.x, mmi->ptMaxTrackSize.y);
+            pv_dbg(line);
+        }
+        return;
+    }
     if (!isShell) wi = learn(hwnd, cls, NULL, 0);
     wp.length = sizeof(wp);
     if (!isShell && GetWindowPlacement(hwnd, &wp) && wp.rcNormalPosition.left >= SLOT_W)
         colX = (wp.rcNormalPosition.left / SLOT_W) * SLOT_W;   /* the column it lives in, even when iconic */
     if (isShell) { colX = 0; w = shell_w(); h = frame_h_for(NULL, TRUE); }
     else if (wi->fixed || wi->keep) {
-        int maxW = wi->fixed ? 2 * SLOT_W : SLOT_W, maxH = wi->fixed ? GetSystemMetrics(SM_CYSCREEN) : frame_h_for(wi, FALSE);
+        int maxW = wi->fixed ? 2 * SLOT_W : SLOT_W, maxH = wi->fixed ? real_h() : frame_h_for(wi, FALSE);
         w = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
         h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
         if (w < 100 || h < 60) return;                 /* still being built (Minesweeper sizes itself later) */
@@ -656,7 +687,7 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
         x = (wp->flags & SWP_NOMOVE) ? rc.left : wp->x;
         y = (wp->flags & SWP_NOMOVE) ? rc.top : wp->y;
         if (orc.left < SLOT_W) { colX = 0; colR = shell_w(); frameH = shell_h(); }
-        else { colX = (orc.left / SLOT_W) * SLOT_W; colR = colX + SLOT_W; frameH = GetSystemMetrics(SM_CYSCREEN); }
+        else { colX = (orc.left / SLOT_W) * SLOT_W; colR = colX + SLOT_W; frameH = real_h(); }
         if (x + w > colR) x = colR - w;
         if (x < colX) x = colX;
         if (y + h > frameH) y = frameH - h;
@@ -680,6 +711,7 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
         return;
     }
     if (wp->flags & SWP_NOSIZE) return;
+    if (!g_hookClamp) return;
     if (lstrcmp(cls, "Progman") == 0) {
         if (wp->cx > shell_w()) wp->cx = shell_w();
         if (wp->cy > shell_h()) wp->cy = shell_h();
@@ -756,6 +788,8 @@ BOOL FAR PASCAL __export PvHookInstall(void)
     g_cbt = SetWindowsHookEx(WH_CBT, (HOOKPROC)PvCbtProc, g_hInst, NULL);
     g_cwp = SetWindowsHookEx(WH_CALLWNDPROC, (HOOKPROC)PvCwpProc, g_hInst, NULL);
     g_tapOpens = GetProfileInt("PVMon", "TapOpens", 1);
+    g_hookClamp = GetProfileInt("PVMon", "HookClamp", 1);
+    if (!g_hookClamp) pv_dbg("pvhook: HookClamp=0, size clamps off (measuring)");
     g_mouse = g_tapOpens > 0 ? SetWindowsHookEx(WH_MOUSE, (HOOKPROC)PvMouseProc, g_hInst, NULL) : NULL;
     g_installed = g_cbt != NULL;
     if (!g_cwp) pv_dbg("pvhook: WH_CALLWNDPROC hook failed");
@@ -763,6 +797,7 @@ BOOL FAR PASCAL __export PvHookInstall(void)
 }
 
 /* The shell column's runtime size (the host knows the real viewport; PVMON relays it). */
+void FAR PASCAL __export PvHookSetReal(int w, int h) { if (h > 0) g_realH = h; }
 void FAR PASCAL __export PvHookSetShell(int w, int h)
 {
     if (w > 0) g_shellW = w;
