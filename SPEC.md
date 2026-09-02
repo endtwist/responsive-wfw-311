@@ -1346,3 +1346,9 @@ in `shots/devicelog.txt`); "phone" items below are what still needs the real dev
   periodic frame save skip; `pvWatchdog()` / `pvSaveFrame()` force them) and a synthetic tap must
   dispatch touchstart and touchend in the same JS call (a tool round-trip between them is >500 ms
   and becomes a long press).
+- Follow-up (same day): with the page booted at `/solitaire`, the tour attributed Solitaire's rect to
+  Notepad — PVMON publishes the layout only on change, so a tracker registered late had an empty
+  `before` set and took the first PVW it saw. Now: the tour asks for a republish first, closes every
+  pre-existing non-shell layer (recorded as `preexisting=` / `cleaned=` in TOUR-BEGIN), and matches
+  the launched program's window by a title pattern per app (`match=title`), falling back to the
+  newly occupied slot (`match=slot`).

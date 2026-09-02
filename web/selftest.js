@@ -26,29 +26,29 @@ const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, f: 0x21, 
    (PVK 1: an Edit/ComboBox/tty control or a [PVMon] KeyboardApps module). `dialog`: how to get
    one owned dialog cheaply. `timeout`: how long its main window may take to appear. */
 export const APPS = [
-  { name: "NOTEPAD",  cmd: "NOTEPAD.EXE",  text: true,  dialog: "alt-f-o" },
-  { name: "WRITE",    cmd: "WRITE.EXE",    dialog: "alt-f-o" },
-  { name: "CALC",     cmd: "CALC.EXE" },
-  { name: "CLOCK",    cmd: "CLOCK.EXE" },
-  { name: "CHARMAP",  cmd: "CHARMAP.EXE" },
-  { name: "CARDFILE", cmd: "CARDFILE.EXE", text: true },
-  { name: "CALENDAR", cmd: "CALENDAR.EXE" },
-  { name: "PBRUSH",   cmd: "PBRUSH.EXE",   dialog: "pbrush" },
-  { name: "SOL",      cmd: "SOL.EXE" },
-  { name: "WINMINE",  cmd: "WINMINE.EXE" },
-  { name: "MSHEARTS", cmd: "MSHEARTS.EXE", dialog: "launch" },
-  { name: "WINFILE",  cmd: "WINFILE.EXE" },
-  { name: "CONTROL",  cmd: "CONTROL.EXE" },
-  { name: "PRINTMAN", cmd: "PRINTMAN.EXE" },
-  { name: "CLIPBRD",  cmd: "CLIPBRD.EXE" },
-  { name: "SOUNDREC", cmd: "SOUNDREC.EXE" },
-  { name: "MPLAYER",  cmd: "MPLAYER.EXE" },
-  { name: "RECORDER", cmd: "RECORDER.EXE" },
-  { name: "TERMINAL", cmd: "TERMINAL.EXE", text: true },
-  { name: "PACKAGER", cmd: "PACKAGER.EXE" },
-  { name: "WINHELP",  cmd: "WINHELP.EXE" },
-  { name: "TASKMAN",  keys: "ctrl-esc" },
-  { name: "DOSPRMPT", cmd: "DOSPRMPT.PIF", text: true, timeout: 40000 },
+  { name: "NOTEPAD",  cmd: "NOTEPAD.EXE",  title: /^Notepad/,        text: true,  dialog: "alt-f-o" },
+  { name: "WRITE",    cmd: "WRITE.EXE",    title: /^Write/,          dialog: "alt-f-o" },
+  { name: "CALC",     cmd: "CALC.EXE",     title: /^Calculator/ },
+  { name: "CLOCK",    cmd: "CLOCK.EXE",    title: /^Clock/ },
+  { name: "CHARMAP",  cmd: "CHARMAP.EXE",  title: /^Character Map/ },
+  { name: "CARDFILE", cmd: "CARDFILE.EXE", title: /^Cardfile/,       text: true },
+  { name: "CALENDAR", cmd: "CALENDAR.EXE", title: /^Calendar/ },
+  { name: "PBRUSH",   cmd: "PBRUSH.EXE",   title: /^Paintbrush/,     dialog: "pbrush" },
+  { name: "SOL",      cmd: "SOL.EXE",      title: /^Solitaire/ },
+  { name: "WINMINE",  cmd: "WINMINE.EXE",  title: /^Minesweeper/ },
+  { name: "MSHEARTS", cmd: "MSHEARTS.EXE", title: /Hearts/,          dialog: "launch" },
+  { name: "WINFILE",  cmd: "WINFILE.EXE",  title: /^File Manager/ },
+  { name: "CONTROL",  cmd: "CONTROL.EXE",  title: /^Control Panel/ },
+  { name: "PRINTMAN", cmd: "PRINTMAN.EXE", title: /^Print Manager/ },
+  { name: "CLIPBRD",  cmd: "CLIPBRD.EXE",  title: /^Clip[Bb]o/ },
+  { name: "SOUNDREC", cmd: "SOUNDREC.EXE", title: /^Sound Recorder/ },
+  { name: "MPLAYER",  cmd: "MPLAYER.EXE",  title: /^Media Player/ },
+  { name: "RECORDER", cmd: "RECORDER.EXE", title: /^Recorder/ },
+  { name: "TERMINAL", cmd: "TERMINAL.EXE", title: /^Terminal/,       text: true },
+  { name: "PACKAGER", cmd: "PACKAGER.EXE", title: /^Object Packager/ },
+  { name: "WINHELP",  cmd: "WINHELP.EXE",  title: /Help/ },
+  { name: "TASKMAN",  keys: "ctrl-esc",    title: /^Task List/ },
+  { name: "DOSPRMPT", cmd: "DOSPRMPT.PIF", title: /^MS-DOS/,         text: true, timeout: 40000 },
 ];
 
 /* ------------------------------------------------------------------------------ time
@@ -219,8 +219,20 @@ export async function tour(env, opts = {}) {
   }
   if (!st.shell.h && env.hostState) { const s = env.hostState(); if (s && s.shell) st.shell = { ...st.shell, ...s.shell }; }
   if (!st.shell.h) { bus("pv-command", [CMD_REPUBLISH, 0]); await until(() => st.shell.h, 5000); }
+  /* PVMON publishes the layout only when it changes, so a tracker registered late knows nothing
+     until something moves: ask for the full picture, then start from a clean desktop so windows
+     already open (the page booted at /solitaire) can never be taken for the launched one. */
+  if (env.hostState) { const s = env.hostState(); if (s && s.layers && !st.layers.length) st.layers = s.layers.slice(); }
+  { const seq = st.pubSeq; bus("pv-command", [CMD_REPUBLISH, 0]); await until(() => st.pubSeq !== seq, 4000); }
+  const preexisting = st.layers.filter(L => L.kind !== "S").map(L => `${L.kind}${L.slot}:${L.title}`);
+  let cleaned = "none";
+  if (preexisting.length) {
+    for (const L of st.layers.filter(l => l.kind === "O" || l.kind === "T")) await press(SC.esc);
+    for (const L of st.layers.filter(l => l.kind === "W")) await closeApp(L.slot, {});
+    cleaned = (await until(() => !st.layers.some(l => l.kind === "W" || l.kind === "O"), 10000)) ? "ok" : "fail:" + st.layers.filter(l => l.kind !== "S").map(l => l.kind + l.slot).join("|");
+  }
   const mips0 = await mips();
-  post(`TOUR-BEGIN apps=${apps.length} shell=${st.shell.w}x${st.shell.h} pvmon=v${st.shell.ver} mips=${mips0.toFixed(1)} clock=${clock.driven} dom=${!!env.dom} ua=${env.ua}`);
+  post(`TOUR-BEGIN apps=${apps.length} shell=${st.shell.w}x${st.shell.h} pvmon=v${st.shell.ver} mips=${mips0.toFixed(1)} clock=${clock.driven} dom=${!!env.dom} preexisting=${preexisting.length ? preexisting.join("|") : "-"} cleaned=${cleaned} ua=${env.ua}`);
 
   const rows = [];
   let dead = false;
@@ -235,7 +247,17 @@ export async function tour(env, opts = {}) {
       /* launch */
       if (app.keys === "ctrl-esc") await chord(SC.ctrl, SC.esc);
       else bus("pv-command-string", [CMD_RUN, app.cmd]);
-      const L = await until(() => st.layers.find(x => x.kind === "W" && !before.has(x.slot)), app.timeout || 15000);
+      /* The launched program's window: by title, preferring a slot that was free before the
+         launch; a new slot alone is the fallback (untitled or renamed windows). */
+      const claimed = new Set(st.layers.filter(x => x.kind === "W").map(x => `${x.slot}:${x.title}`));
+      const findWin = () => {
+        const ws = st.layers.filter(x => x.kind === "W");
+        return ws.find(x => !before.has(x.slot) && app.title && app.title.test(x.title))
+            || ws.find(x => app.title && app.title.test(x.title) && !claimed.has(`${x.slot}:${x.title}`))
+            || ws.find(x => !before.has(x.slot) && (!app.title || !ws.some(y => y !== x && !before.has(y.slot))));
+      };
+      const L = await until(findWin, app.timeout || 15000);
+      row.match = L ? (app.title && app.title.test(L.title) ? "title" : "slot") : undefined;
       row.tLaunch = Math.round(performance.now() - ta);
       if (!L) {
         const x = st.layers.find(l => l.kind === "X");
@@ -332,7 +354,7 @@ export async function tour(env, opts = {}) {
 }
 
 export function fmtRow(r) {
-  const order = ["launch", "fit", "slot", "scale", "tap", "kbd", "focus", "launchdlg", "dlg", "dlg1", "dlgfit", "dlgsep", "dlgpix", "dlgclose", "close", "layer", "alive", "error"];
+  const order = ["launch", "match", "fit", "slot", "scale", "tap", "kbd", "focus", "launchdlg", "dlg", "dlg1", "dlgfit", "dlgsep", "dlgpix", "dlgclose", "close", "layer", "alive", "error"];
   const parts = [r.app.padEnd(8)];
   for (const k of order) if (r[k] !== undefined) parts.push(`${k}=${r[k]}`);
   if (r.t !== undefined) parts.push(`t=${r.t}`);
