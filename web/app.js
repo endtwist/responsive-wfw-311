@@ -886,7 +886,7 @@ const SURFACE_POLICY = [
   [/^File Manager/, "scroll"], [/^Control Panel/, "scroll"], [/^Print Manager/, "scroll"], [/^Task List/, "scroll"],
   [/^Calendar\b/, "scroll"], [/^Character Map/, "scroll"], [/^Media Player/, "scroll"], [/^Clipboard/, "scroll"],
   [/^Solitaire/, "drag"], [/^Paintbrush/, "drag"], [/^Minesweeper/, "drag"], [/^Hearts/, "drag"], [/MS-DOS/, "drag"],
-  [/^Terminal/, "drag"], [/^Reversi/, "drag"], [/^SkiFree/, "drag"], [/^JezzBall/, "drag"],
+  [/^Terminal/, "drag"], [/^Reversi/, "drag"], [/^SkiFree/, "hover"], [/^JezzBall/, "drag"],   // hover: the skier follows the pointer; a swipe moves it without pressing
 ];
 /* CMD_SCROLL's slot field for the shell: PVMON routes it to Program Manager's active MDI group
    window (WM_VSCROLL/WM_HSCROLL). Slot numbers 0..MAX_SLOTS-1 are application columns. */
@@ -1832,6 +1832,7 @@ function installTouch() {
      window the press started in (line messages through PVMON, like two fingers), never a pointer
      drag. A finger that never travels is still a click. */
   let oneScroll = null, shellPan = null;
+let hoverSurface = false;
   const down = ev => {
     window.pvPhase = "down";
     consumed = pressStart(ev);
@@ -1844,6 +1845,7 @@ function installTouch() {
       else if (insideShellDialog(h0) && tallShellDialogBottom(view.h) > view.h) { pol = "pan"; title = "shell dialog"; }   // a tall shell dialog: pan the column
       else if (insideShellClient(h0)) { pol = "scroll"; slot = SHELL_SCROLL_SLOT; title = "Program Manager"; }   // PVMON targets the active group
       shellPan = pol === "pan" ? { startY: py, base: shellPanY, panning: false } : null;
+      hoverSurface = pol === "hover";
       oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, t0: performance.now() } : null; }
     // A quick second tap near the first is a double-click: Windows 3.1 only pairs clicks a few
     // pixels apart, and fingers do not repeat to the pixel, so the second tap reuses the first
@@ -1857,7 +1859,7 @@ function installTouch() {
     }
     { const { px, py } = hostPoint(ev); lastTap = { t: now, px, py, pt, dragged: false }; }
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}${oneScroll ? " policy=scroll" : ""}`); noteInput(`down ${h.kind} ${pt.x},${pt.y} ${h.win && h.win.title || ""}`); }
-    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py), scrollSurface: !!oneScroll };
+    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py), scrollSurface: !!oneScroll, hover: hoverSurface };
     pressActive = true;
     queue(async () => {
       await placePointer(pt);
@@ -1914,7 +1916,7 @@ function installTouch() {
       G.dragging = true;
       if (lastTap) lastTap.dragged = true;
       queue(async () => {                       // after the pointer has been placed: press, then follow
-        button(true, false); await sleep(30);
+        if (!G.hover) { button(true, false); await sleep(30); }   // a hover surface (SkiFree) just moves the pointer
         await follow(G);
       });
     }
@@ -1993,7 +1995,7 @@ function installTouch() {
     }
     if (!G.dragging && !G.longFired && ev && ev.type === "touchend") tapKeyboard(G.hit);
     queue(async () => {
-      if (G.dragging) { button(false, false); diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
+      if (G.dragging) { if (!G.hover) button(false, false); diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
       if (G.longFired) return;
       button(true, false); await sleep(60); button(false, false);   // tap is a left click
     });
@@ -2010,7 +2012,7 @@ function installTouch() {
       noteInput("two-finger start");
       oneScroll = null;
       const G = g;
-      if (G) { G.active = false; clearTimeout(G.timer); if (G.dragging) queue(async () => button(false, false)); g = null; }
+      if (G) { G.active = false; clearTimeout(G.timer); if (G.dragging && !G.hover) queue(async () => button(false, false)); g = null; }
       const m = mid(ev.touches);
       const win = layerUnder(m);
       let slot = win && win.slot >= 0 ? win.slot : -1;
