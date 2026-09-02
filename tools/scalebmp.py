@@ -5,7 +5,7 @@ The display driver's system bitmaps (OBM_*: caption boxes, scroll arrows, check 
 size of Windows' own chrome, so a scaled set makes captions, scroll bars and buttons thumb-sized
 with nothing but Windows' own pixels. Handles BITMAPCOREHEADER (Windows 2.x, 16-bit width and
 height, used by the DDK's RES96 set) and BITMAPINFOHEADER files, 1/4/8 bpp.
-Usage: scalebmp.py FACTOR IN.BMP OUT.BMP
+Usage: scalebmp.py FACTOR IN.BMP OUT.BMP   (FACTOR may be fractional, e.g. 1.5)
 """
 import struct, sys
 
@@ -23,7 +23,7 @@ def scale(data, n):
     top_down = h < 0
     h = abs(h)
     stride = (w * bpp + 31) // 32 * 4
-    W, H = w * n, h * n
+    W, H = round(w * n), round(h * n)
     STRIDE = (W * bpp + 31) // 32 * 4
 
     def px(row, x):
@@ -36,12 +36,13 @@ def scale(data, n):
         row = data[off_bits + y * stride: off_bits + (y + 1) * stride]
         new = bytearray(STRIDE)
         for x in range(W):
-            v = px(row, x // n)
+            v = px(row, min(w - 1, int(x / n)))
             if bpp == 8: new[x] = v
             elif bpp == 4: new[x >> 1] |= v << (4 if x & 1 == 0 else 0)
             else: new[x >> 3] |= v << (7 - (x & 7))
-        out_rows.extend([bytes(new)] * n)
-    pixels = b"".join(out_rows)
+        out_rows.append(bytes(new))
+    # rows: nearest-neighbour too, so a fractional factor repeats some rows and not others
+    pixels = b"".join(out_rows[min(h - 1, int(Y / n))] for Y in range(H))
 
     head = bytearray(data[:off_bits])
     if hdr_size == 12:
@@ -53,5 +54,5 @@ def scale(data, n):
     return bytes(head) + pixels
 
 if __name__ == "__main__":
-    n, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+    n, src, dst = float(sys.argv[1]), sys.argv[2], sys.argv[3]
     open(dst, "wb").write(scale(open(src, "rb").read(), n))

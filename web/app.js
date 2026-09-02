@@ -58,7 +58,7 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
  * concerned the windows sit side by side on one wide screen.
  */
 const pageStart = performance.now();
-const SHELL_W = 448;             // width of the shell column on a narrow display
+const SHELL_W = 400;             // width of the shell column on a narrow display (must match build-image shellw=)
 const SLOT_W = 640;              // width of each application column (must match pvmon.c)
 const MAX_SLOTS = 3;             // application columns (must match pvmon.c)
 const WIN_MARGIN = 8;

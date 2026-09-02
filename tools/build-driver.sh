@@ -22,11 +22,11 @@ rsync -a --delete --exclude OBJ "$REPO/guest/driver/port/" "$ROOT/DRV/"
 RESSET=96; for a in "$@"; do case $a in res=*) RESSET=${a#*=};; esac; done
 # The RC carries two sets: OBM_* (used at 120 dpi) are the bitmaps in RES31/, OBM_96_* (96 dpi) in
 # RES96/. res=192 swaps both for their 2x versions (RES31X2/, RES192/).
-if [ "$RESSET" != 96 ]; then
-  cp "$REPO/guest/driver/port/RES$RESSET/"*.BMP "$ROOT/DRV/RES96/"
-  [ -d "$REPO/guest/driver/port/RES31X2" ] && cp "$REPO/guest/driver/port/RES31X2/"*.BMP "$ROOT/DRV/RES31/"
-  echo "using RES$RESSET / RES31X2 bitmaps" >&2
-fi
+# res=150 -> RES31X15 (1.5x), res=192 -> RES31X2 (2x) for the 120-dpi set; the 96-dpi set is left alone.
+case "$RESSET" in
+  150) cp "$REPO/guest/driver/port/RES31X15/"*.BMP "$ROOT/DRV/RES31/"; echo "using RES31X15 bitmaps" >&2;;
+  192) cp "$REPO/guest/driver/port/RES31X2/"*.BMP "$ROOT/DRV/RES31/"; echo "using RES31X2 bitmaps" >&2;;
+esac
 find "$ROOT/DRV" -type f ! -path '*/OBJ/*' \( -iname '*.asm' -o -iname '*.inc' -o -iname '*.mac' -o -iname '*.blt' -o -iname '*.var' \
   -o -iname '*.mak' -o -iname 'makefile' -o -iname '*.def' -o -iname '*.rc' -o -iname '*.rcv' -o -iname '*.h' -o -iname 'lnkcmd*' -o -iname '*.pub' \) \
   -exec perl -pi -e 's/\r?\n/\r\n/' {} +

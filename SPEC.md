@@ -997,3 +997,9 @@ wrapped as `PVSYS.FON` (`tools/mkfon.py`, SYSTEM.INI `fonts.fon`), SM_CYCAPTION 
 54 and menus from ~26 to ~52 guest pixels: on a 375-wide phone the caption boxes are ~45 CSS px,
 Apple's 44 pt. Everything is Windows' own drawing. Costs: Program Manager's menu wraps to two rows
 at 448 columns (Help lands on the second row); icon titles keep their own smaller font.
+
+Tuned after Josh found 2x "way too big": 120-dpi bitmaps at 1.5x (`RES31X15/`, `res=150`),
+system font MS Sans Serif 14 pt / 24 px, shell column 400 x 866 (WIN.INI `ShellHeight`, matched to
+a 375x812 phone so the width binds and there are no side bars). Result on the phone: caption
+boxes ~38 px, menu row ~36 px, single-row Program Manager menu, icons ~30 px (32-px bitmaps at
+0.94; icons are the programs' own 32x32 images and only the column scale can make them bigger).
