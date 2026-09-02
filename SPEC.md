@@ -1446,3 +1446,25 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
 - Keybar: keys fire on tap release (touchstart passive) so the bar pans; `keyboardShift()` subtracts the bar height; a stale focused `#kbd` (keyboard dismissed by its own key) is blurred on touchstart so the next tap's focus is fresh.
 - Owned dialogs: the strip-fill mask smeared vertical streaks over the owner (Sound Recorder + Open). Removed. An O layer that still overlaps its owner in guest space is drawn coincident with its copy (transient-style, owner's client scale/position); one placed clear of the owner by the hook goes below the owner on the host too when there is room.
 - Image `work-phone-20260902-133432` (PVMON v22, PVHOOK invariant) + snapshot; Sound Recorder 407x241 with Open below it composites as one image; Program Manager 3 icons across.
+
+### 2026-09-02 — keyboard bar: density, Chrome-iOS autofill row, pan above the bar
+- Phone (Chrome iOS) showed three stacked rows: our bar (~56 px), Chrome's autofill accessory
+  (~70 px), the keyboard; ~380 px of guest left. Bar is now 34 px keys, 2 px gaps, 2 px vertical
+  padding + safe-area inset (39 px total, measured `bar=0,773 375x39` in the pane), flex row with
+  Esc Tab ←↑↓→ Ctrl Alt Del first, F-keys and Home/End/PgUp/PgDn/Ins behind the horizontal scroll,
+  the hide key sticky at the right.
+- The browser's own row cannot be drawn over; whether it appears depends on what kind of element
+  has the focus, which only the device can tell. The element kind is selectable with `?kbd=` and
+  logged (`kbd mode=… tag=… ua=…`): `ce` (contenteditable div, **default** — the candidate most
+  likely to be treated as "not a form field" by Chrome's autofill), `input` (text, autocomplete=off,
+  the old one), `otc` (autocomplete=one-time-code, hides password suggestions in Chrome), `search`,
+  `url` (with inputmode=text), `none` (inputmode=none: no soft keyboard at all). All are name-less.
+  The typed-character path reads `.value` or `.textContent` (`kbdRead`/`kbdClear`), ignores
+  `isComposing` input events and flushes on `compositionend`; Enter in the contenteditable arrives
+  as a newline and is sent as one. Pane: `ab`, `x⏎` -> `a b x \n`. **Phone item:** try
+  `?kbd=ce`, `otc`, `search`, `input` in Chrome iOS and Safari and note which show the autofill row;
+  the winner becomes the default.
+- `keyboardShift()` now pans the focused window's bottom edge to 4 px above *our* bar's real top
+  (`getBoundingClientRect`), which sits at the bottom of the visual viewport, i.e. on top of the
+  browser's row. `updateKeybar` logs `keybar bar=x,y WxH vv=offset+height/innerHeight scale shift
+  guestRoom=<px above the bar> mode=` whenever the geometry changes, for the parked phone.

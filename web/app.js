@@ -483,11 +483,12 @@ async function finishPrintJob(b64) {
    sticky for one key. The bar is only visible while the soft keyboard is up, docked to its top
    edge (the visual viewport's bottom), and it never takes the focus away from the hidden input. */
 const KEYBAR = [
-  ["⌄", "hide"], null,
-  ["Esc", [0x01]], ["Tab", [0x0F]], ["Ctrl", "ctrl"], ["Alt", "alt"], null,
-  ["←", [0xE0, 0x4B]], ["↑", [0xE0, 0x48]], ["↓", [0xE0, 0x50]], ["→", [0xE0, 0x4D]], null,
-  ["Home", [0xE0, 0x47]], ["End", [0xE0, 0x4F]], ["PgUp", [0xE0, 0x49]], ["PgDn", [0xE0, 0x51]], ["Ins", [0xE0, 0x52]], ["Del", [0xE0, 0x53]], null,
-  ["F1", [0x3B]], ["F2", [0x3C]], ["F3", [0x3D]], ["F4", [0x3E]], ["F5", [0x3F]], ["F6", [0x40]], ["F7", [0x41]], ["F8", [0x42]], ["F9", [0x43]], ["F10", [0x44]],
+  ["Esc", [0x01]], ["Tab", [0x0F]],
+  ["←", [0xE0, 0x4B], "arrow"], ["↑", [0xE0, 0x48], "arrow"], ["↓", [0xE0, 0x50], "arrow"], ["→", [0xE0, 0x4D], "arrow"],
+  ["Ctrl", "ctrl"], ["Alt", "alt"], ["Del", [0xE0, 0x53]], null,
+  ["F1", [0x3B]], ["F2", [0x3C]], ["F3", [0x3D]], ["F4", [0x3E]], ["F5", [0x3F]], ["F6", [0x40]], ["F7", [0x41]], ["F8", [0x42]], ["F9", [0x43]], ["F10", [0x44]], null,
+  ["Home", [0xE0, 0x47]], ["End", [0xE0, 0x4F]], ["PgUp", [0xE0, 0x49]], ["PgDn", [0xE0, 0x51]], ["Ins", [0xE0, 0x52]],
+  ["⌄", "hide"],
 ];
 /* Modifier state: 0 off, 1 armed for the next key (one tap), 2 locked (a second tap; stays until
    tapped again). Shown on the bar as `.on` and `.lock`. */
@@ -526,6 +527,7 @@ function buildKeybar() {
     const b = document.createElement("button");
     b.textContent = k[0]; b.dataset.key = k[0];
     if (k[1] === "hide") b.className = "hide";
+    if (k[2]) b.className = k[2];
     const act = ev => {
       ev.preventDefault();                                 // keep the hidden input focused
       if (k[1] === "hide") { hideKeyboard("bar"); return; }
@@ -568,11 +570,16 @@ function updateKeybar() {
   bar.classList.toggle("show", up);
   if (up) {
     const vv = window.visualViewport;
-    // dock to the bottom of the visible viewport, i.e. the top edge of the keyboard
+    // dock to the bottom of the visible viewport, i.e. the top edge of the keyboard (on Chrome for
+    // iOS that is the top of its own accessory row: it is part of the keyboard's height)
     bar.style.top = "auto";
     bar.style.bottom = (window.innerHeight - (vv.offsetTop + vv.height)) + "px";
-  }
+    const r = bar.getBoundingClientRect();
+    const line = `bar=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} vv=${Math.round(vv.offsetTop)}+${Math.round(vv.height)}/${innerHeight} scale=${vv.scale} shift=${keyboardShift()} guestRoom=${Math.round(r.top - safe.t)}px mode=${KBD_MODE}`;
+    if (line !== keybarLogged) { keybarLogged = line; diag("keybar " + line); }
+  } else keybarLogged = "";
 }
+let keybarLogged = "";
 if (window.visualViewport) { window.visualViewport.addEventListener("resize", updateKeybar); window.visualViewport.addEventListener("scroll", updateKeybar); }
 document.addEventListener("focusin", () => setTimeout(updateKeybar, 50));
 document.addEventListener("focusout", () => setTimeout(updateKeybar, 50));
@@ -584,6 +591,38 @@ setInterval(updateKeybar, 1000);                       // belt and braces: keybo
    end of a tap, by which time PVMON has usually reported the new focus. */
 let wantKeyboard = false, keyboardHeld = false;
 let kbdBlurTimer = 0, kbdSuppressedUntil = 0;
+/* The element that summons the keyboard. Chrome for iOS stacks its own autofill accessory row
+   (passwords, cards, location, dismiss) on top of any focused form field, about 70 px that we
+   cannot draw over; Safari has its own ‹ › Done row. Which element kinds avoid it is a per-browser
+   question, so the kind is selectable (?kbd=) and logged, and the default is the one most likely
+   to be treated as "not a form field": a contenteditable element.
+     ce      <div contenteditable>            (default)
+     input   <input type=text autocomplete=off>
+     otc     <input type=text autocomplete=one-time-code>   (hides password suggestions in Chrome)
+     search  <input type=search inputmode=text>
+     url     <input type=url inputmode=text>
+     none    <input inputmode=none>           (no soft keyboard at all: hardware keyboards only)
+   All of them raise input/beforeinput/keydown, so the typed-character path reads either .value or
+   .textContent (kbdRead/kbdClear). */
+const KBD_MODE = (params.get("kbd") || "ce").toLowerCase();
+function kbdRead(el) { return el.isContentEditable ? el.textContent : (el.value || ""); }
+function kbdClear(el) { if (el.isContentEditable) el.textContent = ""; else el.value = ""; }
+(function makeKeyboardElement() {
+  const old = document.getElementById("kbd");
+  if (!old) return;
+  let el;
+  if (KBD_MODE === "ce") { el = document.createElement("div"); el.contentEditable = "true"; el.setAttribute("role", "textbox"); }
+  else {
+    el = document.createElement("input");
+    el.type = KBD_MODE === "search" || KBD_MODE === "url" ? KBD_MODE : "text";
+    el.setAttribute("autocomplete", KBD_MODE === "otc" ? "one-time-code" : "off");
+  }
+  el.setAttribute("inputmode", KBD_MODE === "none" ? "none" : "text");
+  el.id = "kbd";
+  for (const [k, v] of [["autocorrect", "off"], ["autocapitalize", "off"], ["spellcheck", "false"], ["enterkeyhint", "enter"], ["aria-label", "keyboard input"], ["data-mode", KBD_MODE]]) el.setAttribute(k, v);
+  old.replaceWith(el);                                    // name-less on purpose: not an autofill target
+  report("kbd", `mode=${KBD_MODE} tag=${el.tagName} ua=${navigator.userAgent}`);
+})();
 const kbdTrace = [];
 function kbdLog(msg) {
   const vv = window.visualViewport;
@@ -603,12 +642,17 @@ function keyboardUp() {
 function keyboardShift() {
   if (!keyboardUp()) return 0;
   const bar = $("keybar");
-  const barH = bar && bar.classList.contains("show") ? bar.offsetHeight : 0;
-  const vh = window.visualViewport.height - safe.t - barH;   // the accessory bar covers the bottom of the visible part
+  const vv = window.visualViewport;
+  // The room above our bar, in layout coordinates: the bar sits at the bottom of the visual
+  // viewport (on top of the browser's own accessory row, which is inside the keyboard's height).
+  const barTop = bar && bar.classList.contains("show") ? bar.getBoundingClientRect().top : vv.offsetTop + vv.height;
+  const vh = Math.max(120, barTop - safe.t);
   const focused = placed.filter(w => w.kind === "W" || w.kind === "O").slice(-1)[0];
   if (!focused) return 0;
+  // The host does not know where the caret is; the window's bottom edge (where a DOS box or a
+  // Notepad file being typed into ends) is placed just above the bar, never past its own caption.
   const bottom = focused.y + focused.hh;
-  return bottom > vh ? Math.min(focused.y, bottom - vh + 8) : 0;
+  return bottom > vh ? Math.min(focused.y, bottom - vh + 4) : 0;
 }
 /* Focus the hidden input. Only works on iOS inside a touch gesture handler (touchend of the tap),
    so the touch code calls this synchronously; calls from elsewhere are harmless no-ops there and
@@ -620,7 +664,7 @@ function focusKeyboard(reason) {
   clearTimeout(kbdBlurTimer);
   const wasActive = document.activeElement === inp;
   if (wasActive && !keyboardUp() && touchDevice) inp.blur();
-  inp.value = "";
+  kbdClear(inp);
   try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
   kbdLog(`focus try (${reason}) wasActive=${wasActive}`);
   setTimeout(() => kbdLog(`focus result (${reason})`), 350);
@@ -659,7 +703,7 @@ function speculativeRelease() {
 function syncKeyboard() {
   const inp = $("kbd");
   if (!inp) return;
-  if ((wantKeyboard || keyboardHeld) && document.activeElement !== inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
+  if ((wantKeyboard || keyboardHeld) && document.activeElement !== inp) { kbdClear(inp); inp.focus({ preventScroll: true }); }
   else if (!wantKeyboard && !keyboardHeld && document.activeElement === inp) { inp.blur(); kbdLog("blur"); }
   setTimeout(updateKeybar, 100);
 }
@@ -1727,11 +1771,15 @@ function installTouch() {
 function installKeyboard() {
   const inp = $("kbd");
   buildKeybar(); updateKeybar();
-  $("kbdbtn").onclick = () => { inp.value = ""; inp.focus(); };
-  inp.addEventListener("input", () => {
-    for (const ch of inp.value) emulator.keyboard_send_text(ch);
-    inp.value = "";
+  $("kbdbtn").onclick = () => { kbdClear(inp); inp.focus(); };
+  inp.addEventListener("input", ev => {
+    if (ev.isComposing) return;                          // wait for the composition to end
+    const text = kbdRead(inp);
+    for (const ch of text) if (ch !== "\n" && ch !== "\r") emulator.keyboard_send_text(ch);
+    if (inp.isContentEditable && /\n/.test(text)) emulator.keyboard_send_text("\n");   // Enter in a contenteditable arrives as a newline
+    kbdClear(inp);
   });
+  inp.addEventListener("compositionend", () => { const t = kbdRead(inp); for (const ch of t) emulator.keyboard_send_text(ch); kbdClear(inp); });
   inp.addEventListener("keydown", ev => {
     if (ev.key === "Enter") { emulator.keyboard_send_text("\n"); ev.preventDefault(); }
     if (ev.key === "Backspace") { emulator.bus.send("keyboard-code", 0x0E); emulator.bus.send("keyboard-code", 0x8E); ev.preventDefault(); }
