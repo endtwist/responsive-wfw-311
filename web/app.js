@@ -612,14 +612,15 @@ function drawWindow(g, src, w) {
     }
   }
   if (menuRow > 0 && menuH > 0) {
-    const mwG = Math.min(w.ww, Math.round(w.hw / c)), mwH = Math.round(mwG * c);
-    blit(g, src, w.wx, w.wy + capRow, mwG, menuRow, w.x, w.y + capH, mwH, menuH);
-    if (w.hw > mwH)                                   // pad with the menu bar's own background
-      blit(g, src, w.wx + mwG - 2, w.wy + capRow, 2, menuRow, w.x + mwH, w.y + capH, w.hw - mwH, menuH);
+    const innerW = w.hw - 2 * hl;                     // between the side borders, never over them
+    const mwG = Math.min(w.ww - 2 * inset.l, Math.round(innerW / c)), mwH = Math.round(mwG * c);
+    blit(g, src, w.wx + inset.l, w.wy + capRow, mwG, menuRow, w.x + hl, w.y + capH, mwH, menuH);
+    if (innerW > mwH)                                 // pad with the menu bar's own background
+      blit(g, src, w.wx + inset.l + mwG - 2, w.wy + capRow, 2, menuRow, w.x + hl + mwH, w.y + capH, innerW - mwH, menuH);
   }
-  if (hl > 0) {                                       // side borders, stretched only lengthways
-    blit(g, src, w.wx, w.gy, inset.l, w.gh, w.x, w.y + ht, hl, w.ch);
-    blit(g, src, w.gx + w.gw, w.gy, inset.l, w.gh, w.x + hl + w.cw, w.y + ht, hl, w.ch);
+  if (hl > 0) {                                       // side borders, stretched only lengthways, caption to bottom
+    blit(g, src, w.wx, w.wy + capRow, inset.l, w.wh - capRow - inset.b, w.x, w.y + capH, hl, w.hh - capH - hb);
+    blit(g, src, w.wx + w.ww - inset.l, w.wy + capRow, inset.l, w.wh - capRow - inset.b, w.x + w.hw - hl, w.y + capH, hl, w.hh - capH - hb);
   }
   if (hb > 0)
     blit(g, src, w.wx, w.gy + w.gh, Math.min(w.ww, Math.round(w.hw / c)), inset.b,
