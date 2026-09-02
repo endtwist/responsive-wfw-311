@@ -1544,3 +1544,6 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   too (they were only in the table before). Guest side (PVMON owner): CMD_ACTIVATE/CMD_CLOSE on a
   slot whose window belongs to an exiting task should not block the poll — Print Manager with the
   spooler off is the reproduction (`node tools/tour.mjs --apps CONTROL,PRINTMAN,CLIPBRD --log`).
+- `--skip A,B` (headless) / `?skip=A,B` (page) leave apps out; with `--skip PRINTMAN` the other 22
+  complete headless and in the pane (Print Manager with the spooler off still stalls PVMON; see
+  follow-up 4 — a guest fix, after which the skip goes away).
