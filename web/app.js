@@ -1929,13 +1929,13 @@ let hoverSurface = false;
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}${oneScroll ? " policy=scroll" : ""}`); noteInput(`down ${h.kind} ${pt.x},${pt.y} ${h.win && h.win.title || ""}`); }
     // A real mouse has buttons of its own: its right button is the right button, a held left
     // button is a held left button (never a long-press right click).
-    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py), scrollSurface: !!oneScroll, hover: hoverSurface,
+    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py), scrollSurface: !!oneScroll, hover: hoverSurface, t0: performance.now(),
                     mouse: ev.type === "mousedown", right: ev.type === "mousedown" && ev.button === 2 };
     pressActive = true;
     queue(async () => {
       await placePointer(pt);
       if (!G.active || G.dragging) return;
-      if (G.scrollSurface || G.mouse) return;              // on a scroll surface the hold is decided on the release (or becomes a drag)
+      return;   // the hold is decided on the release for every surface: a still hold released = right click, a hold that moves = drag (a right-click firing mid-stroke erased Paintbrush strokes and swallowed the rest of the drag)
       G.timer = setTimeout(() => queue(async () => {          // long press is the right button
         if (!G.active || G.dragging) return;
         G.longFired = true;
@@ -2060,7 +2060,7 @@ let hoverSurface = false;
     }
     if (!G) return;
     if (S && S.scrolling) return;                       // a scroll ends with nothing pressed
-    if (S && !G.dragging && performance.now() - S.t0 >= LONG_PRESS_MS) {   // a hold released still: right button
+    if (!G.dragging && !G.longFired && !G.mouse && ev && ev.type === "touchend" && performance.now() - G.t0 >= LONG_PRESS_MS) {   // a hold released still: right button
       queue(async () => { button(true, true); await sleep(60); button(false, true); });
       return;
     }
