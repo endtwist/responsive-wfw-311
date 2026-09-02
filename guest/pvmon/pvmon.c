@@ -63,6 +63,25 @@ static unsigned g_prevW, g_prevH;   /* screen it is fitting from */
    re-maximised so they refill it; the rest are clamped, and shrunk if they no longer fit.
    This is the rest of SPEC 2.3's window wrangling: without it, a window that was maximised at
    the old size keeps that size, and windows can end up entirely off-screen after a shrink. */
+/* A re-mode leaves windows holding painted content that was clipped to the old screen, and
+   InvalidateRect(NULL, ...) only invalidates the desktop, not the windows on it. That is why a
+   dialog that opened just before the screen widened came back half drawn: the part of it beyond
+   the old screen width was never repainted. Invalidate each window and its controls explicitly. */
+static FARPROC g_repaintProc;
+
+BOOL CALLBACK __export RepaintChild(HWND hwnd, LPARAM lParam)
+{
+    InvalidateRect(hwnd, NULL, TRUE);
+    return TRUE;
+}
+
+static void repaint_tree(HWND hwnd)
+{
+    InvalidateRect(hwnd, NULL, TRUE);
+    if (g_repaintProc) EnumChildWindows(hwnd, (WNDENUMPROC)g_repaintProc, 0L);
+    UpdateWindow(hwnd);
+}
+
 BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
 {
     RECT rc;
@@ -74,22 +93,26 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
     /* Refill the screen for anything that filled the old one, whether it is formally maximised
        or merely sized to fit (which is how most of these apps open). Resizing directly is used
        rather than restore-then-maximise: Windows 3.x is cooperative, and the maximise only
-       takes effect once the owning task pumps messages, which it may not do for a while.
-       Windows smaller than the screen keep the size they were given and are just kept on it. */
+       takes effect once the owning task pumps messages, which it may not do for a while. */
     if (IsZoomed(hwnd) ||
         (g_prevW && g_prevH &&
          w >= (int)(g_prevW - g_prevW / 20) && h >= (int)(g_prevH - g_prevH / 20))) {
         SetWindowPos(hwnd, NULL, 0, 0, g_fitW, g_fitH, SWP_NOZORDER | SWP_NOACTIVATE);
+        repaint_tree(hwnd);
         return TRUE;
     }
-    if (w > (int)g_fitW) w = g_fitW;
-    if (h > (int)g_fitH) h = g_fitH;
-    if (x + w > (int)g_fitW) x = g_fitW - w;
-    if (y + h > (int)g_fitH) y = g_fitH - h;
+    /* Everything else keeps the size it was given and is only moved back on screen. Shrinking
+       these is what broke Solitaire on a narrow screen: its window was squashed to the screen
+       width and it re-laid its tableau into a column of overlapping cards. Applications of this
+       era lay out to their own window size, so a window that no longer fits is better left its
+       own size and pinned to the top left than resized into nonsense. */
+    if (x + w > (int)g_fitW) x = (int)g_fitW - w;
+    if (y + h > (int)g_fitH) y = (int)g_fitH - h;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
-    if (x != rc.left || y != rc.top || w != rc.right - rc.left || h != rc.bottom - rc.top)
-        SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    if (x != rc.left || y != rc.top)
+        SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    repaint_tree(hwnd);
     return TRUE;
 }
 
@@ -101,7 +124,9 @@ static void fit_windows(unsigned prevW, unsigned prevH)
     g_prevW = prevW; g_prevH = prevH;
     proc = MakeProcInstance((FARPROC)FitWindow, g_hInst);
     if (!proc) return;
+    g_repaintProc = MakeProcInstance((FARPROC)RepaintChild, g_hInst);
     EnumWindows((WNDENUMPROC)proc, 0L);
+    if (g_repaintProc) { FreeProcInstance(g_repaintProc); g_repaintProc = NULL; }
     FreeProcInstance(proc);
 }
 
@@ -436,29 +461,54 @@ static void patch_user_metrics(unsigned w, unsigned h)
    The driver updates its own surface state and GDI's copy of the screen BITMAP. GDI's
    cached device caps and USER's screen metrics are still the old size at this point, so
    the shell is expected to keep drawing at the old geometry until 3b/3c land. */
-/* Is a standard dialog on screen? Its window class is the one USER registers for dialogs. */
+/* How wide does the content on screen actually need the screen to be?
+ *
+ * Everything from this era lays out to a fixed size: dialogs are fixed templates, and an
+ * application window carries whatever layout it computed for its own size. A screen narrower
+ * than the widest window on it therefore either cuts that window off or, if the window is
+ * resized to fit, makes the application re-lay itself into nonsense -- which is what happened to
+ * Solitaire, whose tableau collapsed into a column of overlapping cards.
+ *
+ * So the screen is kept as small as the content allows and no smaller: small while it is only
+ * the desktop, which is what makes everything large and readable on a phone, and widened for
+ * exactly as long as something on it needs the room.
+ *
+ * An application's window is a special case, because Windows clamps a new window to the screen:
+ * open Solitaire on a 448-wide screen and its window is born 448 wide, which is below the size
+ * it needs to lay out a tableau at all, so it draws nothing and never asks for more. Measuring
+ * what is on screen cannot discover that. So any application window at all means the screen goes
+ * to a standard width, and the window, having been clamped to the old screen, is then grown to
+ * the new one by the fill rule in FitWindow and lays itself out properly. */
+#define APP_MIN_W 640              /* a screen this wide is what 1993 applications assume */
 static BOOL g_setW;                /* next live_remode uses an explicit size */
-static BOOL g_sawDialog;
-BOOL CALLBACK __export FindDialog(HWND hwnd, LPARAM lParam)
+static unsigned g_needW;
+
+BOOL CALLBACK __export MeasureWindow(HWND hwnd, LPARAM lParam)
 {
-    char cls[16];
-    if (!IsWindowVisible(hwnd)) return TRUE;
-    if (GetClassName(hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0) {
-        g_sawDialog = TRUE;
-        return FALSE;
-    }
+    RECT rc;
+    char cls[24];
+    unsigned w;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+    /* The shell is always sized to the screen, so counting it would mean the screen could never
+       shrink again: it would always appear to need exactly the width it currently has. */
+    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return TRUE;
+    if (lstrcmp(cls, "Progman") == 0 || lstrcmp(cls, "PVMonitor") == 0) return TRUE;
+    GetWindowRect(hwnd, &rc);
+    w = (unsigned)(rc.right - rc.left);
+    if (w > g_needW && w <= 2560) g_needW = w;
+    if (g_needW < APP_MIN_W) g_needW = APP_MIN_W;   /* an application is open: give it room */
     return TRUE;
 }
 
-static BOOL dialog_open(void)
+static unsigned content_width(void)
 {
     FARPROC proc;
-    g_sawDialog = FALSE;
-    proc = MakeProcInstance((FARPROC)FindDialog, g_hInst);
-    if (!proc) return FALSE;
+    g_needW = 0;
+    proc = MakeProcInstance((FARPROC)MeasureWindow, g_hInst);
+    if (!proc) return 0;
     EnumWindows((WNDENUMPROC)proc, 0L);
     FreeProcInstance(proc);
-    return g_sawDialog;
+    return g_needW;
 }
 
 static BOOL live_remode(unsigned w, unsigned h)
@@ -505,24 +555,30 @@ static BOOL adapter_present(void)
     return rd(R_DEBUG) == 0x5056;
 }
 
-/* Widen for a dialog that will not fit, and go back once it is gone. */
-static void check_dialog(void)
+/* Widen while something on screen needs more room than the host asked for, and go back after. */
+static void check_content(void)
 {
     unsigned curW = GetSystemMetrics(SM_CXSCREEN), curH = GetSystemMetrics(SM_CYSCREEN);
-    if (dialog_open()) {
+    unsigned need = content_width();
+    if (!curW || !curH) return;
+
+    if (need > curW) {                       /* something does not fit: make room for it */
+        unsigned w = (need + 15) & ~7u;
+        unsigned h;
+        if (w > 2560) w = 2560;
+        h = (unsigned)((DWORD)curH * w / curW) & ~1u;
+        if (h > 1600) h = 1600;
         g_noDialog = 0;
-        if (!g_widened && curW < DIALOG_MIN_W && curH) {
-            unsigned w = DIALOG_MIN_W;
-            unsigned h = (unsigned)((DWORD)curH * DIALOG_MIN_W / curW) & ~1u;
-            if (h > 1600) h = 1600;
-            g_setW = TRUE;
-            if (live_remode(w, h)) { g_widened = TRUE; dbgnum("pvmon: widened for a dialog", w, h); }
-            g_setW = FALSE;
-        }
+        g_setW = TRUE;
+        if (live_remode(w, h)) { g_widened = TRUE; dbgnum("pvmon: widened for content", w, h); }
+        g_setW = FALSE;
         return;
     }
     if (!g_widened) return;
-    if (++g_noDialog < UNDIALOG_POLLS) return;      /* let a closing dialog settle */
+    /* Only go back once the content would still fit at the host's size, with a little margin so
+       that a window sitting near the boundary does not make the screen flap back and forth. */
+    if (need + 16 > g_hostW) { g_noDialog = 0; return; }
+    if (++g_noDialog < UNDIALOG_POLLS) return;
     g_setW = TRUE;
     if (live_remode(g_hostW, g_hostH)) {
         g_widened = FALSE;
@@ -541,7 +597,7 @@ static void poll(HWND hwnd)
     h = rd(R_HOST_YRES) & ~1u;
     if (w < 320 || h < 200) return;
     g_hostW = w; g_hostH = h;
-    if (g_live && g_dlgWiden) check_dialog();
+    if (g_live && g_dlgWiden) check_content();
     if (g_widened) return;                    /* leave the dialog room alone while it is up */
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);

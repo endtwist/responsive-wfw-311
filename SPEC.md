@@ -829,3 +829,35 @@ wanted.
 
 Also fixed: `zoom` was declared after the code path that first calls `fitCanvas`, so a real
 browser hit a temporal-dead-zone `ReferenceError` on load. It is now declared before first use.
+
+**2026-09-01 (night) — two rendering bugs from the phone work, both fixed.**
+
+*The Run dialog came back half drawn.* Its right-hand part, beyond where the old screen edge had
+been, showed the desktop through it. Cause: after a re-mode PVMON called
+`InvalidateRect(NULL, ...)`, which invalidates the desktop and nothing else, so windows kept
+content that had been clipped to the old screen. Fixed by invalidating each window *and its
+controls* explicitly (`EnumChildWindows`) and then `UpdateWindow`, as part of the pass that
+already walks the window list.
+
+*Solitaire broke.* Its tableau collapsed into a column of overlapping cards, and after the first
+repair attempt it drew no cards at all. Two distinct causes:
+
+1. **The window fitter was shrinking it.** Clamping a window to a narrow screen makes an
+   application of this era re-lay itself to a size it was never designed for. The fitter now only
+   resizes windows that filled the old screen; everything else keeps its size and is merely moved
+   back on screen. Applications lay out to their own window, so a window that no longer fits is
+   better left alone than resized into nonsense.
+2. **Windows clamps a new window to the screen.** Started on a 448-wide screen, Solitaire's window
+   is *born* 448 wide, which is under the size it needs to lay out a tableau at all, so it draws
+   nothing and never asks for more. Measuring what is on screen cannot discover that, because the
+   window is already too small.
+
+So the widening rule became: keep the screen as small as the content allows, and treat the
+presence of any application window as requiring a standard 640-wide screen. The window, having
+been clamped to the old screen, is then grown by the fill rule and lays itself out properly. The
+shell is excluded from the measurement, since it is always sized to the screen and would
+otherwise stop the screen ever shrinking again.
+
+Verified on a phone viewport: **448x970 with just the desktop, 648x1402 while Solitaire is open
+and dealing correctly, and 448x970 again when it closes.** The Run dialog now draws complete,
+frame closed and all four buttons visible.
