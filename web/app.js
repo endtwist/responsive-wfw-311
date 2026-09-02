@@ -400,12 +400,81 @@ async function finishPrintJob(b64) {
   } catch (e) { report("print", "failed: " + e.message); }
 }
 
+/* Keyboard accessory bar: keys the phone keyboard lacks, sent as PS/2 scancodes. Ctrl and Alt are
+   sticky for one key. The bar is only visible while the soft keyboard is up, docked to its top
+   edge (the visual viewport's bottom), and it never takes the focus away from the hidden input. */
+const KEYBAR = [
+  ["Esc", [0x01]], ["Tab", [0x0F]], ["Ctrl", "ctrl"], ["Alt", "alt"], null,
+  ["←", [0xE0, 0x4B]], ["↑", [0xE0, 0x48]], ["↓", [0xE0, 0x50]], ["→", [0xE0, 0x4D]], null,
+  ["Home", [0xE0, 0x47]], ["End", [0xE0, 0x4F]], ["PgUp", [0xE0, 0x49]], ["PgDn", [0xE0, 0x51]], ["Ins", [0xE0, 0x52]], ["Del", [0xE0, 0x53]], null,
+  ["F1", [0x3B]], ["F2", [0x3C]], ["F3", [0x3D]], ["F4", [0x3E]], ["F5", [0x3F]], ["F6", [0x40]], ["F7", [0x41]], ["F8", [0x42]], ["F9", [0x43]], ["F10", [0x44]],
+];
+const sticky = { ctrl: false, alt: false };
+function sendScancodes(codes, down) {
+  // make: codes as given; break: last byte | 0x80 (E0 prefix kept)
+  const seq = down ? codes : codes.map((c, i) => i === codes.length - 1 ? c | 0x80 : c);
+  for (const c of seq) emulator.bus.send("keyboard-code", c);
+}
+function keybarPress(codes) {
+  if (sticky.ctrl) sendScancodes([0x1D], true);
+  if (sticky.alt) sendScancodes([0x38], true);
+  sendScancodes(codes, true); sendScancodes(codes, false);
+  if (sticky.alt) sendScancodes([0x38], false);
+  if (sticky.ctrl) sendScancodes([0x1D], false);
+  sticky.ctrl = sticky.alt = false;
+  updateKeybar();
+}
+function buildKeybar() {
+  const bar = $("keybar");
+  if (!bar || bar.childElementCount) return;
+  for (const k of KEYBAR) {
+    if (!k) { const g = document.createElement("span"); g.className = "gap"; bar.appendChild(g); continue; }
+    const b = document.createElement("button");
+    b.textContent = k[0]; b.dataset.key = k[0];
+    const act = ev => {
+      ev.preventDefault();                                 // keep the hidden input focused
+      if (typeof k[1] === "string") { sticky[k[1]] = !sticky[k[1]]; updateKeybar(); }
+      else keybarPress(k[1]);
+    };
+    b.addEventListener("touchstart", act, { passive: false });
+    b.addEventListener("mousedown", ev => { if (!("ontouchstart" in window)) act(ev); else ev.preventDefault(); });
+    bar.appendChild(b);
+  }
+  // sticky modifiers also work with typed characters
+  $("kbd").addEventListener("beforeinput", ev => {
+    if (!(sticky.ctrl || sticky.alt) || !ev.data) return;
+    ev.preventDefault();
+    const code = charScancode(ev.data);
+    if (code) keybarPress([code]);
+  });
+}
+const CHAR_SCANCODES = { a:0x1E,b:0x30,c:0x2E,d:0x20,e:0x12,f:0x21,g:0x22,h:0x23,i:0x17,j:0x24,k:0x25,l:0x26,m:0x32,n:0x31,o:0x18,p:0x19,q:0x10,r:0x13,s:0x1F,t:0x14,u:0x16,v:0x2F,w:0x11,x:0x2D,y:0x15,z:0x2C,
+  "1":0x02,"2":0x03,"3":0x04,"4":0x05,"5":0x06,"6":0x07,"7":0x08,"8":0x09,"9":0x0A,"0":0x0B," ":0x39,"-":0x0C,"=":0x0D,"[":0x1A,"]":0x1B,";":0x27,"'":0x28,",":0x33,".":0x34,"/":0x35,"\\":0x2B };
+function charScancode(ch) { return CHAR_SCANCODES[ch.toLowerCase()] || 0; }
+function updateKeybar() {
+  const bar = $("keybar");
+  if (!bar) return;
+  for (const b of bar.querySelectorAll("button")) b.classList.toggle("on", b.dataset.key === "Ctrl" ? sticky.ctrl : b.dataset.key === "Alt" ? sticky.alt : false);
+  const up = keyboardUp();
+  bar.classList.toggle("show", up);
+  if (up) {
+    const vv = window.visualViewport;
+    // dock to the bottom of the visible viewport, i.e. the top edge of the keyboard
+    bar.style.top = "auto";
+    bar.style.bottom = (window.innerHeight - (vv.offsetTop + vv.height)) + "px";
+  }
+}
+if (window.visualViewport) { window.visualViewport.addEventListener("resize", updateKeybar); window.visualViewport.addEventListener("scroll", updateKeybar); }
+document.addEventListener("focusin", () => setTimeout(updateKeybar, 50));
+document.addEventListener("focusout", () => setTimeout(updateKeybar, 50));
+
 /* The soft keyboard follows the guest: when an edit control takes the focus the hidden input is
    focused, which summons the platform keyboard, and it is blurred when the focus leaves. iOS only
    lets a page focus an input inside a user gesture, so the touch handlers also call this at the
    end of a tap, by which time PVMON has usually reported the new focus. */
 let wantKeyboard = false, keyboardHeld = false;
-function keyboardUp() { const k = $("kbd"); return !!(k && document.activeElement === k && window.visualViewport && window.visualViewport.height < window.innerHeight - 100); }
+function keyboardUp() {
+  if (params.get("keybar") === "1") return true;                 // preview the bar on a desktop const k = $("kbd"); return !!(k && document.activeElement === k && window.visualViewport && window.visualViewport.height < window.innerHeight - 100); }
 /* With the keyboard up, the layer that has the focus is shifted so it sits above it. */
 function keyboardShift() {
   if (!keyboardUp()) return 0;
@@ -1137,6 +1206,7 @@ function installTouch() {
  */
 function installKeyboard() {
   const inp = $("kbd");
+  buildKeybar();
   $("kbdbtn").onclick = () => { inp.value = ""; inp.focus(); };
   inp.addEventListener("input", () => {
     for (const ch of inp.value) emulator.keyboard_send_text(ch);

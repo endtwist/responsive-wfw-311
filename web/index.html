@@ -21,8 +21,21 @@
 /* On a phone the page shows nothing of its own: no toolbar, the desktop is the whole viewport. */
 .phone #bar { display: none; }
 .phone #pres { height: 100dvh; }
+/* Keyboard accessory bar: the one piece of host chrome, docked to the top of the soft keyboard
+   for the keys iOS does not have (Esc, Tab, arrows, F-keys, Ctrl/Alt). Hidden otherwise. */
+#keybar { position:fixed; left:0; right:0; z-index:3; display:none; background:rgba(28,28,30,.96);
+  border-top:1px solid #3a3a3c; padding:6px 6px calc(6px + env(safe-area-inset-bottom)); overflow-x:auto; white-space:nowrap;
+  -webkit-overflow-scrolling:touch; scrollbar-width:none; font:15px -apple-system, system-ui, sans-serif; user-select:none; -webkit-user-select:none; touch-action:pan-x; }
+#keybar::-webkit-scrollbar { display:none; }
+#keybar.show { display:block; }
+#keybar button { display:inline-block; min-width:42px; height:40px; margin:0 3px; padding:0 10px; border:0; border-radius:6px;
+  background:#636366; color:#fff; font:inherit; font-weight:600; vertical-align:middle; }
+#keybar button.on { background:#0a84ff; }
+#keybar button:active { background:#8e8e93; }
+#keybar .gap { display:inline-block; width:10px; }
 </style>
 <canvas id="pres"></canvas>
+<div id="keybar"></div>
 <div id="screen_container">
   <div style="white-space:pre; font:14px monospace"></div>
   <canvas style="display:none"></canvas>
