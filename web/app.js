@@ -37,6 +37,11 @@ function fullViewport() {
   // the whole canvas (a half-pixel mismatch read as "everything is blurry" on the phone).
   let w = Math.floor(vv ? vv.width : window.innerWidth);
   let h = Math.floor(vv ? vv.height : window.innerHeight);
+  // The soft keyboard shrinks the visual viewport (684 -> 383 on the phone) without touching the
+  // layout viewport. That must not re-lay-out anything: it turned portrait into "landscape" and
+  // shrank the whole desktop to 0.8x. Freeze on the layout viewport while the keyboard is up; the
+  // focused layer is panned into the visible part by keyboardShift() instead.
+  if (vv && softKeyboardShowing()) h = Math.floor(window.innerHeight);
   if (!(w > 0) || !(h > 0)) { w = 1024; h = 768; }   // a hidden page can report nothing
   return [w, h];
 }
@@ -569,14 +574,17 @@ let kbdBlurTimer = 0, kbdSuppressedUntil = 0;
 const kbdTrace = [];
 function kbdLog(msg) {
   const vv = window.visualViewport;
-  const line = `${msg} active=${document.activeElement && document.activeElement.id || document.activeElement && document.activeElement.tagName} vvh=${vv ? Math.round(vv.height) : "?"}/${innerHeight} up=${keyboardUp()} want=${wantKeyboard} held=${keyboardHeld}`;
+  const line = `${msg} active=${document.activeElement && document.activeElement.id || document.activeElement && document.activeElement.tagName} vvh=${vv ? Math.round(vv.height) : "?"}/${innerHeight} scale=${view && view.scale ? view.scale.toFixed(3) : "?"} up=${keyboardUp()} want=${wantKeyboard} held=${keyboardHeld}`;
   kbdTrace.push(line); if (kbdTrace.length > 40) kbdTrace.shift();
   diag("kbd " + line);
 }
-function keyboardUp() {
-  if (params.get("keybar") === "1") return true;                 // preview the bar on a desktop
+function softKeyboardShowing() {
   const k = $("kbd");
   return !!(k && document.activeElement === k && window.visualViewport && window.visualViewport.height < window.innerHeight - 100);
+}
+function keyboardUp() {
+  if (params.get("keybar") === "1") return true;                 // preview the bar on a desktop
+  return softKeyboardShowing();
 }
 /* With the keyboard up, the layer that has the focus is shifted so it sits above it. */
 function keyboardShift() {
