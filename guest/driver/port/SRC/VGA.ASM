@@ -273,6 +273,8 @@ Vmode			DW	0
 EXTRN	enable_216:WORD
 EXTRN   dac_size:BYTE
 externB bank_select
+externB pv_hw_read_bank
+externB pv_hw_write_bank
 
 globalW ScreenSelector,0                ;the screen selector
 globalW ScratchSel,0			;have a scratch selector
@@ -989,6 +991,8 @@ setmode proc    near
 	inc	dx
 	mov	ax,0041h
 	out	dx,ax
+	mov	pv_hw_read_bank,0FFh	;the banks reset with the mode: pv_apply_banks
+	mov	pv_hw_write_bank,0FFh	; must reprogram them on its next call
 	mov	dx,03C4h		;sequencer: chain-4 on, extended memory, odd/even off
 	mov	ax,0E04h		; (the adapter honours planar write modes when
 	out	dx,ax			;  chain-4 is off, like real SVGA silicon)

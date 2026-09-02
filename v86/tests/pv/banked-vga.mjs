@@ -162,5 +162,32 @@ eq(rd(0x1234), 0x66, "V86 chain-4 read comes from the text store");
 ctx(1, 1, 3, 0); eq(rd(0x1234), 0x22, "ring 3 chain-4 read comes from the frame buffer");
 ctx(0, 0, 0, 0);
 
+// --- 9. atomic 32-bit DISPI write on the index port: index in the low word, data in the high word,
+//     the index register itself untouched (the driver's bank switches and MoveCursor use this so
+//     that no cli/sti is needed around index/data pairs)
+ctx(1, 1, 3, 0);
+vga.port1CE_write(0x1A);                                                   // someone is mid-way through an index/data pair
+vga.port1CE_write32(0x18 | 7 << 16);
+eq(vga.svga_read_bank_offset, 7 << 16, "write32 to 0x1CE programs READ_BANK");
+vga.port1CE_write32(0x19 | 11 << 16);
+eq(vga.svga_bank_offset, 11 << 16, "write32 to 0x1CE programs WRITE_BANK");
+eq(vga.port1CE_read(), 0x1A, "write32 leaves the DISPI index register as it was");
+vga.port1CE_write32(0x14 | 1234 << 16); vga.port1CE_write32(0x15 | 567 << 16);
+vga.port1CE_write(0x14); eq(vga.port1CF_read(), 1234, "write32 cursor x"); vga.port1CE_write(0x15); eq(vga.port1CF_read(), 567, "write32 cursor y");
+eq(vga.svga_read_bank_offset, 7 << 16, "cursor writes do not disturb the banks");
+
+// --- 10. the unchained path writes the frame buffer through a plain view that follows wasm memory
+//     growth (the Proxy view() costs ~1 us per access; a stale plain view would write into a
+//     detached buffer)
+seq(4, 0x04); seq(2, 0x0F); gr(5, 0x00); seq(0xFE, 0); gr(3, 0); gr(8, 0xFF);
+dispi(0x18, 0); dispi(0x19, 0);
+wr(0x100, 0x5C);
+eq(vga.svga_memory[0x400], 0x5C, "unchained write before growth");
+wasm_memory.grow(1);
+wr(0x101, 0x5D);
+eq(vga.svga_memory[0x404], 0x5D, "unchained write after wasm memory growth lands in the frame buffer");
+eq(rd(0x101), 0x5D, "unchained read after growth");
+eq(vga.svga_mem().buffer, wasm_memory.buffer, "plain view follows the new buffer");
+
 console.log(`${checks - failures}/${checks} checks passed`);
 process.exit(failures ? 1 : 0);

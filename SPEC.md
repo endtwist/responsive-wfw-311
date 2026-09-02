@@ -2088,3 +2088,117 @@ Open: on a device with touch *and* a wide viewport (iPad) the hidden input is st
 (each desktop switch re-centres it; a user's own move survives resizes since `live_remode` only
 clamps); the DPI stays the snapshot's 120 on the desktop (large fonts), a `?fresh=1` desktop boot
 gets 96.
+### 2026-09-02 — redraw speed: bank-switch traps, the Proxy frame buffer, planar writes in rust
+
+Question (Josh): "Is there anything that will make Windows redraw faster?" Window repaints are
+visibly slow on the phone. Measured headless with the new `tools/redraw-bench.mjs` (boots the
+`image/current.json` snapshot, drives PVMON over the bus, and per operation counts guest
+instructions, emulator busy time = main_loop slices that did not end halted, A000 window accesses,
+DISPI bank-register writes, #GP/#PF from new wasm counters `pv_exc_stat`, plus a CS:IP sample per
+slice attributed to modules by byte matching and to PVDISP symbols from `PVDISP.MAP`; `--nofast`
+keeps every A000 write in JS for A/B; the frame-buffer hash column compares runs pixel for pixel).
+"Restore" = PVMON CMD_MINIMIZE then CMD_RESTORE, i.e. a full repaint of that window.
+
+**Before** (node, this Mac; the phone runs ~5-10x slower than node here — pane 55 MIPS vs 3-11
+busy on the phone — so multiply busy ms by 5-10 for the phone):
+
+| operation | instr (M) | busy ms | node MIPS | A000 writes (JS) | A000 reads | bank reg writes | #GP | ring-0 share of busy |
+|---|---|---|---|---|---|---|---|---|
+| notepad open | 3.03 | 328 | 8.5 | 170058 | 20 | 788 | 1040 | 62% |
+| notepad restore (repaint) | 1.51 | 450 | 3.1 | 259911 | 20 | 1550 | 1761 | 80% |
+| winfile open | 17.33 | 781 | 21.9 | 372645 | 1252 | 2592 | 2985 | 59% |
+| winfile restore (repaint) | 3.12 | 650 | 4.6 | 370843 | 1412 | 2774 | 3003 | 79% |
+| solitaire open | 4.04 | 641 | 6.0 | 507158 | 27756 | 3260 | 3545 | 56% |
+| solitaire restore (repaint) | 4.89 | 1953 | 2.4 | 856682 | 125547 | 5868 | 6170 | 78% |
+
+What dominated, in order:
+1. **Every bank switch was two #GP traps into WIN386.** `pv_apply_banks` (BANK.INC) wrapped its
+   four `out`s in `EnterCrit`/`LeaveCrit` = `pushf/cli … sti` so that interrupt-time `MoveCursor`
+   could not slip between an index write and its data write. At ring 3 under the VMM `cli` and
+   `sti` each fault (#GP) and are emulated in ring 0 (~450 instructions each, plus v86's exception
+   round trip and JIT exit): #GP ≈ bank-register writes in every row above (775 switches per
+   Notepad repaint; the V7 blitters switch per 64-row bank crossing and per pass, and always
+   reprogrammed both registers, 40% of them to the value already there). Ring 0 was 56-80% of
+   busy time; the driver itself 10-20%.
+2. **Every A000 pixel-group access in JS cost ~1 µs.** `vga.js` addressed `svga_memory` through
+   `lib.js view()`, a Proxy that constructs a new `Uint8Array` (and runs a regex assert) on each
+   element access; the unchained planar path touches 4 plane bytes per CPU byte write (170k-860k
+   writes and up to 125k reads per repaint). Microbenchmark: 1000 ns per planar write through the
+   Proxy, 42 ns through a plain view.
+3. The wasm→JS transition per A000 byte (`safe_write8_slow_jit` → `mmap_write8` → JS
+   `vga_memory_write`), worth another ~2.5x on the JS-only figures once 1 and 2 were gone.
+
+Changes:
+- **v86 `vga.js`**: `svga_mem()` — a plain `Uint8Array` over the frame buffer, re-created only
+  after wasm memory growth, used by `svga_unchained_read/write`. **32-bit write to DISPI port
+  0x1CE** = atomic index+data (index low word, data high word) that leaves the index register
+  untouched (`port1CE_write32`). `pv_planar_sync()` mirrors the planar write state to rust at
+  every port write that can change it (and after a state restore); `vga.pv_planar_disabled` for
+  A/B.
+- **v86 rust `memory.rs`**: `pv_planar_set` / `pv_planar_stat`; `mmap_write8/16/32` handle A000
+  writes in wasm when the state is the common one (8 bpp SVGA, chain-4 off, write mode 0, no
+  rotate, ALU copy, set/reset off, bit mask 0xFF, with or without the V7 fore latch), honouring
+  the map mask and the write bank and marking the LFB dirty bitmap; ring-0/V86 accesses (the
+  VDD's text store), reads and every other write mode still go to JS, which stays the reference.
+  `cpu.rs`: `pv_exc_stat(i)` counts faults by vector (index 32: hardware IRQs and other
+  error-code-less interrupts). `cpu.js`: the new imports are optional so `?wasm=v86-base.wasm`
+  A/B still loads.
+- **Driver** (`tools/build-driver.sh res=150`, same bitmap set as the shipped driver):
+  `BANK.INC` `pv_apply_banks` has no cli/sti; each register is one `out dx,eax` built with
+  `db 66h` prefixes (`push data / push index / pop eax / out dx,eax`, EAX preserved around it) and
+  is skipped when unchanged (`pv_hw_read_bank`/`pv_hw_write_bank`, invalidated by `setmode` in
+  VGA.ASM because the adapter resets the banks with the mode). `CURSOR.ASM` `MoveCursor` writes
+  the cursor registers the same atomic way and no longer saves/restores the index register. The
+  index/data pairs in Control/Enable/setmode are unchanged: nothing at interrupt time touches the
+  index register any more, so they need no protection.
+- Image `work-phone-20260902-172118.img` + `boot-20260902-172118.state.gz` (cold boot 4.2 s
+  headless).
+
+**After** (same runs, clean):
+
+| operation | instr (M) | busy ms | node MIPS | A000 writes JS | A000 writes rust | A000 reads | bank reg writes | #GP | ring-0 ms | gain (busy) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| notepad open | 2.89 | 106 | 25.6 | 44952 | 137394 | 12308 | 539 | 215 | 41 | 3.1x |
+| notepad restore (repaint) | 1.42 | 54 | 24.0 | 63797 | 204306 | 8212 | 996 | 153 | 10 | 8.3x |
+| winfile open | 17.50 | 332 | 52.2 | 137623 | 259598 | 25828 | 1826 | 383 | 27 | 2.4x |
+| winfile restore (repaint) | 4.92 | 132 | 36.3 | 117645 | 265486 | 13700 | 1900 | 245 | 16 | 4.9x |
+| solitaire open | 3.79 | 481 (314 in another run) | 7.6 | 308950 | 204350 | 33900 | 1392 | 256 | 265 | 1.3-2x |
+| solitaire restore (repaint) | 4.32 | 448 | 9.3 | 589024 | 275846 | 133739 | 2565 | 242 | 166 | 4.4x |
+
+The JS fixes alone (old driver): Notepad restore 168 ms, WinFile restore 355, Solitaire restore
+709. With the new driver but the rust path off (`--nofast`): 178 / 337 / 841 — so on this Mac the
+Proxy was the larger of the two per-pixel costs and the rust path is the remaining ~2.5x on the
+A000 side; on the phone the wasm→JS transition is relatively dearer (JavaScriptCore), so expect
+the rust path to matter more there. Frame-buffer hashes are identical between the rust path and
+`--nofast` for the Program Manager, Notepad and File Manager repaints (Solitaire deals randomly).
+Instruction counts barely moved: the cost was never guest instructions, which is why the earlier
+MIPS-based estimates could not see it.
+
+Verification: `node v86/tests/pv/banked-vga.mjs` 77/77 (10 new checks: the 32-bit DISPI write
+programs the banks and the cursor registers and leaves the index alone; unchained writes and
+reads still land after `wasm_memory.grow`). `node tools/tour.mjs --apps NOTEPAD,SOL,WINFILE,PBRUSH`
+32 pass / 2 fail, identical to the same tour on the previous image (PBRUSH fit 640x424 and the
+Notepad dialog fit 604x318 are pre-existing geometry checks). Cursor exclusion (candidate d):
+with the pointer hidden (host CMD_CURSOR 0 → `SetCursor(NULL)` → `cursor_flags` loses
+`YES_CURSOR`) `exclude` returns before `CURSFUNC_EXCLUDE`, so no cursor erase/redraw happens
+around blits on the phone; the bench runs with the pointer visible, which is where its
+`swcursor_draw/restore_screen` writes come from.
+
+Remaining, and risks:
+- The residual #GP (150-380 per operation) are `cli`/`sti` in KRNL386/USER/GDI and the cursor
+  code's own `EnterCrit`, not the driver's blitters. What the profile now shows inside the driver
+  is real work: `blt_dst_nibbles` (pattern fills), `ppsd_color` (8 bpp bitmap output),
+  `vga_set_features` (VGA register programming per blit, ~8 port traps each).
+- 30-50% of the *instructions* of an application open are V86-mode BIOS (CS F000/FDC8): DOS
+  file I/O reflected to INT 13h, SeaBIOS PIO with `rep insw` (each `in` a JS port trap). That is a
+  disk-path item, not redraw; left alone.
+- `out dx,eax` / `pop eax` in the 16-bit driver need a 386 (WfW 3.11 enhanced mode does too).
+  The rust fast path depends on `pv_planar_sync()` being called after every register change that
+  affects planar writes; a new write path added to vga.js must call it. The DISPI index register
+  is deliberately left untouched by the 32-bit form.
+- Once, in five full bench runs (JS view fix only, old driver), the guest fell into a 39 s ring-0
+  loop with 614 M interrupts (no #GP/#PF) right after closing File Manager and launching
+  Solitaire; never reproduced with or without the changes. Noted, not understood.
+- `log.js` defaults `globalThis.DEBUG = true` and the page never sets it, so every `dbg_assert`
+  and every `dbg_log` argument expression runs on the phone. Measured no effect on the planar
+  path (the Proxy dominated), but a cheap global candidate; not changed here.
