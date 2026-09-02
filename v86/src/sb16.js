@@ -189,6 +189,9 @@ export function SB16(cpu, bus)
     // Interrupts.
     this.irq = SB_IRQ;
     this.irq_triggered = new Uint8Array(0x10);
+    this.dsp_version_major = undefined;
+    this.dsp_version_minor = undefined;
+    bus.register("sb16-dsp-version", function(v) { this.dsp_version_major = v[0]; this.dsp_version_minor = v[1]; }, this);
 
     // IO Ports.
     // http://homepages.cae.wisc.edu/~brodskye/sb16doc/sb16doc.html#DSPPorts
@@ -1063,8 +1066,10 @@ register_dsp_command([0xE0], 1, function()
 register_dsp_command([0xE1], 0, function()
 {
     this.read_buffer.clear();
-    this.read_buffer.push(4);
-    this.read_buffer.push(5);
+    // responsive-wfw311: the DSP version can be presented as an older card (bus "sb16-dsp-version"
+    // [major, minor]); Windows 3.x's own Sound Blaster drivers refuse a 4.x DSP.
+    this.read_buffer.push(this.dsp_version_major === undefined ? 4 : this.dsp_version_major);
+    this.read_buffer.push(this.dsp_version_minor === undefined ? 5 : this.dsp_version_minor);
 });
 
 // DMA identification.

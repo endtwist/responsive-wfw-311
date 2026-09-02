@@ -206,6 +206,7 @@ function status(msg) { $("status").textContent = msg; }
 
 emulator.add_listener("emulator-ready", async () => {
   emulator.bus.send("pv-set-dpi", dpi);
+  emulator.bus.send("sb16-dsp-version", [2, 1]);     // Windows 3.x's Sound Blaster driver wants a 2.x DSP
   requestMode(true);
   /* Order of preference: the visitor's own snapshot (saved on hide), then the shipped boot
      snapshot (the desktop already up, so a cold visit takes seconds instead of a minute), then a
@@ -270,6 +271,7 @@ emulator.bus.register("pv-debug", line => {
   if (/^PVA/.test(line)) {
     desktopReady = true;
     shellHeightSent = 0;
+    if (touchDevice) setTimeout(() => sendCommand(CMD_CURSOR, 0), 500);   // an arrow means nothing to a finger
     if (params.get("mkstate") && !restored) { uploadBootState(); return; }
     launchFromUrl();
     return;
@@ -326,7 +328,8 @@ function syncKeyboard() {
   if (wantKeyboard && document.activeElement !== inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
   else if (!wantKeyboard && document.activeElement === inp) inp.blur();
 }
-const CMD_SCROLL = 7;
+const CMD_SCROLL = 7, CMD_CURSOR = 10;
+const touchDevice = ("ontouchstart" in window) || (window.matchMedia && matchMedia("(pointer: coarse)").matches);
 
 /* The shell column's height follows the visible viewport (browser toolbars come and go), so the
    desktop fills the phone with no letterbox. PVMON re-arranges Program Manager on request. */
@@ -443,7 +446,7 @@ function placeLayers(src) {
     }
     // A window that fits stays entirely on screen; one that does not may hang off the edges, but
     // never so far that less than a thumb's width of it is left to grab.
-    const x = hw <= vw ? Math.max(0, Math.min(vw - hw, p.x)) : Math.max(40 - hw, Math.min(vw - 40, p.x));
+    const x = Math.max(40 - hw, Math.min(vw - 40, p.x));   // at least a thumb's width stays on screen
     const y = Math.max(0, Math.min(vh - Math.round(capRow * c), p.y));
     /* Pinch zoom: the frame keeps its fitted size and the client area inside it is shown at a
        larger scale, panned. z = 1 is "fit". */
@@ -827,7 +830,8 @@ function pressStart(ev) {
   const h = hitTest(px, py);
   if (h.kind === "drag") {
     const p = layerPos[h.win.key];
-    chromeDrag = { key: h.win.key, dx: px - p.x, dy: py - p.y };
+    chromeDrag = { key: h.win.key, dx: px - p.x, dy: py - p.y, startX: px, startY: py, moved: false,
+                   guest: mapThrough(h.win, px, py) };
     return "drag";
   }
   return null;
@@ -836,7 +840,8 @@ function pressStart(ev) {
 function dragMove(ev) {
   if (!chromeDrag) return false;
   const { px, py } = hostPoint(ev);
-  layerPos[chromeDrag.key] = { x: Math.round(px - chromeDrag.dx), y: Math.round(py - chromeDrag.dy) };
+  if (Math.hypot(px - chromeDrag.startX, py - chromeDrag.startY) > 6) chromeDrag.moved = true;
+  if (chromeDrag.moved) layerPos[chromeDrag.key] = { x: Math.round(px - chromeDrag.dx), y: Math.round(py - chromeDrag.dy) };
   return true;
 }
 
@@ -932,7 +937,14 @@ function installTouch() {
     const G = g;
     diag(`up dragging=${G && G.dragging} longFired=${G && G.longFired} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
     if (G) { G.active = false; clearTimeout(G.timer); }
-    if (consumed) { consumed = null; chromeDrag = null; return; }
+    if (consumed) {
+      // a caption tap that did not turn into a drag is a click on the caption: it activates
+      if (consumed === "drag" && chromeDrag && !chromeDrag.moved) {
+        const pt = chromeDrag.guest;
+        queue(async () => { await placePointer(pt); button(true, false); await sleep(60); button(false, false); });
+      }
+      consumed = null; chromeDrag = null; return;
+    }
     if (!G) return;
     queue(async () => {
       if (G.dragging) { button(false, false); diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
@@ -942,9 +954,10 @@ function installTouch() {
   };
 
   c.addEventListener("touchstart", ev => {
+    try { const a = emulator.speaker_adapter && emulator.speaker_adapter.audio_context; if (a && a.state === "suspended") a.resume(); } catch (e) {}
     if (ev.touches.length === 2) {
-      clearTimeout(pressTimer);
-      if (dragging) { button(false, false); dragging = false; }
+      const G = g;
+      if (G) { G.active = false; clearTimeout(G.timer); if (G.dragging) queue(async () => button(false, false)); g = null; }
       const m = mid(ev.touches);
       const win = layerUnder(m);
       twoFinger = { last: m, accX: 0, accY: 0, dist: dist(ev.touches), win,

@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 16     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 17     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -731,6 +731,17 @@ static int max_height_for(HWND hwnd)
    windowed DOS session about a phone's width, and WinOldAp then picks a smaller font on its own,
    so the text is shown near 1:1 instead of a 640-column window scaled down to nothing. */
 static HWND g_sized[16];
+static BOOL lstrcmpi_n(const char *a, const char *b, int n)      /* case-insensitive, n chars */
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        char x = a[i], y = b[i];
+        if (x >= 'a' && x <= 'z') x -= 32;
+        if (y >= 'a' && y <= 'z') y -= 32;
+        if (x != y) return FALSE;
+    }
+    return TRUE;
+}
 static void apply_initial_size(HWND hwnd, int slotX)
 {
     char key[48], val[24], *base, *p, path[128];
@@ -749,7 +760,22 @@ static void apply_initial_size(HWND hwnd, int slotX)
     for (p = base; *p && *p != '.'; p++) ;
     *p = 0;
     wsprintf(key, "Size.%s", (LPSTR)base);
-    if (!GetProfileString("PVMon", key, "", val, sizeof(val)) || !val[0]) return;
+    if (!GetProfileString("PVMon", key, "", val, sizeof(val)) || !val[0]) {
+        /* No per-module size: most Windows programs lay out to whatever window they get, so a
+           window the width of the phone shows at 1:1 instead of a 640-column window scaled down.
+           Programs that draw a fixed layout (Solitaire, Hearts, Minesweeper, Calculator...) are
+           listed in KeepSize and left alone. */
+        char keep[128], *k;
+        GetProfileString("PVMon", "KeepSize", "", keep, sizeof(keep));
+        for (k = keep; *k; ) {
+            char *e = k; int n;
+            while (*e && *e != ' ' && *e != ',') e++;
+            n = (int)(e - k);
+            if (n == lstrlen(base) && lstrcmpi_n(k, base, n)) return;
+            k = e; while (*k == ' ' || *k == ',') k++;
+        }
+        if (!GetProfileString("PVMon", "DefaultSize", "", val, sizeof(val)) || !val[0]) return;
+    }
     for (p = val; *p >= '0' && *p <= '9'; p++) w = w * 10 + (*p - '0');
     if (*p == 'x') for (p++; *p >= '0' && *p <= '9'; p++) h = h * 10 + (*p - '0');
     if (w < 100 || h < 60) return;
@@ -926,6 +952,16 @@ static void publish_layout(void)
 #define CMD_SCROLL   7     /* arg: slot | direction << 8 (1 up, 2 down, 3 left, 4 right), lines in bits 12+ */
 #define CMD_SHELLSIZE 8    /* arg: shell column height; the host knows the real viewport, we do not */
 #define CMD_SETPOS   9     /* string "x,y": put the pointer there (absolute, for a tap) */
+#define CMD_CURSOR   10    /* arg 0: hide the pointer (touch screen), 1: show it */
+
+static BOOL g_hideCursor = FALSE;
+static void enforce_cursor(void)
+{
+    int c = ShowCursor(FALSE);                       /* returns the new display count */
+    if (g_hideCursor) { while (c >= 0) c = ShowCursor(FALSE); }
+    else              { while (c <  0) c = ShowCursor(TRUE); if (c == 0) ShowCursor(TRUE), ShowCursor(FALSE); }
+    if (!g_hideCursor) ShowCursor(TRUE);             /* undo the probe */
+}
 
 static void run_host_command(void)
 {
@@ -979,6 +1015,12 @@ static void run_host_command(void)
         if (!lines) lines = 3;
         for (k = 0; k < lines; k++) SendMessage(target, msg, sb, 0L);
         SendMessage(target, msg, SB_ENDSCROLL, 0L);
+        return;
+    }
+    if (cmd == CMD_CURSOR) {
+        /* ShowCursor keeps a display count: drive it to -1 (hidden) or 0 (shown) and keep it
+           there in poll(), since applications that ShowCursor(TRUE) would bring it back. */
+        g_hideCursor = (arg == 0);
         return;
     }
     if (cmd == CMD_SETPOS) {
@@ -1122,7 +1164,7 @@ static void poll(HWND hwnd)
     if (g_shellW) {
         static unsigned n;
         run_host_command();
-        if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); }
+        if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); enforce_cursor(); }
     }
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
