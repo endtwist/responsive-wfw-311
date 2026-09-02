@@ -30,7 +30,7 @@
 #include <conio.h>
 
 #define SLOT_W   640
-#define ICON_ROW  76         /* rows at the bottom of the shell column kept free for minimised icons */
+#define ICON_ROW  88         /* rows at the bottom of the shell column kept free for minimised icons (icon + 2-line label) */
 
 static HINSTANCE g_hInst;
 static HHOOK g_cbt, g_cwp, g_mouse;
@@ -484,6 +484,15 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             for (hops = 0; h && hops < 8 && (GetWindowLong(h, GWL_STYLE) & WS_CHILD); hops++) h = GetParent(h);
         }
         if (h && GetClassName(h, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0 && !(GetWindowLong(h, GWL_STYLE) & WS_CHILD)) {
+            if (code != HCBT_DESTROYWND && !GetWindow(h, GW_OWNER) && !shell_task(h) && !task_main_window(h) && IsWindowVisible(h)) {
+                /* a dialog that is a program of its own (Task List) centred itself on the screen:
+                   put it at the top of the column it fell in before it is reported */
+                RECT rc; int colX;
+                GetWindowRect(h, &rc);
+                colX = rc.left < SLOT_W ? SLOT_W : (rc.left / SLOT_W) * SLOT_W;
+                if (rc.left < SLOT_W || rc.right > colX + SLOT_W || rc.top < 0)
+                    SetWindowPos(h, NULL, colX, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            }
             g_force = (code == HCBT_ACTIVATE) ? h : NULL;
             hook_publish(code == HCBT_DESTROYWND ? h : NULL);
             g_force = NULL;

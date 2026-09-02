@@ -73,7 +73,7 @@ mcopy -o $M $TMP/WINFILE.INI ::/WINDOWS/WINFILE.INI
 # host as a torn frame; their saved rectangles are pre-written to the phone rect so the restore
 # is a no-op. PVMON still arranges the shell to the runtime column height.
 mcopy -n $M ::/WINDOWS/PROGMAN.INI $TMP/PROGMAN.INI
-python3 ../tools/winini.py $TMP/PROGMAN.INI "Settings.Window=0 0 $W $(( ${SHELLH:-760} - 76 )) 1"
+python3 ../tools/winini.py $TMP/PROGMAN.INI "Settings.Window=0 0 $W $(( ${SHELLH:-760} - 88 )) 1"
 mcopy -o $M $TMP/PROGMAN.INI ::/WINDOWS/PROGMAN.INI
 rm -rf $TMP
 echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD live=$LIVE"

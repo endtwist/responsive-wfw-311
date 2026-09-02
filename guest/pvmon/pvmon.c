@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 25     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 26     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -136,7 +136,7 @@ static void remove_hook(void)
    are simply somewhere on it. That is what gives each application its own framebuffer without
    Windows having any notion of one. */
 #define SLOT_W   640              /* each application gets a full-width slot of its own */
-#define ICON_ROW  76         /* desktop rows kept free for minimised icons (32px icon + title) */
+#define ICON_ROW  88         /* desktop rows kept free for minimised icons: 36 px icon, gap, two 20 px label lines */
 #define MAX_SLOTS 3          /* shell column + this many application columns */
 static char g_lastPub[256];         /* last line published to the host, to avoid repeats */
 static unsigned g_fitW, g_fitH;     /* screen the window fixer is fitting to */
@@ -258,6 +258,7 @@ static UINT find_menu_command(HWND hwnd, const char *want)
 }
 
 static BOOL g_arrangePending;   /* the shell was iconic when its column changed: arrange on restore */
+static int g_arrangeIcons;      /* polls left on which to re-arrange the MDI icons after arrange_shell */
 static void arrange_shell(void)
 {
     HWND pm, mdi, active;
@@ -283,6 +284,7 @@ static void arrange_shell(void)
     active = (HWND)(WORD)SendMessage(mdi, WM_MDIGETACTIVE, 0, 0L);
     if (active) SendMessage(mdi, WM_MDIMAXIMIZE, (WPARAM)active, 0L);
     SendMessage(mdi, WM_MDIICONARRANGE, 0, 0L);
+    g_arrangeIcons = 2;                          /* and again after the layout has settled */
     /* Re-grid the program items inside the group: their positions come from the .GRP files
        and were saved for the old resolution, so captions collide until Program Manager
        re-arranges them itself. */
@@ -789,6 +791,7 @@ static int owner_slot(HWND owner)
 
 /* Owned windows are placed once, when first seen; a dialog the program then moves itself is left
    alone unless it leaves its owner's column. */
+static struct { HWND hwnd; int x, y; } g_iconPos[16];   /* where we last put each minimised icon */
 static HWND g_owned[24];
 static BOOL owned_seen(HWND hwnd)               /* TRUE the first time hwnd is seen */
 {
@@ -1046,6 +1049,12 @@ static void publish_layout(void)
             RECT src;
             GetWindowRect(g_wnds[i].hwnd, &src);
             if (g_arrangePending) arrange_shell();          /* its column changed while it was an icon */
+            else if (g_arrangeIcons > 0 && --g_arrangeIcons == 0) {
+                /* minimised groups were arranged along the bottom of an MDI client that has since
+                   been resized: line them up along the bottom of the client as it is now */
+                HWND mdi = GetWindow(g_wnds[i].hwnd, GW_CHILD);
+                if (mdi) SendMessage(mdi, WM_MDIICONARRANGE, 0, 0L);
+            }
             else if (IsZoomed(g_wnds[i].hwnd) &&
                      (src.right > (int)g_shellW || src.bottom > (int)g_shellH - ICON_ROW)) {
                 /* the hook makes the shell's maximised rectangle its column; a shell zoomed past
@@ -1065,28 +1074,39 @@ static void publish_layout(void)
     {
         /* Icons sit in cells of SM_CXICONSPACING (WIN.INI IconSpacing=100) across the column, so
            the centred label under each fits inside the column too; a fourth icon starts a second
-           row above. The position goes through SetWindowPlacement, which is how USER itself
-           places an icon, so the icon title follows it (a bare SetWindowPos left titles behind). */
+           row above. An icon is placed when it is first seen minimised, or when it has left the
+           column; one the user has dragged elsewhere (its position differs from the one we set)
+           stays where it was dropped. Placement goes through SetWindowPlacement, which is how
+           USER itself places an icon, so the icon title follows it. */
         int n = 0, cell = GetSystemMetrics(SM_CXICONSPACING), per;
         if (cell < 64) cell = 100;
         per = (int)g_shellW / cell; if (per < 1) per = 1;
         for (i = 0; i < g_nWnds; i++) {
-            RECT rc; WINDOWPLACEMENT wp; int x, y, cx = GetSystemMetrics(SM_CXICON);
+            RECT rc; WINDOWPLACEMENT wp; int x, y, cx = GetSystemMetrics(SM_CXICON), k, slotk = -1;
+            BOOL placed = FALSE, moved = FALSE;
             if (g_wnds[i].kind != 'I' && !(g_wnds[i].kind == 'S' && IsIconic(g_wnds[i].hwnd))) continue;
             GetWindowRect(g_wnds[i].hwnd, &rc);
+            for (k = 0; k < 16; k++) {
+                if (g_iconPos[k].hwnd == g_wnds[i].hwnd) { placed = TRUE; moved = rc.left != g_iconPos[k].x || rc.top != g_iconPos[k].y; slotk = k; break; }
+                if (slotk < 0 && (g_iconPos[k].hwnd == NULL || !IsWindow(g_iconPos[k].hwnd) || !IsIconic(g_iconPos[k].hwnd))) slotk = k;
+            }
             x = (n % per) * cell + (cell - cx) / 2;
             y = (int)g_shellH - ICON_ROW + 4 - (n / per) * ICON_ROW;
             if (y < 0) y = 0;
-            if (rc.left != x || rc.top != y) {
-                wp.length = sizeof(wp);
-                if (GetWindowPlacement(g_wnds[i].hwnd, &wp)) {
-                    wp.flags |= WPF_SETMINPOSITION; wp.ptMinPosition.x = x; wp.ptMinPosition.y = y;
-                    wp.showCmd = SW_SHOWMINNOACTIVE;
-                    SetWindowPlacement(g_wnds[i].hwnd, &wp);
-                } else
-                    SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
-            }
             n++;
+            if (placed && moved && rc.left >= 0 && rc.right <= (int)g_shellW && rc.top >= 0 && rc.bottom + 44 <= (int)g_shellH)
+                continue;                                   /* the user put it there */
+            if (placed && !moved) continue;
+            if (rc.left == x && rc.top == y) { if (slotk >= 0) { g_iconPos[slotk].hwnd = g_wnds[i].hwnd; g_iconPos[slotk].x = x; g_iconPos[slotk].y = y; } continue; }
+            wp.length = sizeof(wp);
+            if (GetWindowPlacement(g_wnds[i].hwnd, &wp)) {
+                wp.flags |= WPF_SETMINPOSITION; wp.ptMinPosition.x = x; wp.ptMinPosition.y = y;
+                wp.showCmd = SW_SHOWMINNOACTIVE;
+                SetWindowPlacement(g_wnds[i].hwnd, &wp);
+            } else
+                SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+            GetWindowRect(g_wnds[i].hwnd, &rc);
+            if (slotk >= 0) { g_iconPos[slotk].hwnd = g_wnds[i].hwnd; g_iconPos[slotk].x = rc.left; g_iconPos[slotk].y = rc.top; }
         }
     }
     for (i = 0; i < g_nWnds; i++)

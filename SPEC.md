@@ -1522,3 +1522,17 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   (heartbeat had stopped too); gone in v25 (cursor moves, `PVH` advances after the same sequence).
 - `WM_WINDOWPOSCHANGING` does reach the hook for some windows after all (`pvhook: clamp
   CtlPanelClass 471x283 -> 352x283`); the activate-time clamp stays as the backstop.
+
+### 2026-09-02 — icons: user drags respected, label room; MDI icons re-arranged (PVMON v26)
+- Minimised icons are placed once, when first seen minimised (or when they have left the column);
+  an icon whose position differs from the one PVMON set was dragged by the user and stays where it
+  was dropped (per-hwnd record). Previously every poll snapped it back to its cell, so a dragged
+  Program Manager icon "vanished".
+- `ICON_ROW` 76 -> 88 (PVMON, hook, PROGMAN.INI pre-write): 36 px icon + two 20 px label lines fit
+  inside the column (pane: shell 762 -> Program Manager 674 tall, icon at y=678, label to ~758).
+- `arrange_shell` re-sends `WM_MDIICONARRANGE` on a later poll as well, so minimised groups line up
+  along the bottom of the MDI client as it is after the resize; the active group is maximised there
+  (`WM_MDIMAXIMIZE`) on every arrange, including `CMD_SHELLSIZE`.
+- Task List is still first reported at its self-centred x=1095 (the hook's publish runs before its
+  column placement lands); PVMON parks it in a slot on the next poll. Tour: `slot` for TASKMAN reads
+  the first report and fails; harmless.
