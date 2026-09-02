@@ -1439,3 +1439,10 @@ owner lands relative to the owner window, not the dialog: anchor a `T` to the `O
 rect contains its origin; (c) `PVO -1` owned by a `PVX` (no free slot: `MAX_SLOTS` is 3 and iconic
 windows keep their slot) is not drawn; (d) the 4-icons-across Program Manager group on the phone
 did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by `arrange_shell`).
+
+### 2026-09-02 — host fixes from the parked phone (remote loop)
+- Remote loop is in use: Josh's iPhone parked on `/solitaire?remote=phone&diag=1`; `node tools/remote.mjs phone tour|eval|shot|reload`. First device tour: 23 apps, 205 s, failures were all geometry (fixed by the guest pass) + the DOS-box close box.
+- Keyboard up shrank everything: the visual viewport (684→383) was read as landscape → `vh/480` scale. `fullViewport()` freezes on the layout viewport whenever `visualViewport.height < innerHeight-100` at scale 1 (geometric; a focus-based test let the shell re-arrange to 404 rows during the dismiss animation).
+- Keybar: keys fire on tap release (touchstart passive) so the bar pans; `keyboardShift()` subtracts the bar height; a stale focused `#kbd` (keyboard dismissed by its own key) is blurred on touchstart so the next tap's focus is fresh.
+- Owned dialogs: the strip-fill mask smeared vertical streaks over the owner (Sound Recorder + Open). Removed. An O layer that still overlaps its owner in guest space is drawn coincident with its copy (transient-style, owner's client scale/position); one placed clear of the owner by the hook goes below the owner on the host too when there is room.
+- Image `work-phone-20260902-133432` (PVMON v22, PVHOOK invariant) + snapshot; Sound Recorder 407x241 with Open below it composites as one image; Program Manager 3 icons across.
