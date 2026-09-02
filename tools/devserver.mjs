@@ -74,4 +74,4 @@ http.createServer((req, res) => {
   if (req.method === "HEAD") return res.end();
   count(size);
   fs.createReadStream(file).pipe(res);
-}).listen(port, "127.0.0.1", () => console.log(`dev server http://127.0.0.1:${port}/ root=${root}`));
+}).listen(port, "0.0.0.0", () => console.log(`dev server http://0.0.0.0:${port}/ (LAN ok) root=${root}`));

@@ -16,6 +16,11 @@ mkdir -p "$ROOT/TOOLS" "$ROOT/VCBIN" "$ROOT/DRV/OBJ"
 [ -f "$ROOT/VCBIN/RC.EXE" ]    || for t in RC.EXE RCPP.EXE RCPP.ERR DOSXNT.EXE MAPSYM.EXE; do [ -f "$VC/$t" ] && cp "$VC/$t" "$ROOT/VCBIN/"; done; true
 # sync sources (CRLF for the DOS tools)
 rsync -a --delete --exclude OBJ "$REPO/guest/driver/port/" "$ROOT/DRV/"
+# res=192 (or any RESnnn directory) swaps in a scaled set of the system bitmaps: Windows sizes its
+# captions, scroll bars and check boxes from these, so this is how the chrome gets thumb-sized
+# with nothing but Windows' own pixels. config.bin/fonts.bin stay the RES96 ones.
+RESSET=96; for a in "$@"; do case $a in res=*) RESSET=${a#*=};; esac; done
+if [ "$RESSET" != 96 ]; then cp "$REPO/guest/driver/port/RES$RESSET/"*.BMP "$ROOT/DRV/RES96/"; echo "using RES$RESSET bitmaps"; fi
 find "$ROOT/DRV" -type f ! -path '*/OBJ/*' \( -iname '*.asm' -o -iname '*.inc' -o -iname '*.mac' -o -iname '*.blt' -o -iname '*.var' \
   -o -iname '*.mak' -o -iname 'makefile' -o -iname '*.def' -o -iname '*.rc' -o -iname '*.rcv' -o -iname '*.h' -o -iname 'lnkcmd*' -o -iname '*.pub' \) \
   -exec perl -pi -e 's/\r?\n/\r\n/' {} +

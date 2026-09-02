@@ -977,3 +977,14 @@ bank switch now goes through BANK.INC (`far_set_both_pages`), which was the torn
 Dev notes: the service worker is not registered on localhost (dead pooled connections after a
 server restart made every GET fail with ERR_FAILED); PVMON is staged in `changes/windows`
 because `C:\WINDOWS` shadows `C:\` on the PATH.
+
+**2026-09-01 (night) — chrome size: bitmaps are not the lever.** The display driver carries the
+OEM bitmaps (OBM_CLOSE, arrows, check boxes; `RES96/`). `tools/scalebmp.py` produced a 2x set
+(`RES192/`, `tools/build-driver.sh res=192`) and the built driver verifiably contains them
+(72x36 SYSMENU), yet Windows drew identical chrome: at 120 dpi USER sizes captions, menus and
+caption boxes from the system font, not from the bitmaps. The native route to thumb-sized chrome
+is therefore a larger SYSTEM font (a scaled or freshly rasterised FON), with the DPI left at 120
+so dialog layouts (MS Sans Serif) stay as they are. Not done yet. Also: two-finger scroll, focus
+report (`PVK`) for the soft keyboard, per-app maximise height (`[PVMon] MaxHeight.PBRUSH=480`),
+owned windows parked in the owner's column, fixed guest layout in both phone orientations, and the
+dev server now listens on the LAN (`http://<mac-ip>:8311/solitaire`) for real-device testing.
