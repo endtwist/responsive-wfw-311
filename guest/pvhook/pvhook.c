@@ -127,7 +127,7 @@ typedef struct { HWND hwnd; BOOL fixed; int maxH; } WinInfo;
 #define MAX_INFO 24
 static WinInfo g_info[MAX_INFO];
 
-static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst)
+static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst, DWORD style)
 {
     char mod[16], key[32], line[80];
     int i, free = -1, h;
@@ -145,14 +145,20 @@ static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst)
     if (!mod[0]) {
         /* Windows sends WM_GETMINMAXINFO from inside CreateWindow, before the window's instance
            is known; do not remember an answer given without it (only the class is known) */
-        tmp.hwnd = NULL; tmp.fixed = lstrcmp(cls, "#32770") == 0; tmp.maxH = 0;
+        if (!style) style = GetWindowLong(hwnd, GWL_STYLE);
+        tmp.hwnd = NULL; tmp.fixed = lstrcmp(cls, "#32770") == 0 || !(style & WS_THICKFRAME); tmp.maxH = 0;
         return &tmp;
     }
     wi->hwnd = hwnd;
     /* A program whose main window is a dialog template (Task List, Sound Recorder, Character
        Map, WinVer...) laid its controls out for one size and never re-lays them; so did the
        modules listed in KeepSize (the games, Calculator, Clock, Paintbrush's toolbox...). */
-    wi->fixed = lstrcmp(cls, "#32770") == 0 || in_list("KeepSize", mod);
+    /* A window without WS_THICKFRAME cannot be resized by the user, so its program never lays out
+       to a new size either (Windows Setup's Network Setup: clamped, its text and list were simply
+       cut off). Only user-resizable windows reflow and are clamped; the rest keep their natural
+       size and the host scales them to the phone. */
+    if (!style) style = GetWindowLong(hwnd, GWL_STYLE);
+    wi->fixed = lstrcmp(cls, "#32770") == 0 || !(style & WS_THICKFRAME) || in_list("KeepSize", mod);
     wsprintf(key, "MaxHeight.%s", (LPSTR)mod);
     h = GetProfileInt("PVMon", key, 0);
     wi->maxH = (h > 100) ? h : 0;
@@ -390,7 +396,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
         if (h && !(GetWindowLong(h, GWL_STYLE) & WS_CHILD) && !IsIconic(h) && !IsZoomed(h) &&
             !GetWindow(h, GW_OWNER) && GetClassName(h, cls, sizeof(cls)) > 0 &&
             !transient_class(cls) && lstrcmp(cls, "Progman") != 0 && lstrcmp(cls, "#32770") != 0) {
-            WinInfo *wi = learn(h, cls, NULL);
+            WinInfo *wi = learn(h, cls, NULL, 0);
             if (!wi->fixed) {
                 RECT rc; int maxH = frame_h_for(wi, FALSE), w, ht;
                 GetWindowRect(h, &rc);
@@ -458,7 +464,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
         }
         /* a top-level application window: born in the staging column, phone-sized unless it
            draws a fixed layout */
-        wi = learn(hwnd, cls, cs->hInstance);
+        wi = learn(hwnd, cls, cs->hInstance, cs->style);
         module_base_i(cs->hInstance, mod, sizeof(mod));
         wsprintf(key, "Size.%s", (LPSTR)mod);
         if (GetProfileString("PVMon", key, "", val, sizeof(val)) && parse_size(val, &w, &h)) {
@@ -493,7 +499,7 @@ static void clamp_minmax(HWND hwnd, MINMAXINFO FAR *mmi)
     if (GetWindow(hwnd, GW_OWNER)) return;                       /* dialogs do not maximise */
     if (GetClassName(hwnd, cls, sizeof(cls)) <= 0 || transient_class(cls)) return;
     isShell = lstrcmp(cls, "Progman") == 0;
-    if (!isShell) wi = learn(hwnd, cls, NULL);
+    if (!isShell) wi = learn(hwnd, cls, NULL, 0);
     wp.length = sizeof(wp);
     if (!isShell && GetWindowPlacement(hwnd, &wp) && wp.rcNormalPosition.left >= SLOT_W)
         colX = (wp.rcNormalPosition.left / SLOT_W) * SLOT_W;   /* the column it lives in, even when iconic */
@@ -568,7 +574,7 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
         return;
     }
     {
-        WinInfo *wi = learn(hwnd, cls, NULL);
+        WinInfo *wi = learn(hwnd, cls, NULL, 0);
         int maxH;
         if (wi->fixed) return;                                   /* never resized, only kept in its column */
         maxH = frame_h_for(wi, FALSE);

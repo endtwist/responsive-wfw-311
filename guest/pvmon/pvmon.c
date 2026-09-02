@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 22     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 23     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -854,6 +854,7 @@ static void apply_initial_size(HWND hwnd, int slotX)
     /* A program whose main window is a dialog template (Task List, Sound Recorder...) laid its
        controls out once, for its own size: resizing it only crops or strands them. */
     if (GetClassName(hwnd, key, sizeof(key)) > 0 && lstrcmp(key, "#32770") == 0) return;
+    if (!(GetWindowLong(hwnd, GWL_STYLE) & WS_THICKFRAME)) return;
     inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
     if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return;
     base = path;
@@ -891,6 +892,7 @@ static BOOL fixed_layout(HWND hwnd)
     char cls[24], path[128], keep[128], *base, *p, *k;
     HINSTANCE inst;
     if (GetClassName(hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0) return TRUE;
+    if (!(GetWindowLong(hwnd, GWL_STYLE) & WS_THICKFRAME)) return TRUE;   /* not user-resizable: never reflows */
     inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
     if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return FALSE;
     base = path;
@@ -1204,6 +1206,31 @@ static void enforce_cursor(void)
     if (!g_hideCursor) ShowCursor(TRUE);             /* undo the probe */
 }
 
+/* See CMD_SCROLL. */
+static HWND scroll_target(HWND top, DWORD want)
+{
+    HWND f = GetFocus(), t, mdi, active, child;
+    char c[16];
+    if (f) {
+        for (t = f; GetParent(t); ) t = GetParent(t);
+        if (t == top && (GetWindowLong(f, GWL_STYLE) & want)) return f;
+    }
+    for (mdi = GetWindow(top, GW_CHILD); mdi; mdi = GetWindow(mdi, GW_HWNDNEXT))
+        if (GetClassName(mdi, c, sizeof(c)) > 0 && lstrcmpi(c, "MDIClient") == 0) break;
+    if (mdi) {
+        active = (HWND)(WORD)SendMessage(mdi, WM_MDIGETACTIVE, 0, 0L);
+        if (active && IsWindow(active)) {
+            if (GetWindowLong(active, GWL_STYLE) & want) return active;
+            for (child = GetWindow(active, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+                if (IsWindowVisible(child) && (GetWindowLong(child, GWL_STYLE) & want)) return child;
+            if (f && IsChild(active, f)) return f;          /* a focused list without bars still scrolls */
+        }
+    }
+    for (child = GetWindow(top, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+        if (IsWindowVisible(child) && (GetWindowLong(child, GWL_STYLE) & want)) return child;
+    return top;
+}
+
 static void run_host_command_1(void)
 {
     unsigned cmd = rd(R_CMD), arg;
@@ -1233,28 +1260,21 @@ static void run_host_command_1(void)
         return;
     }
     if (cmd == CMD_SCROLL) {
-        /* Two-finger scrolling from the host: scroll whatever in the slot's window scrolls. The
-           focused control if it is inside that window, else the first child with a scroll bar,
-           else the window itself, gets ordinary WM_VSCROLL/WM_HSCROLL line messages. */
+        /* Two-finger scrolling from the host: arg = slot | direction << 8 | lines << 12, slot byte
+           15 meaning the shell (Program Manager's active group). The thing that scrolls is found in order: the
+           focused control if it is inside the window and has a scroll bar; the active MDI child
+           (a Program Manager group, a File Manager directory window) or the first of its children
+           with a scroll bar; the first child of the window with a scroll bar; the window itself.
+           Ordinary WM_VSCROLL/WM_HSCROLL line messages, so every program scrolls its own way. */
         unsigned slotn = arg & 0xFF, dir = (arg >> 8) & 0xF, lines = (arg >> 12) & 0xF, k;
-        HWND top, target, child;
+        HWND top, target;
         UINT msg = (dir <= 2) ? WM_VSCROLL : WM_HSCROLL;
         WPARAM sb = (dir == 1 || dir == 3) ? SB_LINEUP : SB_LINEDOWN;
-        if (slotn >= MAX_SLOTS) return;
-        top = g_slotWnd[slotn];
-        if (!top || !IsWindow(top)) return;
-        target = GetFocus();
-        if (target) {                       /* is the focus inside this slot's window? */
-            HWND t = target;
-            while (GetParent(t)) t = GetParent(t);
-            if (t != top) target = NULL;
-        }
-        if (!target) {
-            DWORD want = (msg == WM_VSCROLL) ? WS_VSCROLL : WS_HSCROLL;
-            for (child = GetWindow(top, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
-                if (IsWindowVisible(child) && (GetWindowLong(child, GWL_STYLE) & want)) { target = child; break; }
-        }
-        if (!target) target = top;
+        if (slotn == 15) top = FindWindow("Progman", NULL);
+        else if (slotn >= MAX_SLOTS) return;
+        else top = g_slotWnd[slotn];
+        if (!top || !IsWindow(top) || IsIconic(top)) return;
+        target = scroll_target(top, (msg == WM_VSCROLL) ? WS_VSCROLL : WS_HSCROLL);
         if (!lines) lines = 3;
         for (k = 0; k < lines; k++) SendMessage(target, msg, sb, 0L);
         SendMessage(target, msg, SB_ENDSCROLL, 0L);

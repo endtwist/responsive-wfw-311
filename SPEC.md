@@ -1463,3 +1463,25 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   in 3.1 and there is no per-menu font, so the only native lever is a narrower system font (which
   would shrink every caption too). Left as is.
 - `node tools/tour.mjs --apps PRINTMAN,WINFILE`: pass=12 fail=0 (PRINTMAN rect 640,0,352,225).
+
+### 2026-09-02 — non-resizable windows keep their size; touch scroll routed to MDI children (PVMON v23)
+- **Invariant refined.** Clamping only helps a window that reflows. A top-level window *without*
+  `WS_THICKFRAME` (dialog frames, fixed-layout programs such as Windows Setup's "Network Setup",
+  whose text and driver list were simply cut off at 352) is now fixed-layout by definition, in the
+  hook (`learn()`, from `CREATESTRUCT.style` at birth) and in PVMON (`fixed_layout`,
+  `apply_initial_size`): never shrunk, only kept in its column; the host scales it. Windows with
+  `WS_THICKFRAME` reflow and are clamped as before; `KeepSize` stays as the override for
+  resizable-but-fixed programs (Sound Recorder, the games...); message boxes are still re-laid.
+  Verified: Windows Setup (`WINSETUP.EXE`; `SETUP.EXE` is the DOS setup and runs in a DOS box)
+  main window `PVW 0 1031 265 497 173`, Options -> Change Network Settings ->
+  `PVO 0 640 438 708 378 Network Setup` at its natural width (`PVQ wide WFWSETUP "Network Setup"
+  708x378`). **Tour expectation:** `fit=fail` is acceptable for a window without `WS_THICKFRAME`
+  (and for `KeepSize` modules); the invariant for those is "inside its column", not "352 wide".
+- **CMD_SCROLL** (7) `arg = slot | dir << 8 | lines << 12`; **slot 15 = the shell** (Program
+  Manager). The scroll target is found in order: the focused control if it is inside the window
+  and has a scroll bar of the wanted direction; the active MDI child (`WM_MDIGETACTIVE` on the
+  window's `MDIClient`: a Program Manager group, a File Manager directory window), or its first
+  visible child with such a bar, or the focused control inside it; the window's first child with a
+  bar; the window itself. Plain `WM_VSCROLL`/`WM_HSCROLL` `SB_LINEUP/LINEDOWN` x lines, then
+  `SB_ENDSCROLL`. Verified: with the Main group restored (2 rows visible of 3),
+  `[7, 15 | 2<<8 | 3<<12]` scrolled the group to its last rows and `1<<8` scrolled it back.
