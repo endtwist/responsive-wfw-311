@@ -1109,3 +1109,12 @@ system after spooling. Now `C:\PRINT.PRN`. Remaining: printing from Write opens 
 then the guest spins at ~150-1400 MIPS in a ring-3 16-bit segment (CS 0x437, linear ~0x36000)
 with PVMON starved and the dialog never painted. Not yet identified; the host side (PVP transfer,
 Ghostscript wasm, download) is in place but untested end to end.
+
+**2026-09-02 — printing works (text), PostScript pending.** Two guest-side hangs found on the way:
+the idle hook halting with IF clear (fixed: only with IF set), and PVHOOK.DLL built without `-bd`
+(rebuilt). With the "Generic / Text Only" driver (TTY.DRV, expanded from the media) as "PDF
+Printer" on port `C:\PRINT.PRN`, spooler off: Write prints, PVMON ships the file
+(`PVP-BEGIN 51 … PVP-END`), the host builds a PDF itself for text jobs (hand-written PDF, Courier,
+form feed = new page; verified rendering) and downloads it. PSCRIPT.DRV still spins the guest
+(~150 MIPS, ring 3, low-memory segment) as soon as the Print dialog creates the printer DC; kept
+off. Ghostscript wasm path ready for PostScript jobs (`locateFile` on the CDN) once PSCRIPT works.
