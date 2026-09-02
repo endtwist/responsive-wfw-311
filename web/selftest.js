@@ -31,7 +31,7 @@ const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, f: 0x21, 
    WINVER and Network Setup are fixed too but not toured. */
 /* [PVMon] KeepSize in build-image.sh: SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER
    (kept in step by hand; the same set as the `fixed:` marks above plus the untoured WINVER/PIFEDIT). */
-const FIXED_TITLES = /^(Character Map|Solitaire|The Microsoft Hearts|Minesweeper|Calculator|Sound Recorder|Object Packager|Task List|About |PIF Editor|Network Setup|Print Manager)/;
+const FIXED_TITLES = /^(Character Map|Solitaire|The Microsoft Hearts|Minesweeper|Calculator|Sound Recorder|Media Player|Object Packager|Task List|About |PIF Editor|Network Setup|Print Manager)/;
 export const APPS = [
   { name: "NOTEPAD",  cmd: "NOTEPAD.EXE",  title: /^Notepad/,        text: true,  dialog: "alt-f-o" },
   { name: "WRITE",    cmd: "WRITE.EXE",    title: /^Write/,          dialog: "alt-f-o" },
@@ -49,7 +49,7 @@ export const APPS = [
   { name: "PRINTMAN", cmd: "PRINTMAN.EXE", title: /^Print Manager/, fixed: true },   // spooler off: only its message box appears
   { name: "CLIPBRD",  cmd: "CLIPBRD.EXE",  title: /^Clip[Bb]o/ },
   { name: "SOUNDREC", cmd: "SOUNDREC.EXE", title: /^Sound Recorder/, fixed: true },
-  { name: "MPLAYER",  cmd: "MPLAYER.EXE",  title: /^Media Player/ },
+  { name: "MPLAYER",  cmd: "MPLAYER.EXE",  title: /^Media Player/, fixed: true },     // 448 wide, no thick frame
   { name: "RECORDER", cmd: "RECORDER.EXE", title: /^Recorder/ },
   { name: "TERMINAL", cmd: "TERMINAL.EXE", title: /^Terminal/,       text: true },
   { name: "PACKAGER", cmd: "PACKAGER.EXE", title: /^Object Packager/, fixed: true },
@@ -204,7 +204,9 @@ export async function tour(env, opts = {}) {
       while (performance.now() - start < ms) {
         if (gone()) return true;
         const dl = dialogsOf(slot);
-        if (dl.length) { await press(SC.n); await sleep(400); }
+        // "Save changes?" gets N; WinOldAp's "Application still active. Choose OK to end it." (a box carrying
+        // the DOS window's own title) needs Enter, N would leave the DOS box open
+        if (dl.length) { const d = dl[dl.length - 1]; await press(title && (d.title === title || /^MS-DOS/.test(title)) ? SC.enter : SC.n); await sleep(400); }
         else await sleep(60);
       }
       return gone();

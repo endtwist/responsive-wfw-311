@@ -1720,3 +1720,7 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
 - PRINTMAN `scale=0.793` on the pane: the guest reports the re-laid box as 352x225 with a 342x175
   client (dialog frame 5 px); host-side scale for a 342-wide client at c=1.065 should be >1, so the
   scaling is a compositor question (margins/insets for dialog frames), not a rect mismatch.
+- Follow-up 6 (same day): closing answers a post-close box by its title — WinOldAp's "Application
+  still active. Choose OK to end it." carries the DOS window's own title and gets Enter (N left the
+  DOS box open); anything else (save prompts) still gets N. Media Player (448 wide, no thick frame)
+  joins the fixed-layout set.
