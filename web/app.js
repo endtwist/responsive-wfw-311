@@ -1883,7 +1883,16 @@ function installTouch() {
   const follow = async (G) => {
     let steered = null;
     for (;;) {
-      const t = G.latest;
+      // Walk the finger's path in order rather than jumping to the latest point: a freehand
+      // stroke in Paintbrush is drawn from the WM_MOUSEMOVEs it receives, so skipping points turns
+      // a curve into a few straight segments. Points closer than 3 guest px are coalesced; when
+      // the guest falls behind, the path is thinned but its shape kept (every other point).
+      let t = null;
+      if (G.path && G.path.length) {
+        if (G.path.length > 24) G.path = G.path.filter((_, i) => i % 2 === 0 || i === G.path.length - 1);
+        t = G.path.shift();
+        if (steered && G.path.length && Math.hypot(t.x - steered.x, t.y - steered.y) < 3) continue;
+      } else t = G.latest;
       // Absolute placement for drag motion too: on a phone the guest runs slowly enough that
       // relative PS/2 packets lag behind the release, while SetCursorPos through PVMON lands in
       // tens of milliseconds and Windows generates the WM_MOUSEMOVE for the dragging program.
@@ -1983,6 +1992,7 @@ let hoverSurface = false;
       if (oneScroll) { oneScroll.lastX = px; oneScroll.lastY = py; return; }
     }
     G.latest = canvasPoint(ev);
+    (G.path || (G.path = [])).push(G.latest);
     if (!G.dragging) {
       G.dragging = true;
       if (lastTap) lastTap.dragged = true;
