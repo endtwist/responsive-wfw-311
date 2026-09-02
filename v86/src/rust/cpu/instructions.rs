@@ -1429,7 +1429,18 @@ pub unsafe fn instr_CC() {
 #[no_mangle]
 pub unsafe fn instr_CD(imm8: i32) {
     // INT
+    // responsive-wfw311: Windows 3.x never halts; when idle it spins issuing INT 2Fh AX=1680h
+    // ("release current virtual machine's time slice") and AX=1689h (kernel idle). Treat either
+    // as a halt until the next hardware interrupt so an idle desktop does not burn a phone's
+    // battery. The handler still runs, just after the wake-up, which is what "yield" means.
+    let idle_call = imm8 == 0x2F && {
+        let ax = read_reg16(AX) as u32;
+        ax == 0x1680 || ax == 0x1689
+    };
     call_interrupt_vector(imm8, true, None);
+    if idle_call && *cpl == 0 || idle_call && *flags & FLAG_INTERRUPT != 0 {
+        *in_hlt = true;
+    }
 }
 #[no_mangle]
 pub unsafe fn instr_CE() {

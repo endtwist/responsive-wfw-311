@@ -1069,3 +1069,10 @@ handler reports `SF_ABSOLUTE` and USER puts the pointer there at interrupt time.
 9-11 ms, exact to the pixel (aim at pixel centres: USER truncates norm*cx/65536), independent of
 what applications are doing. SetCursorPos remains the fallback after three missed reports.
 Regression on the restored snapshot: tap, three back-to-back drags, desktop tap all exact.
+
+**2026-09-02 — idle.** Windows 3.x never halts: an idle desktop spins on INT 2Fh AX=1680h (release
+time slice) / 1689h (kernel idle), which kept the emulator at 60-90 MIPS and a phone warm. v86's
+`instr_CD` now treats either call as a halt until the next hardware interrupt (the handler runs
+after the wake-up, which is what "yield" means). Idle: 0.1 MIPS, input still immediate. Also:
+`_DEFAULT.PIF` windowed; the phone's "DOS window never appears" is DOS VM start-up dragging the
+emulator to ~3 MIPS (5 s in the pane at 55 MIPS), i.e. the DOS VM speed item.
