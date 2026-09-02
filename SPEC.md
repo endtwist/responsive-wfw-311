@@ -1485,3 +1485,19 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   `sw.js` precache bumped to v5 with the new files.
 - Reproduce: `mcopy -i image/wfw311-base.img@@16384 ::/WINDOWS/PROGMAN.EXE .` then
   `python3 tools/ne-icons.py icon PROGMAN.EXE 18 web/icon-512.png --scale 16`.
+### 2026-09-02 — message boxes wrapped natively, File Manager directory window maximised
+- **Print Manager with spooler off** shows only a MessageBox (924 wide on the phone, 629 in the
+  pane): it escaped the clamp because message boxes are fixed-layout dialogs. The hook now re-lays
+  USER's message boxes at `HCBT_ACTIVATE` (before they paint): the text Static is narrowed to the
+  column and its wrapped height measured with `DrawText(DT_CALCRECT|DT_WORDBREAK)`, the buttons
+  move down by the growth and are re-centred, the box becomes ShellWidth wide and taller
+  (`pvhook: message box 629x208 -> 352x225 (text +17)`). Applies to every MessageBox (module USER),
+  e.g. Paintbrush's save prompt; programs' own dialogs are untouched. Spooler stays off.
+- **WINFILE.INI**: format read back from a file the guest saved after maximising its directory
+  window: `Window=x,y,w,h, , ,showcmd` and `dir1=x,y,w,h,split,-1,showcmd,0,view,sort,attr,path`;
+  the image now writes `dir1=0,0,344,400,-1,-1,3,...,C:\*.*` (3 = SW_MAXIMIZE), so File Manager
+  opens with the tree and list filling its 352-wide client ("File Manager - [C:\*.*]").
+- File Manager's seven menus wrap to two rows at the 20 px system font: menus use the system font
+  in 3.1 and there is no per-menu font, so the only native lever is a narrower system font (which
+  would shrink every caption too). Left as is.
+- `node tools/tour.mjs --apps PRINTMAN,WINFILE`: pass=12 fail=0 (PRINTMAN rect 640,0,352,225).
