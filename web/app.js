@@ -28,8 +28,10 @@ const IMAGE = params.get("hda") || "../image/work-live.img";
  */
 function viewport() {
   const vv = window.visualViewport;
-  let w = vv ? vv.width : window.innerWidth;
-  let h = vv ? vv.height : window.innerHeight;
+  // Whole pixels: the canvas backing store must match its CSS box exactly, or Safari resamples
+  // the whole canvas (a half-pixel mismatch read as "everything is blurry" on the phone).
+  let w = Math.floor(vv ? vv.width : window.innerWidth);
+  let h = Math.floor(vv ? vv.height : window.innerHeight);
   if (!(w > 0) || !(h > 0)) { w = 1024; h = 768; }   // a hidden page can report nothing
   return [w, h];
 }
@@ -221,8 +223,8 @@ emulator.add_listener("screen-set-size", s => {
 
 /* The guest reports where it thinks the pointer is, which is what lets a tap become the right
    relative motion for the stock PS/2 mouse driver (SPEC 2.5). */
-let guestCursor = null;
-emulator.bus.register("pv-cursor", xy => { guestCursor = { x: xy[0], y: xy[1] }; });
+let guestCursor = null, cursorSeq = 0;
+emulator.bus.register("pv-cursor", xy => { guestCursor = { x: xy[0], y: xy[1] }; cursorSeq++; });
 
 /* What the guest says is where: the shell column's size, and one entry per top-level window,
    back to front, each with the rectangle it occupies in guest screen space.
@@ -686,20 +688,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 let steerTarget = null, steering = null;
 
 function steerTo(pt) {
+  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return Promise.resolve();
   steerTarget = pt;
   if (!steering) steering = (async () => {
     try {
-      for (let i = 0; i < 6 && steerTarget; i++) {
-        if (!guestCursor) { emulator.bus.send("mouse-delta", [1, 0]); await sleep(15); continue; }
-        const dx = steerTarget.x - guestCursor.x, dy = steerTarget.y - guestCursor.y;
+      for (let i = 0; i < 4 && steerTarget; i++) {
+        if (!guestCursor) { emulator.bus.send("mouse-delta", [1, 0]); await sleep(20); continue; }
+        const dx = Math.round(steerTarget.x - guestCursor.x), dy = Math.round(steerTarget.y - guestCursor.y);
         if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) break;
-        let rx = dx, ry = dy;
-        while (rx || ry) {          // a PS/2 packet carries one signed byte per axis
+        let rx = dx, ry = dy, packets = 0;
+        while ((rx || ry) && packets < 64) {   // a PS/2 packet carries one signed byte per axis
           const sx = Math.max(-100, Math.min(100, rx)), sy = Math.max(-100, Math.min(100, ry));
           emulator.bus.send("mouse-delta", [sx, -sy]);   // guest Y grows downwards
-          rx -= sx; ry -= sy;
+          rx -= sx; ry -= sy; packets++;
         }
-        await sleep(12);
+        /* Wait for the driver to report where the pointer actually went before correcting.
+           Re-sending the delta blindly while the guest was busy (dropping a card repaints the
+           table) drove the pointer several screens away, which looked like it was stuck. */
+        const seq = cursorSeq, t0 = performance.now();
+        while (cursorSeq === seq && performance.now() - t0 < 400) await sleep(8);
+        if (cursorSeq === seq) break;          // no report: leave it, do not compound the error
       }
     } finally { steering = null; steerTarget = null; }
   })();
@@ -757,6 +765,7 @@ function installTouch() {
   let pressTimer = 0, longFired = false, dragging = false, consumed = null;
 
   const down = ev => {
+    window.pvPhase = "down";
     consumed = pressStart(ev);
     if (consumed) return;
     const pt = canvasPoint(ev);
@@ -770,6 +779,7 @@ function installTouch() {
     });
   };
   const move = ev => {
+    window.pvPhase = "move";
     if (dragMove(ev)) return;
     if (consumed) return;
     clearTimeout(pressTimer);
@@ -781,6 +791,7 @@ function installTouch() {
     });
   };
   const up = () => {
+    window.pvPhase = "up";
     clearTimeout(pressTimer);
     if (consumed) { consumed = null; chromeDrag = null; return; }
     queue(async () => {
@@ -897,9 +908,20 @@ document.addEventListener("visibilitychange", () => {
 // Opt in to a worker heartbeat (?keepalive=1) when a session must survive being backgrounded;
 // the default is to let it idle and rely on the snapshot.
 try {
-  const src = URL.createObjectURL(new Blob(["setInterval(()=>postMessage(0),1)"], { type: "text/javascript" }));
+  const src = URL.createObjectURL(new Blob([`
+    let last = Date.now(), phase = "", told = false;
+    onmessage = e => { last = Date.now(); phase = e.data; told = false; };
+    setInterval(() => postMessage(0), 1);
+    setInterval(() => {               // the main thread has been silent for 4 s: it is stuck somewhere
+      if (!told && Date.now() - last > 4000) {
+        told = true;
+        fetch("/__log", { method: "POST", body: "stall main thread silent " + (Date.now() - last) + "ms, last phase: " + phase }).catch(() => {});
+      }
+    }, 1000);`], { type: "text/javascript" }));
   let lastPump = 0;
-  new Worker(src).onmessage = () => {
+  const hb = new Worker(src);
+  setInterval(() => hb.postMessage(window.pvPhase || ""), 1000);
+  hb.onmessage = () => {
     if (document.hidden) {
       const now = performance.now();
       if (now - lastPump > 100) { lastPump = now; pump(); }
