@@ -41,7 +41,10 @@ function fullViewport() {
   // layout viewport. That must not re-lay-out anything: it turned portrait into "landscape" and
   // shrank the whole desktop to 0.8x. Freeze on the layout viewport while the keyboard is up; the
   // focused layer is panned into the visible part by keyboardShift() instead.
-  if (vv && softKeyboardShowing()) h = Math.floor(window.innerHeight);
+  // Geometric test, not focus-based: the keyboard can still be animating away after the input
+  // lost focus (PVK 0 -> blur), and that gap once re-arranged the shell to 404 rows. A visual
+  // viewport shorter than the layout viewport at scale 1 can only be the keyboard.
+  if (vv && vv.scale === 1 && vv.height < window.innerHeight - 100) h = Math.floor(window.innerHeight);
   if (!(w > 0) || !(h > 0)) { w = 1024; h = 768; }   // a hidden page can report nothing
   return [w, h];
 }
