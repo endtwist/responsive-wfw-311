@@ -849,7 +849,8 @@ const SHELL_SCROLL_SLOT = 15;
 function insideShellClient(h) {
   if (!h || h.kind !== "desktop") return false;
   const S = layers.find(L => L.kind === "S");
-  return !!S && h.x >= S.gx && h.x < S.gx + S.gw && h.y >= S.gy && h.y < S.gy + S.gh;
+  if (!S || S.ww <= 64 || S.wh <= 64) return false;      // an iconic shell has no client to scroll: its icon drags
+  return h.x >= S.gx && h.x < S.gx + S.gw && h.y >= S.gy && h.y < S.gy + S.gh;
 }
 function surfacePolicy(L) {
   if (!L || L.kind !== "W") return "drag";
