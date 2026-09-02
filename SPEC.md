@@ -1152,3 +1152,43 @@ iOS keyboard (needs a gesture map or a hardware keyboard).
 - Microphone: v86 SB16 has no record path (DSP 0x24/0x2C unhandled) — follow-up agent implementing DMA input + getUserMedia.
 - `web/app.js`: `?wasm=<file>` picks a wasm under v86/build for A/B tests.
 - Found: launching the DOS box paints a 4-row desktop-coloured band (index 247) across the shell column at y=60..63 (guest VRAM, not compositor). Reproduces with the pre-merge wasm too; Notepad launch does not do it. Being investigated.
+
+### 2026-09-02 — DOS box band (rows 60..63) root cause: WIN386's VDD lending "spare" video memory
+- Symptom: starting the MS-DOS Prompt painted a 4-row band of index 247 across the shell column at
+  y=60..63 (guest VRAM). Traced by wrapping `vga_memory_write` in the pane and recording CS:IP and
+  VGA state per write: none came from PVDISP. The band was written by ring-0 code at
+  CS=0028h EIP=8001AD20h/AD40h (WIN386's `*vddvga`) and by the DOS VM's video BIOS (C000:0FC3, V86
+  mode, ES=B800) — 0720h char/attr pairs and a plane-2 font clear — all at physical A000:F000-FFFF
+  with chain-4 off. In the adapter's planar addressing A000:F000-FFFF is linear 3C000h-3FFFFh, i.e.
+  rows 60..63 of the 4096-pitch frame buffer.
+- Mechanism (DDK `386\VDDVGA` source): a display driver that answers INT 2Fh 4000h without first
+  calling the VDD's `VDD_SVC_Set_Addresses` (INT 2Fh 1684h, VxD 0Ah, function 0Ch) is "not 3.1
+  aware"; the VDD then derives the system VM's visible pages from the CRTC state it tracked
+  (`VDD_PH_Mem_Save_Sys_Latch_Addr`) — 15 of the 16 4K pages of the A000 window — and demand-pages
+  the remaining page(s) among DOS VMs: a windowed DOS box's B800 pages are mapped by page table onto
+  physical A000:F000, its font plane is cleared there by the VDD, and the VDD also pokes a
+  `shadow_mem_status` byte into video memory past the visible pages. The VDD models a 256K VGA; on
+  this adapter every byte of the window is frame buffer. (Declaring all 16 pages visible is not an
+  option: `VDD_PH_Mem_Alloc_Video_Page` then fails for the DOS box, `VDD_Error_NoPagesAvail`, and
+  the box shows nothing — the VDD needs at least one physical page even for a windowed text VM;
+  the grabber reads the VDD's SaveMem copy, not VRAM.)
+- Fix, adapter side (v86 `src/vga.js`): `pv_text_mem`, a private 256K store. A000-window accesses
+  made in ring 0 or V86 mode with paging on (the VDD and its DOS VMs) are decoded into it with the
+  normal planar/chained addressing; ring 3 (the display driver) and real mode (DOS programs on the
+  bare adapter) still reach the frame buffer. Same spirit as upstream v86's FLAG_VM special case
+  on the DISPI enable register for Win9x VDDs. Saved in the snapshot (state[88]).
+  `tests/pv/banked-vga.mjs` section 8 covers it (67/67).
+- Driver side: left as is (PVDISP stays "not 3.1 aware"; the VDD's guess gave enough spare pages).
+  Tried and rejected: calling `VDD_SVC_Set_Addresses` from physical_enable as the DDK's VGA.DRV
+  does (INT 2Fh 1684h, VxD 0Ah, AX=0Ch, BX=latch byte, DS:SI=shadow_mem_status). With 16 visible
+  pages the DOS box shows nothing (`VDD_Error_NoPagesAvail`: the VDD demand-pages a windowed text
+  VM's pages among physical video pages and cannot run one without any); with 15 or 8 visible
+  pages the box also stays black even though its text lands in the text store — the VDD then
+  steals/saves/restores pages between the system VM and the DOS VM (`fVDD_DspDrvrAware` paths),
+  and the grabber's SaveMem copy comes back empty. Not pursued further; the adapter-side fix is
+  sufficient and independent of the driver.
+- Verified in the pane (`/solitaire` snapshot of the shipped image work-phone-20260902-104044,
+  `pv-command-string` DOSPRMPT.PIF, then `dir`): no all-247 rows in the shell column, row 60
+  intact, DOS text visible (105 text rows, 218 after `dir`), the VM's text/font pages in
+  `pv_text_mem` (16K), the VDD's traffic never reaches `svga_memory`. No driver or image rebuild
+  needed: vga.js is loaded as a source module.

@@ -374,6 +374,18 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
      * @type {Uint8Array}
      */
     this.v7_seq = new Uint8Array(256);   // PV: separate read/write 64K banks (index 0x18/0x19); BANK (5) sets both
+    /**
+     * PV: the hypervisor's view of the A000 window. WIN386's VDD models the adapter as a
+     * 256K VGA and lends the "spare" 4K pages of the window (those above the display
+     * driver's latch page) to DOS VMs as text and font memory: it maps a DOS box's B800
+     * pages onto physical A000:F000 and clears fonts there itself. On this adapter every
+     * byte of the window is frame buffer, so those accesses painted a 4-row band across
+     * the desktop. Accesses made in ring 0 or V86 mode while paging is on (the VDD and its
+     * DOS VMs; the display driver runs in ring 3, DOS programs in real mode) are decoded
+     * into this private 256K store instead, with the normal planar/chained addressing.
+     * @type {Uint8Array}
+     */
+    this.pv_text_mem = new Uint8Array(4 * VGA_BANK_SIZE);
     this.pv_host_xres = 0;
     this.pv_host_yres = 0;
     this.pv_host_dpi = 96;
@@ -515,6 +527,7 @@ VGAScreen.prototype.get_state = function()
     state[85] = this.pv_generation;
     state[86] = this.svga_read_bank_offset;
     state[87] = this.v7_seq;
+    state[88] = this.pv_text_mem;
 
     return state;
 };
@@ -595,6 +608,7 @@ VGAScreen.prototype.set_state = function(state)
     this.pv_generation = state[85] || 0;
     this.svga_read_bank_offset = state[86] || this.svga_bank_offset;
     if(state[87]) this.v7_seq.set(state[87]);
+    if(state[88]) this.pv_text_mem.set(state[88]);
 
     this.screen.set_mode(this.graphical_mode);
 
@@ -632,6 +646,10 @@ VGAScreen.prototype.vga_memory_read = function(addr)
 {
     if(this.svga_enabled)
     {
+        if(this.pv_hypervisor_access())
+        {
+            return this.pv_text_read(addr - 0xA0000);
+        }
         if(this.svga_bpp === 8 && !(this.sequencer_memory_mode & 0x8))
         {
             // 256-colour "unchained" planar access (chain-4 off), see svga_unchained_read
@@ -711,6 +729,11 @@ VGAScreen.prototype.vga_memory_write = function(addr, value)
 {
     if(this.svga_enabled)
     {
+        if(this.pv_hypervisor_access())
+        {
+            this.pv_text_write(addr - 0xA0000, value);
+            return;
+        }
         if(this.svga_bpp === 8 && !(this.sequencer_memory_mode & 0x8))
         {
             this.svga_unchained_write(addr - 0xA0000, value);
@@ -774,8 +797,43 @@ VGAScreen.prototype.vga_memory_write = function(addr, value)
  */
 VGAScreen.prototype.svga_unchained_read = function(off)
 {
-    const base = (this.svga_read_bank_offset & ~0x3FFFF) + off * 4;
-    const mem = this.svga_memory;
+    return this.planar_read_at(this.svga_memory, (this.svga_read_bank_offset & ~0x3FFFF) + off * 4);
+};
+
+/**
+ * PV: is this A000 access the hypervisor's (WIN386's VDD in ring 0, or a DOS VM in V86
+ * mode) rather than the display driver's (ring 3) or a DOS program's (real mode)?
+ * See pv_text_mem. Paging on stands in for "a hypervisor is running".
+ */
+VGAScreen.prototype.pv_hypervisor_access = function()
+{
+    const cpu = this.cpu;
+    if(!cpu.protected_mode || !cpu.protected_mode[0] || !(cpu.cr[0] & 0x80000000)) return false;
+    return cpu.cpl[0] === 0 || (cpu.flags[0] & FLAG_VM) !== 0;
+};
+
+VGAScreen.prototype.pv_text_read = function(off)
+{
+    if(this.svga_bpp === 8 && !(this.sequencer_memory_mode & 0x8))
+    {
+        return this.planar_read_at(this.pv_text_mem, off * 4);
+    }
+    return this.pv_text_mem[off];
+};
+
+VGAScreen.prototype.pv_text_write = function(off, value)
+{
+    if(this.svga_bpp === 8 && !(this.sequencer_memory_mode & 0x8))
+    {
+        this.planar_write_at(this.pv_text_mem, off * 4, value);
+        return;
+    }
+    this.pv_text_mem[off] = value;
+};
+
+/** Planar (chain-4 off) read of the four plane bytes at `base` of `mem`; loads the latches. */
+VGAScreen.prototype.planar_read_at = function(mem, base)
+{
     if(base + 3 >= mem.length) return 0xFF;
     const p0 = mem[base], p1 = mem[base + 1], p2 = mem[base + 2], p3 = mem[base + 3];
     this.latch_dword = p0 | p1 << 8 | p2 << 16 | p3 << 24;
@@ -800,15 +858,21 @@ VGAScreen.prototype.v7_fore_latch_dword = function()
 
 VGAScreen.prototype.svga_unchained_write = function(off, value)
 {
+    const base = (this.svga_bank_offset & ~0x3FFFF) + off * 4;
+    if(base + 3 >= this.svga_memory.length) return;
+    if(base < this.js_dirty_min) this.js_dirty_min = base;
+    if(base + 3 > this.js_dirty_max) this.js_dirty_max = base + 3;
+    this.planar_write_at(this.svga_memory, base, value);
+};
+
+/** Planar (chain-4 off) write of one CPU byte through the write-mode pipeline to the four plane bytes at `base` of `mem`. */
+VGAScreen.prototype.planar_write_at = function(mem, base, value)
+{
     // V7 fore-latch mode: CPU data is ignored, each plane gets its foreground latch byte
     const feed = (this.v7_seq[0xFE] & 0x08) ? this.v7_fore_latch_dword() : undefined;
     const plane_dword = this.compute_plane_dword(value, feed);
-    const base = (this.svga_bank_offset & ~0x3FFFF) + off * 4;
-    const mem = this.svga_memory;
     if(base + 3 >= mem.length) return;
     const plane_select = this.plane_write_bm & 0xF;
-    if(base < this.js_dirty_min) this.js_dirty_min = base;
-    if(base + 3 > this.js_dirty_max) this.js_dirty_max = base + 3;
     if(plane_select & 0x1) mem[base]     = plane_dword & 0xFF;
     if(plane_select & 0x2) mem[base + 1] = plane_dword >> 8 & 0xFF;
     if(plane_select & 0x4) mem[base + 2] = plane_dword >> 16 & 0xFF;
