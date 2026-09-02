@@ -7,7 +7,12 @@ import { V86 } from "../v86/src/browser/starter.js";
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-const IMAGE = params.get("hda") || "../image/work-live.img";
+/* Which disk image and boot snapshot to use come from image/current.json, written by the image
+   build, so a session always pairs a snapshot with the exact image it was made from. ?hda=
+   overrides for development. */
+const manifest = await fetch("../image/current.json", { cache: "no-cache" }).then(r => r.ok ? r.json() : null).catch(() => null);
+const IMAGE = params.get("hda") || (manifest && manifest.image ? "../image/" + manifest.image : "../image/work-live.img");
+const SHIPPED_STATE = manifest && manifest.state ? "../image/" + manifest.state : "../image/boot.state.gz";
 
 /* ---------------------------------------------------------------- mode selection (SPEC 2.8)
  * The emulated mode tracks the viewport rather than snapping to fixed breakpoints. Windows 3.x
@@ -97,7 +102,7 @@ const stateKeyReady = Promise.all([
   }),
   // The shipped boot snapshot's stamp: a local snapshot is only trusted if it was made on top of
   // the same shipped state, so a new build can never be shadowed by an old local save.
-  fetch(`../image/boot.state.gz?v=${encodeURIComponent(IMAGE)}`, { method: "HEAD" })
+  fetch(SHIPPED_STATE, { method: "HEAD" })
     .then(r => { if (r.ok) shippedStamp = `${r.headers.get("content-length")}:${r.headers.get("last-modified")}`; }),
 ]).catch(e => report("statekey", String(e)));
 
@@ -156,7 +161,7 @@ async function loadState() {
 let restored = false;
 async function loadShippedState() {
   try {
-    const r = await fetch(`../image/boot.state.gz?v=${encodeURIComponent(IMAGE)}`);
+    const r = await fetch(SHIPPED_STATE);
     if (!r.ok) return null;
     let blob = await r.blob();
     if (typeof DecompressionStream === "function" && !/gzip/.test(r.headers.get("content-encoding") || "")) {
@@ -173,7 +178,7 @@ async function uploadBootState() {
     const raw = await emulator.save_state();
     let blob = new Blob([raw]);
     blob = await new Response(blob.stream().pipeThrough(new CompressionStream("gzip"))).blob();
-    const r = await fetch("/__state", { method: "POST", body: blob });
+    const r = await fetch("/__state?name=" + encodeURIComponent(SHIPPED_STATE.split("/").pop()), { method: "POST", body: blob });
     status("boot snapshot: " + await r.text());
   } catch (e) { status("snapshot failed: " + e.message); }
 }

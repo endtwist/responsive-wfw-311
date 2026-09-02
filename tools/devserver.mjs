@@ -34,12 +34,13 @@ http.createServer((req, res) => {
   // which the page restores on a cold visit so the desktop is up in seconds instead of a minute.
   if (url === "/__state" && req.method === "POST") {
     const chunks = [];
+    const name = (new URL(req.url, "http://x").searchParams.get("name") || "boot.state.gz").replace(/[^A-Za-z0-9._-]/g, "");
     req.on("data", c => chunks.push(c));
     req.on("end", () => {
-      const out = path.join(root, "image", "boot.state.gz");
+      const out = path.join(root, "image", name);
       fs.writeFileSync(out, Buffer.concat(chunks));
       res.writeHead(200, { "Access-Control-Allow-Origin": "*" });
-      res.end("boot.state.gz " + fs.statSync(out).size);
+      res.end(name + " " + fs.statSync(out).size);
     });
     return;
   }

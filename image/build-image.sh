@@ -60,3 +60,12 @@ printf '[Settings]\r\nWindow=0,0,640,560, ,0\r\nFace=MS Sans Serif\r\nSize=10\r\
 mcopy -o $M $TMP/WINFILE.INI ::/WINDOWS/WINFILE.INI
 rm -rf $TMP
 echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD live=$LIVE"
+# Immutable builds: a running session must never see its disk change underneath it (a snapshot
+# restored from one build over another build's image gives "Segment Load Failure"). Each build is
+# cloned to a stamped name and current.json names the image and the matching boot snapshot the
+# page should use; old stamped builds are pruned, keeping the last few for sessions still open.
+STAMP=$(date +%Y%m%d-%H%M%S); BASE=${IMG%.img}
+cp -c "$IMG" "$BASE-$STAMP.img" 2>/dev/null || cp "$IMG" "$BASE-$STAMP.img"
+printf '{"image":"%s","state":"%s"}\n' "$BASE-$STAMP.img" "boot-$STAMP.state.gz" > current.json
+ls -t $BASE-*.img 2>/dev/null | tail -n +4 | while read f; do rm -f "$f" "boot-${f#$BASE-}"; rm -f "boot-$(basename "${f#$BASE-}" .img).state.gz"; done
+echo "current: $BASE-$STAMP.img + boot-$STAMP.state.gz"
