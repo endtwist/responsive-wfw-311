@@ -1003,3 +1003,16 @@ system font MS Sans Serif 14 pt / 24 px, shell column 400 x 866 (WIN.INI `ShellH
 a 375x812 phone so the width binds and there are no side bars). Result on the phone: caption
 boxes ~38 px, menu row ~36 px, single-row Program Manager menu, icons ~30 px (32-px bitmaps at
 0.94; icons are the programs' own 32x32 images and only the column scale can make them bigger).
+
+**2026-09-01 (midnight) — first real-device round (iPhone 16 Pro, Safari).** Viewport is
+402x684 with Safari's bars, so the shell column height is now set at runtime (`CMD_SHELLSIZE`),
+and no host toolbar is shown on phones. Pointer "stuck after dropping a card" and the torn card
+streaks had one cause: the host re-sent the whole remaining PS/2 delta up to six times while the
+guest was busy repainting, driving the pointer screens away and making Solitaire restore its drag
+image at the wrong place. Presses now place the pointer absolutely (`CMD_SETPOS` -> SetCursorPos,
+confirmed by the driver's MoveCursor report), and drag motion waits for each report before
+correcting. Minimised icons, which Windows puts at the bottom of the 970-row screen, are moved
+into the visible icon row. The shell takes part in z-order (`PVS`), pinch zooms a layer's client
+area, and the page reports errors, a heartbeat and main-thread stalls to the dev server
+(`shots/devicelog.txt`). Blur on the phone: canvas backing store now matches whole-pixel CSS
+size and `image-rendering: pixelated` guards against Safari resampling.
