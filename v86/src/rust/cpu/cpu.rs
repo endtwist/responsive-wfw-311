@@ -23,7 +23,6 @@ use crate::profiler::stat;
 use crate::softfloat;
 use crate::state_flags::CachedStateFlags;
 
-use std::collections::HashSet;
 use std::ptr;
 
 mod wasm {
@@ -320,6 +319,24 @@ pub struct Code {
     pub wasm_table_index: jit::WasmTableIndex,
     pub state_flags: CachedStateFlags,
     pub state_table: [u16; 0x1000],
+    // responsive-wfw311: which bytes of the page compiled instructions were decoded from (union
+    // over this module and older ones still reachable for the page). Writes that miss them do not
+    // invalidate anything; see jit::jit_dirty_range and dirty_write.
+    pub code_bytes: [u64; 64],
+}
+
+/// A write of `len` bytes at `phys_addr` (virtual `virt_addr`) to a page that has TLB_HAS_CODE.
+/// Returns whether compiled code was invalidated. The common case, a data write to a page that
+/// also holds code, is answered from the TLB's dispatch table without taking the JIT state.
+pub unsafe fn dirty_write(virt_addr: i32, phys_addr: u32, len: u32) -> bool {
+    if let Some(c) = tlb_code[(virt_addr as u32 >> 12) as usize] {
+        let from = phys_addr & 0xFFF;
+        if from + len <= 0x1000 && !jit::code_bytes_overlap(&c.as_ref().code_bytes, from, from + len)
+        {
+            return false;
+        }
+    }
+    jit::jit_dirty_range(phys_addr, len)
 }
 
 pub static mut tlb_data: [i32; 0x100000] = [0; 0x100000];
@@ -1961,7 +1978,11 @@ pub unsafe fn translate_address_read_jit(address: i32) -> OrPageFault<u32> {
 pub unsafe fn translate_address_write(address: i32) -> OrPageFault<u32> {
     translate_address(address, true, *cpl == 3, false, true)
 }
-pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -> OrPageFault<u32> {
+pub unsafe fn translate_address_write_jit(
+    address: i32,
+    wasm_table_index: u16,
+    size: u32,
+) -> OrPageFault<u32> {
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
     let user = *cpl == 3;
     if entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID {
@@ -1973,9 +1994,17 @@ pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -
     if !has_code {
         return Ok(phys_addr);
     }
+    // responsive-wfw311: only a write that hits bytes of compiled instructions invalidates.
+    // Whether the running module is affected must be asked before the invalidation frees it.
+    if let Some(c) = tlb_code[(address as u32 >> 12) as usize] {
+        if !jit::code_bytes_overlap(&c.as_ref().code_bytes, phys_addr & 0xFFF, (phys_addr & 0xFFF) + size)
+        {
+            return Ok(phys_addr);
+        }
+    }
     let is_smc = jit::jit_page_has_wasm_table_index(page, wasm_table_index);
-    jit::jit_dirty_page(page);
-    if !is_smc {
+    let dirtied = jit::jit_dirty_range(phys_addr, size);
+    if !is_smc || !dirtied {
         return Ok(phys_addr);
     }
     dbg_log!(
@@ -2240,7 +2269,14 @@ pub unsafe fn do_page_walk(
         // of memory accesses
         tlb_data[page as usize] = tlb_entry;
 
-        jit::update_tlb_code(Page::page_of(addr as u32), Page::page_of(high));
+        // responsive-wfw311: only pages with code can have a dispatch table; the common case
+        // clears the entry without touching the JIT state (mutex + hash lookups)
+        if has_code {
+            jit::update_tlb_code(Page::page_of(addr as u32), Page::page_of(high));
+        }
+        else {
+            clear_tlb_code(page);
+        }
     }
 
     Ok(if DEBUG {
@@ -2429,8 +2465,7 @@ pub fn tlb_set_has_code(physical_page: Page, has_code: bool) {
 
     check_tlb_invariants();
 }
-pub fn tlb_set_has_code_multiple(physical_pages: &HashSet<Page>, has_code: bool) {
-    let physical_pages: Vec<Page> = physical_pages.into_iter().copied().collect();
+pub fn tlb_set_has_code_multiple(physical_pages: &[Page], has_code: bool) {
     for i in 0..unsafe { valid_tlb_entries_count } {
         let page = unsafe { valid_tlb_entries[i as usize] };
         let entry = unsafe { tlb_data[page as usize] };
@@ -3022,6 +3057,100 @@ pub unsafe fn run_instruction(opcode: i32) { gen::interpreter::run(opcode as u32
 pub unsafe fn run_instruction0f_16(opcode: i32) { gen::interpreter0f::run(opcode as u32) }
 pub unsafe fn run_instruction0f_32(opcode: i32) { gen::interpreter0f::run(opcode as u32 | 0x100) }
 
+// responsive-wfw311 diagnostics (profiler builds only): which pages run interpreted because the
+// cached module was compiled for the other flat-segmentation state, and why the current state
+// is not flat. pv_dbg_flat(0..3) = counts by [is_32<<1 | flat], pv_dbg_flat(4..7) = which flat
+// condition failed (ss base, ds null, ds base, cs base), pv_dbg_flat(8 + 2*i) / (9 + 2*i) = the
+// 16 most frequent virtual pages and their counts.
+#[cfg(feature = "profiler")]
+static mut pv_dbg_flat_counts: [u32; 8] = [0; 8];
+#[cfg(feature = "profiler")]
+static mut pv_dbg_flat_pages: [(u32, u32); 16] = [(0, 0); 16];
+
+#[cfg(feature = "profiler")]
+unsafe fn pv_dbg_record_flat_mismatch(eip: i32, s: CachedStateFlags) {
+    pv_dbg_flat_counts[(s.is_32() as usize) << 1 | s.has_flat_segmentation() as usize] += 1;
+    if *segment_offsets.offset(SS as isize) != 0 {
+        pv_dbg_flat_counts[4] += 1;
+    }
+    if *segment_is_null.offset(DS as isize) {
+        pv_dbg_flat_counts[5] += 1;
+    }
+    if *segment_offsets.offset(DS as isize) != 0 {
+        pv_dbg_flat_counts[6] += 1;
+    }
+    if *segment_offsets.offset(CS as isize) != 0 {
+        pv_dbg_flat_counts[7] += 1;
+    }
+    let page = (eip as u32 >> 12) | (s.to_u32() << 20) | (*cpl as u32) << 24 | (vm86_mode() as u32) << 26;
+    let mut min = 0;
+    for i in 0..16 {
+        if pv_dbg_flat_pages[i].0 == page {
+            pv_dbg_flat_pages[i].1 += 1;
+            return;
+        }
+        if pv_dbg_flat_pages[i].1 < pv_dbg_flat_pages[min].1 {
+            min = i;
+        }
+    }
+    if pv_dbg_flat_pages[min].1 <= 1 {
+        pv_dbg_flat_pages[min] = (page, 1);
+    }
+    else {
+        pv_dbg_flat_pages[min].1 -= 1;
+    }
+}
+
+// Which physical pages run interpreted, by instruction count (top 16), profiler builds only.
+// pv_dbg_interp(2*i) = physical page number, pv_dbg_interp(2*i+1) = interpreted instructions.
+#[cfg(feature = "profiler")]
+static mut pv_dbg_interp_pages: [(u32, u32); 16] = [(0, 0); 16];
+
+#[cfg(feature = "profiler")]
+unsafe fn pv_dbg_record_interp(phys_addr: u32, steps: u32) {
+    let page = phys_addr >> 12;
+    let mut min = 0;
+    for i in 0..16 {
+        if pv_dbg_interp_pages[i].0 == page {
+            pv_dbg_interp_pages[i].1 += steps;
+            return;
+        }
+        if pv_dbg_interp_pages[i].1 < pv_dbg_interp_pages[min].1 {
+            min = i;
+        }
+    }
+    if pv_dbg_interp_pages[min].1 <= steps {
+        pv_dbg_interp_pages[min] = (page, steps);
+    }
+    else {
+        pv_dbg_interp_pages[min].1 -= steps;
+    }
+}
+
+#[no_mangle]
+#[cfg(feature = "profiler")]
+pub fn pv_dbg_interp(i: u32) -> u32 {
+    unsafe {
+        let e = pv_dbg_interp_pages[((i / 2) & 15) as usize];
+        if i & 1 == 0 { e.0 } else { e.1 }
+    }
+}
+
+#[no_mangle]
+#[cfg(feature = "profiler")]
+pub fn pv_dbg_flat(i: u32) -> u32 {
+    unsafe {
+        match i {
+            0..=7 => pv_dbg_flat_counts[i as usize],
+            8..=39 => {
+                let e = pv_dbg_flat_pages[((i - 8) / 2) as usize];
+                if i & 1 == 0 { e.0 } else { e.1 }
+            },
+            _ => 0,
+        }
+    }
+}
+
 pub unsafe fn cycle_internal() {
     profiler::stat_increment(stat::CYCLE_INTERNAL);
     let mut jit_entry = None;
@@ -3033,7 +3162,7 @@ pub unsafe fn cycle_internal() {
         Some(c) => {
             let c = c.as_ref();
 
-            if initial_state_flags == c.state_flags {
+            if c.state_flags.accepts(initial_state_flags) {
                 let state = c.state_table[initial_eip as usize & 0xFFF];
                 if state != u16::MAX {
                     jit_entry = Some((c.wasm_table_index.to_u16(), state));
@@ -3055,6 +3184,8 @@ pub unsafe fn cycle_internal() {
                 }
                 if c.state_flags.has_flat_segmentation() != s.has_flat_segmentation() {
                     profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_FLAT);
+                    #[cfg(feature = "profiler")]
+                    pv_dbg_record_flat_mismatch(initial_eip, s);
                 }
                 if c.state_flags.is_32() != s.is_32() {
                     profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_IS32);
@@ -3137,7 +3268,7 @@ pub unsafe fn cycle_internal() {
             Some(c) => {
                 let c = c.as_ref();
 
-                if initial_state_flags == c.state_flags
+                if c.state_flags.accepts(initial_state_flags)
                     && c.state_table[initial_eip as usize & 0xFFF] != u16::MAX
                 {
                     profiler::stat_increment(stat::RUN_INTERPRETED_PAGE_HAS_ENTRY_AFTER_PAGE_WALK);
@@ -3155,6 +3286,8 @@ pub unsafe fn cycle_internal() {
 
         let initial_instruction_counter = *instruction_counter;
         jit_run_interpreted(phys_addr);
+        #[cfg(feature = "profiler")]
+        pv_dbg_record_interp(phys_addr, *instruction_counter - initial_instruction_counter);
 
         jit::jit_increase_hotness_and_maybe_compile(
             initial_eip,
@@ -3561,7 +3694,7 @@ pub unsafe fn safe_read_slow_jit(
 
     let crosses_page = (addr & 0xFFF) + bitsize / 8 > 0x1000;
     let addr_low = match if is_write {
-        translate_address_write_jit(addr, wasm_table_index)
+        translate_address_write_jit(addr, wasm_table_index, (bitsize / 8) as u32)
     }
     else {
         translate_address_read_jit(addr)
@@ -3575,7 +3708,7 @@ pub unsafe fn safe_read_slow_jit(
     if crosses_page {
         let boundary_addr = (addr | 0xFFF) + 1;
         let addr_high = match if is_write {
-            translate_address_write_jit(boundary_addr, wasm_table_index)
+            translate_address_write_jit(boundary_addr, wasm_table_index, (bitsize / 8) as u32)
         }
         else {
             translate_address_read_jit(boundary_addr)
@@ -3713,7 +3846,8 @@ pub unsafe fn safe_write_slow_jit(
     dbg_assert!(u32::from(wasm_table_index) < jit::WASM_TABLE_SIZE);
 
     let crosses_page = (addr & 0xFFF) + bitsize / 8 > 0x1000;
-    let addr_low = match translate_address_write_jit(addr, wasm_table_index) {
+    let addr_low = match translate_address_write_jit(addr, wasm_table_index, (bitsize / 8) as u32)
+    {
         Err(()) => {
             *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
             return 1;
@@ -3721,7 +3855,11 @@ pub unsafe fn safe_write_slow_jit(
         Ok(x) => x,
     };
     if crosses_page {
-        let addr_high = match translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index) {
+        let addr_high = match translate_address_write_jit(
+            (addr | 0xFFF) + 1,
+            wasm_table_index,
+            (bitsize / 8) as u32,
+        ) {
             Err(()) => {
                 *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
                 return 1;
@@ -3818,9 +3956,10 @@ pub unsafe fn writable_or_pagefault_jit(
     dbg_assert!(eip_offset_in_page >= 0 && eip_offset_in_page < 0x1000);
     dbg_assert!(u32::from(wasm_table_index) < jit::WASM_TABLE_SIZE);
     let crosses_page = (addr & 0xFFF) + size > 0x1000;
-    if translate_address_write_jit(addr, wasm_table_index).is_err()
+    if translate_address_write_jit(addr, wasm_table_index, size as u32).is_err()
         || crosses_page
-            && translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index).is_err()
+            && translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index, size as u32)
+                .is_err()
     {
         *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
         return 1;
@@ -3835,7 +3974,7 @@ pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            dirty_write(addr, phys_addr, 1);
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
@@ -3856,7 +3995,7 @@ pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            dirty_write(addr, phys_addr, 2);
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
@@ -3880,7 +4019,7 @@ pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            dirty_write(addr, phys_addr, 4);
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
@@ -3903,7 +4042,7 @@ pub unsafe fn safe_write64(addr: i32, value: u64) -> OrPageFault<()> {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                dirty_write(addr, phys_addr, 8);
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
@@ -3927,7 +4066,7 @@ pub unsafe fn safe_write128(addr: i32, value: reg128) -> OrPageFault<()> {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                dirty_write(addr, phys_addr, 16);
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
@@ -3950,7 +4089,7 @@ pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            dirty_write(addr, phys_addr, 1);
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
@@ -3977,7 +4116,7 @@ pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                dirty_write(addr, phys_addr, 2);
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
@@ -4005,7 +4144,7 @@ pub unsafe fn safe_read_write32(addr: i32, instruction: &dyn Fn(i32) -> i32) {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                dirty_write(addr, phys_addr, 4);
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
@@ -4346,10 +4485,9 @@ pub unsafe fn get_opstats_buffer(
 pub unsafe fn get_opstats_buffer() -> f64 { 0.0 }
 
 pub fn clear_tlb_code(page: i32) {
+    // responsive-wfw311: the table is owned by the JIT's PageInfo and shared by pointer, so
+    // clearing a TLB entry is just that
     unsafe {
-        if let Some(c) = tlb_code[page as usize] {
-            drop(Box::from_raw(c.as_ptr()));
-        }
         tlb_code[page as usize] = None;
     }
 }

@@ -1426,6 +1426,46 @@ pub unsafe fn instr_CC() {
     dbg_log!("INT3");
     call_interrupt_vector(3, true, None);
 }
+// responsive-wfw311: idle detection for Windows 3.x, see instr_CD.
+//   PV_IDLE_MODE 0: never halt on a yield (upstream behaviour)
+//                1: always halt on a yield (the original patch)
+//                2: halt only when the guest is spinning on yields, i.e. fewer than
+//                   PV_IDLE_SPIN_LIMIT instructions ran since the previous yield
+pub static mut PV_IDLE_MODE: u32 = 2;
+pub static mut PV_IDLE_SPIN_LIMIT: u32 = 20_000;
+#[allow(non_upper_case_globals)]
+static mut pv_idle_last_ic: u32 = 0;
+#[allow(non_upper_case_globals)]
+static mut pv_idle_halted: u32 = 0;
+#[allow(non_upper_case_globals)]
+static mut pv_idle_passed: u32 = 0;
+#[allow(non_upper_case_globals)]
+static mut pv_idle_gap_hist: [u32; 32] = [0; 32];
+
+#[no_mangle]
+pub fn pv_idle_set(mode: u32, spin_limit: u32) {
+    unsafe {
+        PV_IDLE_MODE = mode;
+        if spin_limit != 0 {
+            PV_IDLE_SPIN_LIMIT = spin_limit;
+        }
+    }
+}
+
+/// 0: yields that halted, 1: yields that ran on, 2..34: histogram of log2(instructions since the
+/// previous yield)
+#[no_mangle]
+pub fn pv_idle_stat(i: u32) -> u32 {
+    unsafe {
+        match i {
+            0 => pv_idle_halted,
+            1 => pv_idle_passed,
+            2..=33 => pv_idle_gap_hist[(i - 2) as usize],
+            _ => 0,
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe fn instr_CD(imm8: i32) {
     // INT
@@ -1433,14 +1473,39 @@ pub unsafe fn instr_CD(imm8: i32) {
     // ("release current virtual machine's time slice") and AX=1689h (kernel idle). Treat either
     // as a halt until the next hardware interrupt so an idle desktop does not burn a phone's
     // battery. The handler still runs, just after the wake-up, which is what "yield" means.
+    //
+    // A yield is not always idleness, though: with a DOS virtual machine running, the VMM answers
+    // the Windows VM's yield by switching to the DOS VM, which then runs a full time slice
+    // (hundreds of thousands of instructions) before the Windows VM yields again. Halting on
+    // every yield throttled that to one time slice per timer tick and made a starting DOS box
+    // crawl at under 1 MIPS. So the halt is applied only when the yields come close together,
+    // which is what a spin looks like; a yield that follows a lot of work is let through.
+    //
+    // The halt also requires IF to be set: a halt with interrupts disabled can never be woken
+    // (main_loop treats it as a dead CPU). That case arises in a DOS VM, where INT 2Fh with
+    // IOPL < 3 is a #GP into the VMM through an interrupt gate.
     let idle_call = imm8 == 0x2F && {
         let ax = read_reg16(AX) as u32;
         ax == 0x1680 || ax == 0x1689
     };
     call_interrupt_vector(imm8, true, None);
-    // only with interrupts enabled: a halt with IF clear could never be woken
-    if idle_call && *flags & FLAG_INTERRUPT != 0 {
-        *in_hlt = true;
+    if idle_call {
+        let ic = *instruction_counter;
+        let gap = ic.wrapping_sub(pv_idle_last_ic);
+        pv_idle_last_ic = ic;
+        pv_idle_gap_hist[(32 - gap.leading_zeros()) as usize & 31] += 1;
+        let spinning = match PV_IDLE_MODE {
+            0 => false,
+            1 => true,
+            _ => gap < PV_IDLE_SPIN_LIMIT,
+        };
+        if spinning && *flags & FLAG_INTERRUPT != 0 {
+            *in_hlt = true;
+            pv_idle_halted += 1;
+        }
+        else {
+            pv_idle_passed += 1;
+        }
     }
 }
 #[no_mangle]
