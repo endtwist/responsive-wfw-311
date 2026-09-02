@@ -27,6 +27,8 @@
 #define R_STATUS    0x13
 #define R_DEBUG     0x16
 #define R_GEN       0x17
+#define R_CMD       0x1A   /* host -> guest command, 0 = none; guest writes 0 to acknowledge */
+#define R_CMDARG    0x1B
 
 /* Private display-driver escapes (see guest/driver/port/SRC/CONTROL.ASM) */
 #define PV_QUERY_MODE 0x4A00   /* out: cur w,h, host w,h, dpi, generation */
@@ -41,11 +43,12 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define POLL_MS       250
+#define POLL_MS       100
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
 #define IDT_POLL      1
 #define IDT_ARRANGE   2
-#define ARRANGE_MS    3000   /* the shell starts after us (WIN.INI load=), so wait for it */
+#define ARRANGE_MS    50     /* the shell starts after us (WIN.INI load=): poll for it, arrange the moment it is up */
+#define ARRANGE_GIVEUP 200   /* polls (10 s) before we stop looking */
 
 static unsigned rd(unsigned idx) { outpw(DISPI_INDEX, idx); return inpw(DISPI_DATA); }
 static void wr(unsigned idx, unsigned v) { outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); }
@@ -67,8 +70,9 @@ static HINSTANCE g_hInst;
    Windows having any notion of one. */
 static unsigned g_shellW, g_shellH;
 #define SLOT_W   640               /* each application gets a full-width slot of its own */
-#define MAX_SLOTS 2          /* shell column + this many application columns */
-static char g_lastPub[128];         /* last line published to the host, to avoid repeats */
+#define ICON_ROW  76         /* desktop rows kept free for minimised icons (32px icon + title) */
+#define MAX_SLOTS 3          /* shell column + this many application columns */
+static char g_lastPub[256];         /* last line published to the host, to avoid repeats */
 static unsigned g_fitW, g_fitH;     /* screen the window fixer is fitting to */
 static unsigned g_prevW, g_prevH;   /* screen it is fitting from */
 
@@ -195,6 +199,9 @@ static void arrange_shell(void)
        so the host can magnify that strip and still show all of it. */
     if (g_shellW && (unsigned)cx > g_shellW) cx = (int)g_shellW;
     if (g_shellH && (unsigned)cy > g_shellH) cy = (int)g_shellH;
+    /* Leave a row free along the bottom of the shell column: that is where Windows puts the
+       icons of minimised applications, and minimise should work the way it always has. */
+    if (g_shellW) cy -= ICON_ROW;
     SetWindowPos(pm, NULL, 0, 0, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
     mdi = GetWindow(pm, GW_CHILD);               /* Program Manager's MDI client */
     if (!mdi) return;
@@ -599,48 +606,69 @@ static BOOL reflow_dialog(HWND dlg, int screenW)
     return TRUE;
 }
 
-/* Menus, combo drop-downs and the like are top-level windows in their own right, so they turn up
-   in a window enumeration looking exactly like an application. They must not be parked or framed:
-   a menu belongs wherever its owner is, and treating one as the application meant an open menu
-   was moved away from its window and then blown up to fill the screen on its own. */
+/* Menus, combo drop-downs, the Alt+Tab switcher and the like are top-level windows in their own
+   right, so they turn up in a window enumeration looking exactly like an application. They must
+   not be parked: a menu belongs wherever it popped up. They are published as transient layers,
+   which the host draws 1:1 anchored to whichever layer's column they popped up in. */
 static BOOL is_transient(HWND hwnd, char *cls, int len)
 {
     if (GetClassName(hwnd, cls, len) <= 0) return TRUE;
     return lstrcmp(cls, "#32768") == 0        /* menu */
+        || lstrcmp(cls, "#32771") == 0        /* Alt+Tab task switcher */
         || lstrcmp(cls, "ComboLBox") == 0     /* combo box drop-down */
+        || lstrcmp(cls, "tooltips_class") == 0
         || lstrcmp(cls, "PVMonitor") == 0;    /* ourselves */
 }
 
-/* Collect the application windows, front to back, and give each one a slot of its own.
+/* Collect the top-level windows, front to back, and sort them into kinds.
 
    Each application is parked in a slot to the right of the shell, in screen space no view ever
-   shows directly, and its CLIENT rectangle is published. The host draws the shell strip as the
-   desktop, then draws each application's client area over the top, every one scaled and placed
-   on its own, under a title bar the host draws itself at host scale. So the contents shrink to
-   fit a phone while the chrome stays finger-sized and crisp, and the windows are side by side in
-   the guest but layered on the host. Windows is none the wiser.
+   shows directly, and both its window and client rectangles are published. The host draws the
+   shell strip as the desktop, then draws each application's client area over the top, every one
+   scaled and placed on its own, inside its own chrome drawn at host scale. So the contents shrink
+   to fit a phone while the chrome stays finger-sized and crisp, and the windows are side by side
+   in the guest but layered on the host. Windows is none the wiser.
+
+   Owned windows (dialogs, message boxes) are not parked either: Windows places them relative to
+   their owner, so they already sit in the owner's column, and the host draws them over the
+   owner's layer. Iconic windows are reported so the host can offer them in a dock.
 
    A window keeps its slot for its whole life: the slot is not re-derived from z-order, or every
    activation would physically move windows about and force a repaint of each one. */
-static HWND g_apps[MAX_SLOTS];
-static int g_nApps;
+#define MAX_WND 24
+typedef struct { HWND hwnd; char kind; HWND owner; } WndRec;   /* kind: A app, O owned, T transient, I iconic */
+static WndRec g_wnds[MAX_WND];
+static int g_nWnds;
 static HWND g_slotWnd[MAX_SLOTS];
 
 BOOL CALLBACK __export FindApp(HWND hwnd, LPARAM lParam)
 {
     char cls[24];
-    if (g_nApps >= MAX_SLOTS) return FALSE;
-    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
-    if (is_transient(hwnd, cls, sizeof(cls))) return TRUE;
+    WndRec *r;
+    if (g_nWnds >= MAX_WND) return FALSE;
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    if (is_transient(hwnd, cls, sizeof(cls))) {
+        if (lstrcmp(cls, "PVMonitor") == 0) return TRUE;
+        r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->kind = 'T'; r->owner = NULL;
+        return TRUE;
+    }
     if (lstrcmp(cls, "Progman") == 0) return TRUE;
-    g_apps[g_nApps++] = hwnd;      /* EnumWindows runs front to back */
+    if (lstrcmp(cls, "#32772") == 0) return TRUE;             /* icon title of a minimised window */
+    {
+        HWND o = GetWindow(hwnd, GW_OWNER);
+        if (o && IsIconic(o)) return TRUE;                    /* belongs to something in the dock */
+    }
+    r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->owner = GetWindow(hwnd, GW_OWNER);
+    if (IsIconic(hwnd)) r->kind = 'I';
+    else if (r->owner && IsWindow(r->owner) && IsWindowVisible(r->owner)) r->kind = 'O';
+    else r->kind = 'A';
     return TRUE;
 }
 
 static void collect_apps(void)
 {
     FARPROC proc;
-    g_nApps = 0;
+    g_nWnds = 0;
     proc = MakeProcInstance((FARPROC)FindApp, g_hInst);
     if (!proc) return;
     EnumWindows((WNDENUMPROC)proc, 0L);
@@ -658,66 +686,149 @@ static int slot_of(HWND hwnd)
     return free;
 }
 
-static void publish_layout(void)
+/* The slot of an owned window is its owner's (following owner chains); -1 if none. */
+static int owner_slot(HWND owner)
+{
+    int i, hops;
+    for (hops = 0; owner && hops < 8; hops++) {
+        for (i = 0; i < MAX_SLOTS; i++) if (g_slotWnd[i] == owner) return i;
+        owner = GetWindow(owner, GW_OWNER);
+    }
+    return -1;
+}
+
+/* Keep an application inside its slot. Maximising is one tap away and would make the window as
+   wide as the whole virtual screen, overlapping the other slots and forcing the host to scale
+   it down to nothing; so a maximised window is restored and then sized to fill its slot, which
+   is what maximise means here. Windows accepts this as an ordinary size change. */
+static void park(HWND hwnd, int slot)
 {
     RECT rc;
-    POINT pt;
-    char state[128], line[128], title[24];
+    int slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
+    if (IsZoomed(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+        SetWindowPos(hwnd, NULL, slotX, 0, (int)SLOT_W, (int)g_shellH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return;
+    }
+    GetWindowRect(hwnd, &rc);
+    if (rc.right - rc.left > (int)SLOT_W || rc.bottom - rc.top > (int)g_shellH) {
+        SetWindowPos(hwnd, NULL, slotX, 0,
+                     min(rc.right - rc.left, (int)SLOT_W),
+                     min(rc.bottom - rc.top, (int)g_shellH),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    } else if (rc.left < slotX || rc.left >= slotX + (int)SLOT_W || rc.top < 0) {
+        SetWindowPos(hwnd, NULL, slotX, 0, 0, 0,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    }
+}
+
+/* One line describing a window: both rectangles, so the host can draw the real chrome from the
+   window rectangle at its own scale and the client area inside it at the scale that fits. */
+static void describe(HWND hwnd, char *line, const char *tag, int slot)
+{
+    RECT wr, rc; POINT pt; char title[24];
+    GetWindowRect(hwnd, &wr);
+    GetClientRect(hwnd, &rc);
+    pt.x = rc.left; pt.y = rc.top;
+    ClientToScreen(hwnd, &pt);
+    title[0] = 0;
+    GetWindowText(hwnd, title, sizeof(title));
+    wsprintf(line, "%s %d %d %d %d %d %d %d %d %d %s", (LPSTR)tag, slot,
+             wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+             pt.x, pt.y, rc.right - rc.left, rc.bottom - rc.top, (LPSTR)title);
+}
+
+static void publish_layout(void)
+{
     RECT wr;
-    int i, slot, slotX;
+    char state[256], line[128];
+    int i, slot;
 
     collect_apps();
-    state[0] = 0;
 
-    for (i = g_nApps - 1; i >= 0; i--) {          /* back to front, so the host draws in order */
-        slot = slot_of(g_apps[i]);
-        if (slot < 0) continue;
-        slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
-        GetWindowRect(g_apps[i], &rc);
-        /* A window may not leave its slot. Maximising is one tap away and would otherwise make
-           the window as wide as the whole virtual screen, overlapping the next slot and forcing
-           the host to scale it down to nothing, so an oversized window is pulled back to the
-           slot. Windows accepts this as an ordinary size change and re-lays itself out. */
-        if (rc.right - rc.left > (int)SLOT_W || rc.bottom - rc.top > (int)g_shellH) {
-            SetWindowPos(g_apps[i], NULL, slotX, 0,
-                         min(rc.right - rc.left, (int)SLOT_W),
-                         min(rc.bottom - rc.top, (int)g_shellH),
-                         SWP_NOZORDER | SWP_NOACTIVATE);
-        } else if (rc.left < slotX || rc.left >= slotX + (int)SLOT_W || rc.top < 0) {
-            SetWindowPos(g_apps[i], NULL, slotX, 0, 0, 0,
-                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    /* First pass: assign slots and park applications, so the second pass reports where they
+       actually ended up. */
+    for (i = 0; i < g_nWnds; i++)
+        if (g_wnds[i].kind == 'A' || g_wnds[i].kind == 'I') {
+            slot = slot_of(g_wnds[i].hwnd);
+            if (slot >= 0 && g_wnds[i].kind == 'A') park(g_wnds[i].hwnd, slot);
         }
-        /* Both rectangles go to the host: it draws the real chrome from the window rectangle
-           at its own scale, and the client area inside it at the scale that makes it fit. */
-        GetWindowRect(g_apps[i], &wr);
-        GetClientRect(g_apps[i], &rc);
-        pt.x = rc.left; pt.y = rc.top;
-        ClientToScreen(g_apps[i], &pt);
-        wsprintf(line, "%d %d %d %d %d %d;", slot, wr.left, wr.top, pt.x, pt.y,
-                 rc.right - rc.left);
+
+    /* A compact fingerprint of the layout, published only when it changes. */
+    state[0] = 0;
+    for (i = g_nWnds - 1; i >= 0; i--) {
+        GetWindowRect(g_wnds[i].hwnd, &wr);
+        wsprintf(line, "%c%x:%d,%d,%d,%d;", g_wnds[i].kind, (unsigned)g_wnds[i].hwnd,
+                 wr.left, wr.top, wr.right, wr.bottom);
         if (lstrlen(state) + lstrlen(line) < sizeof(state) - 2) lstrcat(state, line);
     }
-
     if (lstrcmp(state, g_lastPub) == 0) return;
     lstrcpy(g_lastPub, state);
 
-    wsprintf(line, "PVB %d", g_nApps);
+    wsprintf(line, "PVB %d", g_nWnds);
     dbg(line);
-    for (i = g_nApps - 1; i >= 0; i--) {
-        slot = slot_of(g_apps[i]);
-        if (slot < 0) continue;
-        GetWindowRect(g_apps[i], &wr);
-        GetClientRect(g_apps[i], &rc);
-        pt.x = rc.left; pt.y = rc.top;
-        ClientToScreen(g_apps[i], &pt);
-        title[0] = 0;
-        GetWindowText(g_apps[i], title, sizeof(title));
-        wsprintf(line, "PVW %d %d %d %d %d %d %d %d %d %s", slot,
-                 wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
-                 pt.x, pt.y, rc.right - rc.left, rc.bottom - rc.top, (LPSTR)title);
+    for (i = g_nWnds - 1; i >= 0; i--) {          /* back to front, so the host draws in order */
+        switch (g_wnds[i].kind) {
+        case 'A':
+            slot = slot_of(g_wnds[i].hwnd);
+            if (slot < 0) { describe(g_wnds[i].hwnd, line, "PVX", -1); break; }   /* no room */
+            describe(g_wnds[i].hwnd, line, "PVW", slot);
+            break;
+        case 'O':
+            describe(g_wnds[i].hwnd, line, "PVO", owner_slot(g_wnds[i].owner));
+            break;
+        case 'T':
+            describe(g_wnds[i].hwnd, line, "PVT", -1);
+            break;
+        case 'I': {
+            char title[24];
+            title[0] = 0;
+            GetWindowText(g_wnds[i].hwnd, title, sizeof(title));
+            wsprintf(line, "PVI %d %s", slot_of(g_wnds[i].hwnd), (LPSTR)title);
+            break;
+        }
+        }
         dbg(line);
     }
     dbg("PVE");
+}
+
+/* Commands from the host: it writes a command and argument into two adapter registers and we
+   acknowledge by clearing the command. The argument is a slot. */
+#define CMD_ACTIVATE 1
+#define CMD_RESTORE  2
+#define CMD_CLOSE    3
+#define CMD_MINIMIZE 4
+
+static void run_host_command(void)
+{
+    unsigned cmd = rd(R_CMD), arg;
+    HWND hwnd;
+    if (!cmd) return;
+    arg = rd(R_CMDARG);
+    wr(R_CMD, 0);
+    if (arg >= MAX_SLOTS) return;
+    hwnd = g_slotWnd[arg];
+    if (!hwnd || !IsWindow(hwnd)) return;
+    switch (cmd) {
+    case CMD_ACTIVATE:
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        BringWindowToTop(hwnd);
+        SetActiveWindow(hwnd);
+        break;
+    case CMD_RESTORE:
+        ShowWindow(hwnd, SW_RESTORE);
+        SetActiveWindow(hwnd);
+        break;
+    case CMD_CLOSE:
+        PostMessage(hwnd, WM_CLOSE, 0, 0L);
+        break;
+    case CMD_MINIMIZE:
+        ShowWindow(hwnd, SW_MINIMIZE);
+        break;
+    }
+    g_lastPub[0] = 0;                               /* force a fresh publish */
 }
 
 /* Find dialogs that overflow the screen and reflow them. */
@@ -795,7 +906,7 @@ static void poll(HWND hwnd)
     if (w < 320 || h < 200) return;
     g_hostW = w; g_hostH = h;
     if (g_dlgReflow) check_dialogs();
-    if (g_shellW) publish_layout();
+    if (g_shellW) { run_host_command(); publish_layout(); }
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
@@ -866,7 +977,17 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         return 0;
     }
     case WM_TIMER:
-        if (wParam == IDT_ARRANGE) { KillTimer(hwnd, IDT_ARRANGE); arrange_shell(); }
+        if (wParam == IDT_ARRANGE) {
+            /* Arrange the shell as soon as Program Manager and its first group window exist,
+               rather than after a fixed delay: the user otherwise watches it resize. */
+            static int tries;
+            HWND pm = FindWindow("Progman", NULL), mdi = pm ? GetWindow(pm, GW_CHILD) : NULL;
+            if ((mdi && GetWindow(mdi, GW_CHILD)) || ++tries > ARRANGE_GIVEUP) {
+                KillTimer(hwnd, IDT_ARRANGE);
+                arrange_shell();
+                dbg("PVA");                          /* host: the desktop is ready to show */
+            }
+        }
         else poll(hwnd);
         return 0;
     case WM_ENDSESSION:

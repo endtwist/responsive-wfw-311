@@ -548,7 +548,10 @@ Bm8_Move_Diagonal_1Q    endp
 ;---------------------------------------------------------------------------;
 	PUBLIC	SetCurrentBankDL
 SetCurrentBankDL proc near
-
+;	DL = 64K bank. The V7 sample programmed the page and 256K bank bits straight into
+;	the sequencer (F9/F6) and misc output here, bypassing BANK.INC's shadows, so on
+;	the paravirtual adapter PolyBitmap drew through whatever bank was set last:
+;	Solitaire's cards tore during play. Route it through the shared bank code.
 	PUSH 	DS
 	MOV 	AX,DGROUP
 	MOV 	DS,AX
@@ -556,42 +559,7 @@ SetCurrentBankDL proc near
 	MOV 	bank_select_byte,dl
 	POP 	DS
 	assume ds:nothing
-
-	;push	ax
-	push	bx
-	push	dx
-
-	;destroys ax,bx,dx
-	mov	bl,dl
-	and	bl,1
-	mov	ah,dl
-	and	ah,2
-	shl	ah,4
-	and	dl,0ch
-	mov	bh,dl
-	shr	dl,2
-	or	bh,dl
-	mov	dx,3cch
-	in	al,dx
-	and	al,not 20h
-	or	al,ah
-	mov	dx,3c2h
-	out	dx,al
-	mov	dx,3c4h		;sequencer
-	mov	al,0f9h		;extended page select
-	mov	ah,bl
-	out	dx,ax
-	mov	al,0f6h		;256k bank select
-	out	dx,al
-	inc	dx		;data
-	in	al,dx
-	and	al,0f0h		;clear bank bits
-	or	al,bh		;set bank bits
-	out	dx,al
-
-	pop	dx
-	pop	bx
-	;pop	ax
+	call	far_set_both_pages
 	ret
 
 SetCurrentBankDL endp

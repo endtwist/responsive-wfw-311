@@ -376,10 +376,13 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.pv_host_dpi = 96;
     this.pv_status = 0;         // bit0 MODE_REQUEST (W1C), bit1 IRQ_ENABLE
     this.pv_generation = 0;
+    this.pv_cmd = 0;          // PV: host -> guest command (0x1A) and argument (0x1B); the guest clears the command to acknowledge
+    this.pv_cmd_arg = 0;
     this.pv_cursor_x = 0;
     this.pv_cursor_y = 0;
     this.pv_debug_line = "";
     bus.register("pv-request-mode", function(data) { this.pv_request_mode(data[0], data[1]); }, this);
+    bus.register("pv-command", function(data) { this.pv_cmd_arg = data[1] & 0xFFFF; this.pv_cmd = data[0] & 0xFFFF; }, this);
     bus.register("pv-set-dpi", function(dpi) { this.pv_host_dpi = dpi | 0; }, this);
 
     io.register_write(0x1CE, this, undefined, this.port1CE_write);
@@ -2388,6 +2391,12 @@ VGAScreen.prototype.port1CF_write = function(value)
             // PV WRITE_BANK (64K units): bank used for writes through the A000 window
             this.svga_bank_offset = value << 16;
             break;
+        case 0x1A:
+            this.pv_cmd = value;          // the guest writes 0 to acknowledge a command
+            break;
+        case 0x1B:
+            this.pv_cmd_arg = value;
+            break;
         case 8:
             // x offset
             dbg_log("SVGA X offset: " + h(value), LOG_VGA);
@@ -2589,6 +2598,10 @@ VGAScreen.prototype.svga_register_read = function(n)
             return this.svga_read_bank_offset >>> 16;
         case 0x19:
             return this.svga_bank_offset >>> 16;
+        case 0x1A:
+            return this.pv_cmd;
+        case 0x1B:
+            return this.pv_cmd_arg;
 
         case 8:
             // x offset

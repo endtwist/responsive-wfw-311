@@ -57,9 +57,10 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
  * and crisp instead of shrinking with them. Windows itself sees none of this: as far as it is
  * concerned the windows sit side by side on one wide screen.
  */
+const pageStart = performance.now();
 const SHELL_W = 448;             // width of the shell column on a narrow display
 const SLOT_W = 640;              // width of each application column (must match pvmon.c)
-const MAX_SLOTS = 2;             // application columns (must match pvmon.c)
+const MAX_SLOTS = 3;             // application columns (must match pvmon.c)
 const WIN_MARGIN = 8;
 
 function narrow() { return viewport()[0] < 600; }
@@ -182,34 +183,49 @@ emulator.add_listener("screen-set-size", s => {
 let guestCursor = null;
 emulator.bus.register("pv-cursor", xy => { guestCursor = { x: xy[0], y: xy[1] }; });
 
-/* What the guest says is where: the shell column's size, and one entry per application window
-   giving the client rectangle it occupies in guest screen space, back to front. */
+/* What the guest says is where: the shell column's size, and one entry per top-level window,
+   back to front, each with the rectangle it occupies in guest screen space.
+     PVW slot ...   application, parked in a slot column
+     PVO slot ...   window owned by the application in that slot (dialog, message box)
+     PVT ...        transient (menu, drop-down, Alt+Tab switcher): drawn 1:1 where it popped up
+     PVX ...        application that got no slot (all columns taken)
+     PVI slot title minimised application, offered in the dock
+     PVA            the shell has been arranged: the desktop is ready to show */
 let shell = { w: SHELL_W, h: 0, cap: 18 };
 let layers = [];
-let pendingLayers = null;
-const layerPos = {};                 // slot -> host position, moved by dragging
+let dock = [];
+let desktopReady = false;
+let pendingLayers = null, pendingDock = null;
+const layerPos = {};                 // layer key -> host position, moved by dragging
 
 const pvLog = [];
-window.pvState = () => ({ shell, layers, placed, view, log: pvLog.slice(-40) });
+window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, log: pvLog.slice(-40) });
 emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
   let m = /^PVD (\d+) (\d+)(?: (\d+))?/.exec(line);
   if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18 }; return; }
-  if (/^PVB /.test(line)) { pendingLayers = []; return; }
-  m = /^PVW (\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
+  if (/^PVA/.test(line)) { desktopReady = true; return; }
+  if (/^PVB /.test(line)) { pendingLayers = []; pendingDock = []; return; }
+  m = /^PV([WOTX]) (-?\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
   if (m && pendingLayers) {
     pendingLayers.push({
-      slot: +m[1], wx: +m[2], wy: +m[3], ww: +m[4], wh: +m[5],
-      gx: +m[6], gy: +m[7], gw: +m[8], gh: +m[9], title: m[10] || "",
+      kind: m[1], slot: +m[2], wx: +m[3], wy: +m[4], ww: +m[5], wh: +m[6],
+      gx: +m[7], gy: +m[8], gw: +m[9], gh: +m[10], title: m[11] || "",
     });
     return;
   }
+  m = /^PVI (-?\d+) ?(.*)$/.exec(line);
+  if (m && pendingDock) { pendingDock.push({ slot: +m[1], title: m[2] || "Window" }); return; }
   if (/^PVE/.test(line) && pendingLayers) {
-    layers = pendingLayers; pendingLayers = null;
-    const live = new Set(layers.map(l => l.slot));
-    for (const k of Object.keys(layerPos)) if (!live.has(+k)) delete layerPos[k];
+    layers = pendingLayers; dock = pendingDock; pendingLayers = pendingDock = null;
+    const live = new Set(layers.map(layerKey));
+    for (const k of Object.keys(layerPos)) if (!live.has(k)) delete layerPos[k];
   }
 });
+
+function layerKey(L) { return L.kind === "W" ? "s" + L.slot : L.kind + ":" + L.title; }
+function sendCommand(cmd, slot) { emulator.bus.send("pv-command", [cmd, slot]); }
+const CMD_ACTIVATE = 1, CMD_RESTORE = 2, CMD_CLOSE = 3, CMD_MINIMIZE = 4;
 
 /* The desktop view: which slice of the guest screen is the background, and at what scale. */
 let view = { x: 0, y: 0, w: 0, h: 0, scale: 1, ox: 0 };
@@ -228,17 +244,45 @@ function chooseView(src) {
 
 /* Where each window lands on the host, and how its chrome is cut up.
 
-   The chrome is the guest's own pixels, drawn at one host pixel per guest pixel, so it stays
-   exactly as crisp and as large as it is on the desktop behind while the client area inside it
-   shrinks to fit. The caption row is composited in three pieces: the system box on the left and
-   the minimise and maximise boxes on the right keep their corners untouched, and only the strip
-   of caption between them is squeezed to span the gap. The menu row below is drawn from the left
-   and cropped, since menu titles are left-aligned. */
-function placeLayers() {
+   The chrome is the guest's own pixels, drawn at the same scale as the desktop behind it (the
+   shell column's scale, `view.scale`), nearest-neighbour, so every caption, menu bar and system
+   box on screen is the same size, however much the client area inside has to shrink to fit. The
+   caption row is composited in three pieces: the system box on the left and the minimise and
+   maximise boxes on the right keep their corners untouched, and the strip of caption between
+   them is cropped around its centre. The menu row below is drawn from the left and cropped,
+   since menu titles are left-aligned.
+
+   Owned windows are centred over their owner's layer. Transient windows are drawn at the chrome
+   scale at the point they popped up, mapped through whichever layer's column they popped up in,
+   so a menu hangs off its menu bar even though the bar's window is scaled. */
+function placeLayers(src) {
   const [vw, vh] = viewport();
   const out = [];
+  const bySlot = {};
+  const screenW = src.width;
+  const c = view.scale;                              // chrome scale: same as the desktop's
   layers.forEach((L, i) => {
-    const inset = {                                  // frame thickness, straight from the guest
+    const key = layerKey(L);
+    if (L.kind === "T") {
+      const hw = Math.round(L.ww * c), hh = Math.round(L.wh * c);
+      let x, y;
+      const centred = Math.abs(L.wx + L.ww / 2 - screenW / 2) < 8;      // the Alt+Tab switcher
+      const col = Math.floor(L.wx / SLOT_W);
+      const owner = col >= 1 ? bySlot[col - 1] : null;
+      if (centred) { x = Math.round((vw - hw) / 2); y = Math.round((vh - hh) / 2); }
+      else if (owner) {
+        x = Math.round(owner.x + owner.hl + (L.wx - owner.gx) * owner.s);
+        y = L.wy < owner.gy
+          ? Math.round(owner.y + (L.wy - owner.wy) * c)                   // hangs off the chrome
+          : Math.round(owner.y + owner.ht + (L.wy - owner.gy) * owner.s);
+      } else { x = Math.round(view.ox + L.wx * c); y = Math.round(L.wy * c); }
+      x = Math.max(0, Math.min(vw - hw, x));
+      y = Math.max(0, Math.min(vh - hh, y));
+      out.push({ ...L, key, s: c, c, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
+                 inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, transient: true });
+      return;
+    }
+    const inset = {                                  // frame thickness in guest pixels
       l: Math.max(0, L.gx - L.wx),
       t: Math.max(0, L.gy - L.wy),
       b: Math.max(0, (L.wy + L.wh) - (L.gy + L.gh)),
@@ -246,20 +290,24 @@ function placeLayers() {
     const capRow = Math.min(inset.t, inset.l + shell.cap);   // border plus caption
     const menuRow = inset.t - capRow;                        // menu bar, if the window has one
     const box = Math.max(12, shell.cap);                     // a caption box is square
-    const chromeW = 2 * inset.l;
-    const availW = vw - 2 * WIN_MARGIN - chromeW;
-    const availH = vh - 2 * WIN_MARGIN - inset.t - inset.b;
-    const s = Math.min(view.scale, availW / L.gw, availH / L.gh);
+    const hl = Math.round(inset.l * c), ht = Math.round(inset.t * c), hb = Math.round(inset.b * c);
+    const availW = vw - 2 * WIN_MARGIN - 2 * hl;
+    const availH = vh - 2 * WIN_MARGIN - ht - hb;
+    const s = Math.min(c, availW / Math.max(1, L.gw), availH / Math.max(1, L.gh));
     const cw = Math.round(L.gw * s), ch = Math.round(L.gh * s);
-    const hw = cw + chromeW, hh = ch + inset.t + inset.b;
-    let p = layerPos[L.slot];
+    const hw = cw + 2 * hl, hh = ch + ht + hb;
+    let p = layerPos[key];
     if (!p) {
-      p = layerPos[L.slot] = { x: Math.round((vw - hw) / 2) + i * 16,
-                               y: Math.round(vh * 0.12) + i * 16 };
+      const owner = L.kind === "O" ? bySlot[L.slot] : null;
+      p = layerPos[key] = owner
+        ? { x: Math.round(owner.x + (owner.hw - hw) / 2), y: Math.round(owner.y + (owner.hh - hh) / 2) }
+        : { x: Math.round((vw - hw) / 2) + i * 16, y: Math.round(vh * 0.12) + i * 16 };
     }
     const x = Math.max(40 - hw, Math.min(vw - 40, p.x));
-    const y = Math.max(0, Math.min(vh - capRow, p.y));
-    out.push({ ...L, s, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box });
+    const y = Math.max(0, Math.min(vh - Math.round(capRow * c), p.y));
+    const w = { ...L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb };
+    if (L.kind === "W") bySlot[L.slot] = w;
+    out.push(w);
   });
   return out;
 }
@@ -274,22 +322,24 @@ function hitTest(px, py) {
     if (px < w.x || px > w.x + w.hw) continue;
     if (py < w.y || py > w.y + w.hh) continue;
     const dx = px - w.x, dy = py - w.y;
-    if (dy >= w.inset.t && dy < w.inset.t + w.ch &&
-        dx >= w.inset.l && dx < w.inset.l + w.cw) {
+    if (w.transient)
+      return { kind: "chrome", win: w, x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
+    if (dy >= w.ht && dy < w.ht + w.ch && dx >= w.hl && dx < w.hl + w.cw) {
       return { kind: "client", win: w,
-               x: Math.round(w.gx + (dx - w.inset.l) / w.s),
-               y: Math.round(w.gy + (dy - w.inset.t) / w.s) };
+               x: Math.round(w.gx + (dx - w.hl) / w.s),
+               y: Math.round(w.gy + (dy - w.ht) / w.s) };
     }
-    if (dy < w.capRow) {                              // caption row: boxes click, middle drags
-      const leftEnd = w.inset.l + w.box;
-      const rightStart = w.hw - w.inset.l - 2 * w.box;
-      if (dx < leftEnd) return { kind: "chrome", win: w, x: w.wx + dx, y: w.wy + dy };
+    const capH = Math.round(w.capRow * w.c), boxW = Math.round(w.box * w.c);
+    if (dy < capH) {                                  // caption row: boxes click, middle drags
+      const leftEnd = w.hl + boxW;
+      const rightStart = w.hw - w.hl - 2 * boxW;
+      if (dx < leftEnd) return { kind: "chrome", win: w, x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
       if (dx >= rightStart)
-        return { kind: "chrome", win: w, x: w.wx + w.ww - (w.hw - dx), y: w.wy + dy };
+        return { kind: "chrome", win: w, x: Math.round(w.wx + w.ww - (w.hw - dx) / w.c), y: Math.round(w.wy + dy / w.c) };
       return { kind: "drag", win: w };
     }
-    if (dy < w.inset.t)                               // menu row is drawn 1:1 from the left
-      return { kind: "chrome", win: w, x: w.wx + dx, y: w.wy + dy };
+    if (dy < w.ht)                                    // menu row is drawn from the left
+      return { kind: "chrome", win: w, x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
     return { kind: "drag", win: w };                  // the frame itself drags, like the caption
   }
   return { kind: "desktop",
@@ -298,48 +348,51 @@ function hitTest(px, py) {
 }
 
 function drawWindow(g, src, w) {
-  const { inset, capRow, menuRow, box } = w;
+  const c = w.c;
+  if (w.transient) {
+    g.imageSmoothingEnabled = false;
+    g.drawImage(src, w.wx, w.wy, w.ww, w.wh, w.x, w.y, w.hw, w.hh);
+    return;
+  }
+  const { inset, capRow, menuRow, box, hl, ht, hb } = w;
+  const capH = Math.round(capRow * c), menuH = ht - capH;
+  const cornerL = Math.round((inset.l + box) * c), cornerR = Math.round((inset.l + 2 * box) * c);
   const midSrcW = w.ww - 2 * inset.l - 3 * box;       // the caption strip between the boxes
-  const midDstW = w.hw - 2 * inset.l - 3 * box;
+  const midDstW = w.hw - cornerL - cornerR;
 
   g.imageSmoothingEnabled = false;
-  g.drawImage(src, w.wx, w.wy, inset.l + box, capRow, w.x, w.y, inset.l + box, capRow);
+  g.drawImage(src, w.wx, w.wy, inset.l + box, capRow, w.x, w.y, cornerL, capH);
   g.drawImage(src, w.wx + w.ww - inset.l - 2 * box, w.wy, inset.l + 2 * box, capRow,
-              w.x + w.hw - inset.l - 2 * box, w.y, inset.l + 2 * box, capRow);
+              w.x + w.hw - cornerR, w.y, cornerR, capH);
   if (midSrcW > 0 && midDstW > 0) {
-    if (midDstW <= midSrcW) {
-      /* The caption is narrower on the host than in the guest, so the strip between the boxes
-         is cropped rather than squeezed: equal slivers of empty caption come off each side and
-         the title, which Windows centres, stays centred, at its own size and perfectly crisp.
-         Only a title too long for the gap loses its ends, which is what Windows does anyway. */
-      const cut = Math.floor((midSrcW - midDstW) / 2);
-      g.drawImage(src, w.wx + inset.l + box + cut, w.wy, midDstW, capRow,
-                  w.x + inset.l + box, w.y, midDstW, capRow);
+    const need = midDstW / c;                         // guest pixels that fit in the gap
+    if (need <= midSrcW) {
+      /* Cropped rather than squeezed: equal slivers of empty caption come off each side and the
+         title, which Windows centres, stays centred, at its own size and perfectly crisp. */
+      const cut = Math.floor((midSrcW - need) / 2);
+      g.drawImage(src, w.wx + inset.l + box + cut, w.wy, Math.round(need), capRow,
+                  w.x + cornerL, w.y, midDstW, capH);
     } else {                                          // wider on the host: pad, do not stretch
-      const pad = midDstW - midSrcW;
-      g.drawImage(src, w.wx + inset.l + box, w.wy, 2, capRow,
-                  w.x + inset.l + box, w.y, pad, capRow);
-      g.drawImage(src, w.wx + inset.l + box, w.wy, midSrcW, capRow,
-                  w.x + inset.l + box + pad, w.y, midSrcW, capRow);
+      const midH = Math.round(midSrcW * c), pad = midDstW - midH;
+      g.drawImage(src, w.wx + inset.l + box, w.wy, 2, capRow, w.x + cornerL, w.y, pad, capH);
+      g.drawImage(src, w.wx + inset.l + box, w.wy, midSrcW, capRow, w.x + cornerL + pad, w.y, midH, capH);
     }
   }
-  if (menuRow > 0) {
-    const mw = Math.min(w.ww, w.hw);
-    g.drawImage(src, w.wx, w.wy + capRow, mw, menuRow, w.x, w.y + capRow, mw, menuRow);
-    if (w.hw > mw)                                    // pad with the menu bar's own background
-      g.drawImage(src, w.wx + mw - 2, w.wy + capRow, 2, menuRow,
-                  w.x + mw, w.y + capRow, w.hw - mw, menuRow);
+  if (menuRow > 0 && menuH > 0) {
+    const mwG = Math.min(w.ww, Math.round(w.hw / c)), mwH = Math.round(mwG * c);
+    g.drawImage(src, w.wx, w.wy + capRow, mwG, menuRow, w.x, w.y + capH, mwH, menuH);
+    if (w.hw > mwH)                                   // pad with the menu bar's own background
+      g.drawImage(src, w.wx + mwG - 2, w.wy + capRow, 2, menuRow, w.x + mwH, w.y + capH, w.hw - mwH, menuH);
   }
-  if (inset.l > 0) {                                  // side borders, stretched only lengthways
-    g.drawImage(src, w.wx, w.gy, inset.l, w.gh, w.x, w.y + inset.t, inset.l, w.ch);
-    g.drawImage(src, w.gx + w.gw, w.gy, inset.l, w.gh,
-                w.x + inset.l + w.cw, w.y + inset.t, inset.l, w.ch);
+  if (hl > 0) {                                       // side borders, stretched only lengthways
+    g.drawImage(src, w.wx, w.gy, inset.l, w.gh, w.x, w.y + ht, hl, w.ch);
+    g.drawImage(src, w.gx + w.gw, w.gy, inset.l, w.gh, w.x + hl + w.cw, w.y + ht, hl, w.ch);
   }
-  if (inset.b > 0)
-    g.drawImage(src, w.wx, w.gy + w.gh, Math.min(w.ww, w.hw), inset.b,
-                w.x, w.y + inset.t + w.ch, Math.min(w.hw, w.ww), inset.b);
+  if (hb > 0)
+    g.drawImage(src, w.wx, w.gy + w.gh, Math.min(w.ww, Math.round(w.hw / c)), inset.b,
+                w.x, w.y + ht + w.ch, w.hw, hb);
   g.imageSmoothingEnabled = w.s < 1;                  // the client, at the scale that fits
-  g.drawImage(src, w.gx, w.gy, w.gw, w.gh, w.x + inset.l, w.y + inset.t, w.cw, w.ch);
+  g.drawImage(src, w.gx, w.gy, w.gw, w.gh, w.x + hl, w.y + ht, w.cw, w.ch);
 }
 
 function present() {
@@ -358,11 +411,20 @@ function present() {
     g.imageSmoothingEnabled = false;
     g.fillStyle = "#000";
     g.fillRect(0, 0, vw, vh);
-    const dw = view.w * view.scale, dh = view.h * view.scale;
-    g.drawImage(src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
-
-    placed = narrow() ? placeLayers() : [];
-    for (const w of placed) drawWindow(g, src, w);    // back to front
+    /* Until the shell has been arranged, show the whole guest screen (DOS, the Windows logo)
+       rather than the desktop column: the user should not watch Program Manager being resized,
+       and nothing drawn here is ever the host's own. A long timeout guards a guest that never
+       reports in. */
+    if (narrow() && !desktopReady && performance.now() - pageStart < 90000) {
+      const sc = Math.min(vw / src.width, vh / src.height);
+      view = { x: 0, y: 0, w: src.width, h: src.height, scale: sc, ox: Math.round((vw - src.width * sc) / 2) };
+    }
+    {
+      const dw = view.w * view.scale, dh = view.h * view.scale;
+      g.drawImage(src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
+      placed = narrow() ? placeLayers(src) : [];
+      for (const w of placed) drawWindow(g, src, w);  // back to front
+    }
   }
   requestAnimationFrame(present);
 }
@@ -460,11 +522,42 @@ function setZoom(z, anchor) {
  * PS/2 is relative, so pointing is done by steering the guest cursor towards the target using
  * the position the driver reports, correcting a few times to absorb any scaling.
  */
-const LONG_PRESS_MS = 500;
 
-/* A tap is resolved against the composited layers: a title bar drags that window about, and
-   anything else becomes a guest click at the pixel the user actually touched, even though each
-   layer is drawn at its own scale and offset. */
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* Steer the guest pointer to a point. The stock PS/2 driver is relative, so the whole distance
+   is sent as one burst of packets (mouse acceleration is off, so mickeys are pixels), then the
+   position the driver reports is checked and corrected a couple of times. Targets are coalesced:
+   a drag that produces fifty moves steers towards the latest one, never queues them. */
+let steerTarget = null, steering = null;
+
+function steerTo(pt) {
+  steerTarget = pt;
+  if (!steering) steering = (async () => {
+    try {
+      for (let i = 0; i < 6 && steerTarget; i++) {
+        if (!guestCursor) { emulator.bus.send("mouse-delta", [1, 0]); await sleep(15); continue; }
+        const dx = steerTarget.x - guestCursor.x, dy = steerTarget.y - guestCursor.y;
+        if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) break;
+        let rx = dx, ry = dy;
+        while (rx || ry) {          // a PS/2 packet carries one signed byte per axis
+          const sx = Math.max(-100, Math.min(100, rx)), sy = Math.max(-100, Math.min(100, ry));
+          emulator.bus.send("mouse-delta", [sx, -sy]);   // guest Y grows downwards
+          rx -= sx; ry -= sy;
+        }
+        await sleep(12);
+      }
+    } finally { steering = null; steerTarget = null; }
+  })();
+  return steering;
+}
+
+function button(down, right) { emulator.bus.send("mouse-click", [down && !right, false, down && right]); }
+
+/* A press is resolved against the composited layers: a title bar drags that window about, a dock
+   entry restores an application, and anything else becomes a guest click at the pixel the user
+   actually touched, even though each layer is drawn at its own scale and offset. */
 function hostPoint(ev) {
   const r = $("pres").getBoundingClientRect();
   return { px: ev.clientX - r.left, py: ev.clientY - r.top };
@@ -480,71 +573,40 @@ function canvasPoint(ev) {
    as smooth as the display and the guest never learns the window moved. */
 let chromeDrag = null;
 
-function dragStart(ev) {
+function pressStart(ev) {
   const { px, py } = hostPoint(ev);
   const h = hitTest(px, py);
-  if (h.kind !== "drag") return false;
-  const p = layerPos[h.win.slot];
-  chromeDrag = { slot: h.win.slot, dx: px - p.x, dy: py - p.y };
-  return true;
+  if (h.kind === "drag") {
+    const p = layerPos[h.win.key];
+    chromeDrag = { key: h.win.key, dx: px - p.x, dy: py - p.y };
+    return "drag";
+  }
+  return null;
 }
 
 function dragMove(ev) {
   if (!chromeDrag) return false;
   const { px, py } = hostPoint(ev);
-  layerPos[chromeDrag.slot] = { x: Math.round(px - chromeDrag.dx),
-                                y: Math.round(py - chromeDrag.dy) };
+  layerPos[chromeDrag.key] = { x: Math.round(px - chromeDrag.dx), y: Math.round(py - chromeDrag.dy) };
   return true;
 }
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-async function steerTo(pt) {
-  for (let i = 0; i < 8; i++) {
-    if (!guestCursor) { emulator.bus.send("mouse-delta", [1, 0]); await sleep(30); continue; }
-    const dx = pt.x - guestCursor.x, dy = pt.y - guestCursor.y;
-    if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) return true;
-    // v86 forwards a delta straight into a PS/2 packet, whose fields are one signed byte
-    let rx = dx, ry = dy;
-    while (rx || ry) {
-      const sx = Math.max(-100, Math.min(100, rx)), sy = Math.max(-100, Math.min(100, ry));
-      emulator.bus.send("mouse-delta", [sx, -sy]);   // guest Y grows downwards
-      rx -= sx; ry -= sy;
-    }
-    await sleep(25);
-  }
-  return false;
-}
-
-function button(down, right) { emulator.bus.send("mouse-click", [down && !right, false, down && right]); }
-
+const LONG_PRESS_MS = 500;
 let touchInstalled = false;
 function installTouch() {
   const c = $("pres");
   if (!c || touchInstalled) return;
   touchInstalled = true;
-  // Steering the pointer takes several packets, so the gesture handlers are serialised: a
-  // press that lands while the pointer is still moving would drag whatever is under it.
+  // Button events are serialised behind the pointer: a press that lands while the pointer is
+  // still moving would drag whatever is under it.
   let chain = Promise.resolve();
   const queue = fn => (chain = chain.then(fn).catch(() => {}));
-  let pressTimer = 0, longFired = false, dragging = false;
+  let pressTimer = 0, longFired = false, dragging = false, consumed = null;
 
-  let pinchDist = 0, panLast = null;
-  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-  const mid = t => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
-
-  c.addEventListener("touchstart", ev => {
-    if (ev.touches.length === 2) {          // two fingers: zoom and pan, never mouse input
-      ev.preventDefault();
-      clearTimeout(pressTimer);
-      pinchDist = dist(ev.touches);
-      panLast = mid(ev.touches);
-      return;
-    }
-    if (ev.touches.length !== 1) return;
-    ev.preventDefault();
-    if (dragStart(ev.touches[0])) return;
-    const pt = canvasPoint(ev.touches[0]);
+  const down = ev => {
+    consumed = pressStart(ev);
+    if (consumed) return;
+    const pt = canvasPoint(ev);
     longFired = false; dragging = false;
     queue(async () => {
       await steerTo(pt);
@@ -553,68 +615,44 @@ function installTouch() {
         button(true, true); await sleep(60); button(false, true);
       }), LONG_PRESS_MS);
     });
-  }, { passive: false });
-
-  c.addEventListener("touchmove", ev => {
-    if (ev.touches.length === 2) {
-      ev.preventDefault();
-      const box = $("screen_container");
-      const d = dist(ev.touches), m = mid(ev.touches);
-      if (panLast) { box.scrollLeft -= m.x - panLast.x; box.scrollTop -= m.y - panLast.y; }
-      panLast = m;
-      if (pinchDist > 0 && Math.abs(d - pinchDist) > 8) {
-        const r = c.getBoundingClientRect();
-        setZoom(zoom * (d / pinchDist), { x: m.x - r.left, y: m.y - r.top });
-        pinchDist = d;
-      }
-      return;
-    }
-    if (ev.touches.length !== 1) return;
-    ev.preventDefault();
+  };
+  const move = ev => {
+    if (dragMove(ev)) return;
+    if (consumed) return;
     clearTimeout(pressTimer);
-    if (dragMove(ev.touches[0])) return;
-    const pt = canvasPoint(ev.touches[0]);
+    const pt = canvasPoint(ev);
     queue(async () => {
       if (longFired) return;
-      if (!dragging) { dragging = true; button(true, false); await sleep(40); }
+      if (!dragging) { dragging = true; button(true, false); await sleep(30); }
       await steerTo(pt);
     });
-  }, { passive: false });
-
-  c.addEventListener("touchend", ev => {
-    ev.preventDefault();
+  };
+  const up = () => {
     clearTimeout(pressTimer);
-    if (chromeDrag) { chromeDrag = null; return; }
-    if (panLast) { panLast = null; pinchDist = 0; return; }   // finishing a two-finger gesture
+    if (consumed) { consumed = null; chromeDrag = null; return; }
     queue(async () => {
       if (dragging) { button(false, false); dragging = false; return; }
       if (longFired) { longFired = false; return; }
       button(true, false); await sleep(60); button(false, false);   // tap is a left click
     });
+  };
+
+  c.addEventListener("touchstart", ev => {
+    if (ev.touches.length !== 1) { clearTimeout(pressTimer); return; }
+    ev.preventDefault(); down(ev.touches[0]);
   }, { passive: false });
+  c.addEventListener("touchmove", ev => {
+    if (ev.touches.length !== 1) return;
+    ev.preventDefault(); move(ev.touches[0]);
+  }, { passive: false });
+  c.addEventListener("touchend", ev => { ev.preventDefault(); up(); }, { passive: false });
+  c.addEventListener("touchcancel", ev => { ev.preventDefault(); up(); }, { passive: false });
 
   // The same gestures with a mouse, since the v86 canvas itself is off-screen in this mode.
-  let mouseDown = false, mouseDragging = false;
-  c.addEventListener("mousedown", ev => {
-    ev.preventDefault();
-    if (dragStart(ev)) { mouseDown = true; return; }
-    mouseDown = true; mouseDragging = false;
-    const pt = canvasPoint(ev);
-    queue(async () => { await steerTo(pt); button(true, ev.button === 2); });
-  });
-  window.addEventListener("mousemove", ev => {
-    if (!mouseDown) return;
-    if (dragMove(ev)) return;
-    const pt = canvasPoint(ev);
-    mouseDragging = true;
-    queue(() => steerTo(pt));
-  });
-  window.addEventListener("mouseup", ev => {
-    if (!mouseDown) return;
-    mouseDown = false;
-    if (chromeDrag) { chromeDrag = null; return; }
-    queue(async () => { button(false, ev.button === 2); });
-  });
+  let mouseDown = false;
+  c.addEventListener("mousedown", ev => { ev.preventDefault(); mouseDown = true; down(ev); });
+  window.addEventListener("mousemove", ev => { if (mouseDown) move(ev); });
+  window.addEventListener("mouseup", () => { if (!mouseDown) return; mouseDown = false; up(); });
   c.addEventListener("contextmenu", ev => ev.preventDefault());
 }
 
@@ -676,6 +714,9 @@ $("resetbtn").onclick = async () => { await clearState(); location.search = "?fr
 emulator.add_listener("emulator-started", () => { installTouch(); installKeyboard(); fitCanvas(); });
 setTimeout(() => { installTouch(); installKeyboard(); }, 3000);
 
-if ("serviceWorker" in navigator && location.protocol !== "file:") {
+// Not on localhost: during development the worker only gets in the way (stale code, and dead
+// pooled connections after a server restart made every GET fail with ERR_FAILED).
+if ("serviceWorker" in navigator && location.protocol !== "file:" &&
+    !/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }

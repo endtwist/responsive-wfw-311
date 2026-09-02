@@ -246,6 +246,7 @@ endif
 ifdef   EXCLUSION
         externFP exclude_far            ; exclude area from screen.
         externFP unexclude_far          ; clear excluded area.
+        externFP far_set_both_pages     ; PV: shared bank code (BANK.INC/VGAUTIL)
 endif
 
 externB bank_select_byte
