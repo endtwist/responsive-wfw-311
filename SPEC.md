@@ -1250,3 +1250,9 @@ iOS keyboard (needs a gesture map or a hardware keyboard).
   `node tools/remote.mjs phone tour`, `… phone shot`, `… phone eval 'return pvState().layers'`,
   `… phone tap 200 400`, `… phone keys 0x38 0x21 0xa1 0xb8`, `… --devices`. Exit 0 ok, 1 failed
   (or a tour with failures), 2 no answer.
+- Follow-up (same day): with the page booted at `/solitaire`, the tour attributed Solitaire's rect to
+  Notepad — PVMON publishes the layout only on change, so a tracker registered late had an empty
+  `before` set and took the first PVW it saw. Now: the tour asks for a republish first, closes every
+  pre-existing non-shell layer (recorded as `preexisting=` / `cleaned=` in TOUR-BEGIN), and matches
+  the launched program's window by a title pattern per app (`match=title`), falling back to the
+  newly occupied slot (`match=slot`).
