@@ -794,7 +794,7 @@ function installTouch() {
   // still moving would drag whatever is under it.
   let chain = Promise.resolve();
   const queue = fn => (chain = chain.then(fn).catch(() => {}));
-  let pressTimer = 0, longFired = false, dragging = false, consumed = null;
+  let pressTimer = 0, longFired = false, dragging = false, consumed = null, pressActive = false;
 
   const down = ev => {
     window.pvPhase = "down";
@@ -802,10 +802,14 @@ function installTouch() {
     if (consumed) { diag(`down consumed=${consumed}`); return; }
     const pt = canvasPoint(ev);
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}`); }
-    longFired = false; dragging = false;
+    longFired = false; dragging = false; pressActive = true;
     queue(async () => {
       await placePointer(pt);
+      // The finger may already be up by the time the pointer has landed (a quick tap): arming the
+      // long-press timer then would fire a right-click after every tap, which is what happened.
+      if (!pressActive || dragging) return;
       pressTimer = setTimeout(() => queue(async () => {     // long press is the right button
+        if (!pressActive || dragging) return;
         longFired = true;
         button(true, true); await sleep(60); button(false, true);
       }), LONG_PRESS_MS);
@@ -825,6 +829,7 @@ function installTouch() {
   };
   const up = () => {
     window.pvPhase = "up";
+    pressActive = false;
     diag(`up dragging=${dragging} longFired=${longFired} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
     clearTimeout(pressTimer);
     if (consumed) { consumed = null; chromeDrag = null; return; }
