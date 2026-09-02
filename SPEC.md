@@ -1131,3 +1131,10 @@ checks). Four touch drags now leave a clean tableau. Also this round: DOS box cl
 fEnableClose), 352 wide, keyboard by module (KeyboardApps=WINOA386 TERMINAL); shell maximise
 clamps to its column; shell-owned dialogs created inside the column by the hook; menu row drawn
 between the side borders.
+
+**2026-09-02 — keyboard.** Soft keyboard: summoned when an Edit/ComboBox/DOS box has focus or the
+active program is in `[PVMon] KeyboardApps`; a caption long-press toggles it. The CBT hook now
+reports focus changes the instant they happen (`HCBT_SETFOCUS` -> `PVK`), inside iOS's gesture
+window. While the keyboard is up the layout is frozen (no shell re-arrange) and the focused layer
+is panned above it; taps map through the same shift. Gaps: no Esc/Tab/arrows/F-keys/Alt on the
+iOS keyboard (needs a gesture map or a hardware keyboard).
