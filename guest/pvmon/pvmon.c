@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 24     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 25     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -59,13 +59,22 @@
 /* The adapter is programmed as an index write then a data access. PVMOUSE.DRV's interrupt handler
    writes the same index register (cursor position 1Dh/1Eh/1Fh), so an interrupt between the two
    halves would make us read or write the wrong register: a dropped host command, a misread size.
-   Each pair runs with interrupts off, restoring the caller's flag (we may already be in cli). */
-unsigned pv_cli(void);
-#pragma aux pv_cli = "pushf" "pop ax" "cli" value [ax] modify exact [ax];
-void pv_sti(unsigned f);
-#pragma aux pv_sti = "push ax" "popf" parm [ax] modify exact [];
-static unsigned rd(unsigned idx) { unsigned f = pv_cli(), v; outpw(DISPI_INDEX, idx); v = inpw(DISPI_DATA); pv_sti(f); return v; }
-static void wr(unsigned idx, unsigned v) { unsigned f = pv_cli(); outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); pv_sti(f); }
+   cli/popf around the pair was tried and hung the system VM (v24: Write's menu bar, a click ->
+   everything stopped; ring-3 popf does not restore IF the way the VMM's trapped cli expects), so
+   the pair is checked instead: the index register reads back, and if the handler changed it
+   under us the access is repeated. A clobbered write lands once in a cursor register the host
+   rewrites on the next move. */
+static unsigned rd(unsigned idx)
+{
+    unsigned v; int tries = 4;
+    do { outpw(DISPI_INDEX, idx); v = inpw(DISPI_DATA); } while (inpw(DISPI_INDEX) != idx && --tries);
+    return v;
+}
+static void wr(unsigned idx, unsigned v)
+{
+    int tries = 4;
+    do { outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); } while (inpw(DISPI_INDEX) != idx && --tries);
+}
 static void dbg(const char *s) { while (*s) wr(R_DEBUG, (unsigned char)*s++); wr(R_DEBUG, 10); }
 static void dbgnum(const char *s, unsigned a, unsigned b)
 {

@@ -1499,10 +1499,15 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   CARDFILE CALENDAR RECORDER NOTEPAD`). Verified: Write's document takes focus -> `PVK 1`; a
   menu-bar click and Esc produce no report (focus unchanged). Paintbrush's text tool is left to
   the host's long-press toggle (no hookable caret creation).
-- **DISPI index/data pairs** in PVMON (`rd`/`wr`) and PVHOOK (`pv_dbg`) run with interrupts off
-  (`pushf/cli ... popf`, caller's IF restored): PVMOUSE.DRV's interrupt handler writes the same
-  index register. PVDISP.DRV's BANK.INC and CURSOR.ASM already wrap theirs in `EnterCrit`; PVDPI
-  runs under DOS before any mouse interrupt handler exists.
+- **DISPI index/data pairs** (PVMOUSE.DRV's interrupt handler writes the same index register):
+  the first attempt (v24) wrapped PVMON's `rd`/`wr` and the hook's `pv_dbg` in `pushf/cli ... popf`
+  and **hung the whole system VM** on the first mouse click on Write's menu bar (heartbeat stopped,
+  no input; bisected: v22/v23 fine, v24 dead, hook version irrelevant) — ring-3 cli is trapped and
+  virtualised by the VMM and a ring-3 popf does not give the interrupt flag back the same way. v25
+  drops cli and checks instead: after each pair the index register is read back and the access is
+  repeated if the handler changed it (a clobbered write lands once in a cursor register the host
+  rewrites on the next move). PVDISP.DRV's BANK.INC and CURSOR.ASM use the DDK's `EnterCrit`;
+  PVDPI runs under DOS before any mouse handler exists.
 - **Dead-task guard**: Print Manager (spooler off) exits the moment its box is dismissed, and a
   cross-task SendMessage from PVMON's poll to a window of an exiting task (GetWindowText,
   SetWindowPos) blocked PVMON until Ctrl+Esc. The hook records `HCBT_DESTROYWND` of top-level
@@ -1513,9 +1518,7 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
 - Fixed-layout windows are moved into a column at `HCBT_ACTIVATE` when they straddle one
   (Task List centres itself at x=1095); PVMON then parks them. Terminal: after "Default Serial
   Port" closes the focus returns to the `Terminal` window, which the widened rule now reports.
-- Observed, not yet explained: with an absolute-pointer click on **Write's** menu bar (first row,
-  guest y≈100) followed by Esc, all guest input (mouse and keyboard, incl. Ctrl+Esc) stops while
-  PVMON's heartbeat continues; Notepad and File Manager survive the same sequence; reproduced
-  with TapOpens=0, so not the mouse hook. Needs a bisect against an older hook.
+- The "Write menu click kills all input" seen while testing was the v24 cli hang above
+  (heartbeat had stopped too); gone in v25 (cursor moves, `PVH` advances after the same sequence).
 - `WM_WINDOWPOSCHANGING` does reach the hook for some windows after all (`pvhook: clamp
   CtlPanelClass 471x283 -> 352x283`); the activate-time clamp stays as the backstop.

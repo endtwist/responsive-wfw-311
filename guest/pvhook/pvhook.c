@@ -69,10 +69,18 @@ static void module_base(HWND hwnd, char FAR *out, int outlen)
     module_base_i((HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE), out, outlen);
 }
 
+/* The WIN.INI lists are read once (PvHookInstall / PvHookSetShell), never inside a hook call:
+   GetProfileString does file I/O that can yield, and yielding from HCBT_SETFOCUS inside USER's
+   menu loop left Write with all input dead (Notepad, whose Edit class needs no list, survived). */
+static char g_keepList[160], g_kbdList[160];
+static void load_lists(void)
+{
+    GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
+    GetProfileString("PVMon", "KeyboardApps", "", g_kbdList, sizeof(g_kbdList));
+}
 static BOOL in_list(const char FAR *key, const char FAR *name)
 {
-    char list[160]; char FAR *k;
-    GetProfileString("PVMon", key, "", list, sizeof(list));
+    char FAR *list = lstrcmpi(key, "KeepSize") == 0 ? g_keepList : g_kbdList; char FAR *k;
     for (k = list; *k; ) {
         char FAR *e = k; int n;
         while (*e && *e != ' ' && *e != ',') e++;
@@ -95,19 +103,21 @@ static BOOL parse_size(const char FAR *val, int FAR *w, int FAR *h)
 #define PV_DISPI_INDEX 0x1CE
 #define PV_DISPI_DATA  0x1CF
 #define PV_REG_DEBUG   0x16
-/* Index then data: PVMOUSE.DRV's interrupt handler writes the same index register, so the
-   pair runs with interrupts off (restoring the caller's flag). */
-unsigned pv_cli(void);
-#pragma aux pv_cli = "pushf" "pop ax" "cli" value [ax] modify exact [ax];
-void pv_sti(unsigned f);
-#pragma aux pv_sti = "push ax" "popf" parm [ax] modify exact [];
+/* Index then data: PVMOUSE.DRV's interrupt handler writes the same index register, so the index
+   is rewritten before every byte and read back after (no cli: a ring-3 cli/popf pair hung the
+   system VM, see PVMON's rd/wr). */
 static void pv_dbg(const char FAR *s)
 {
-    unsigned f = pv_cli();
-    outpw(PV_DISPI_INDEX, PV_REG_DEBUG);
-    while (*s) outpw(PV_DISPI_DATA, (unsigned char)*s++);
-    outpw(PV_DISPI_DATA, 10);
-    pv_sti(f);
+    int tries;
+    for (;; s++) {
+        unsigned c = *s ? (unsigned char)*s : 10;
+        for (tries = 4; tries; tries--) {
+            outpw(PV_DISPI_INDEX, PV_REG_DEBUG);
+            outpw(PV_DISPI_DATA, c);
+            if (inpw(PV_DISPI_INDEX) == PV_REG_DEBUG) break;
+        }
+        if (!*s) break;
+    }
 }
 
 static int shell_w(void)
@@ -676,7 +686,7 @@ LRESULT CALLBACK __export PvMouseProc(int code, WPARAM wParam, LPARAM lParam)
 BOOL FAR PASCAL __export PvHookInstall(void)
 {
     if (g_installed) return TRUE;
-    shell_w(); shell_h();
+    shell_w(); shell_h(); load_lists();
     g_cbt = SetWindowsHookEx(WH_CBT, (HOOKPROC)PvCbtProc, g_hInst, NULL);
     g_cwp = SetWindowsHookEx(WH_CALLWNDPROC, (HOOKPROC)PvCwpProc, g_hInst, NULL);
     g_tapOpens = GetProfileInt("PVMon", "TapOpens", 1);
@@ -691,6 +701,7 @@ void FAR PASCAL __export PvHookSetShell(int w, int h)
 {
     if (w > 0) g_shellW = w;
     if (h > 0) g_shellH = h;
+    load_lists();
 }
 
 void FAR PASCAL __export PvHookRemove(void)
