@@ -948,6 +948,22 @@ setInterval(pumpCommands, 20);
 window.pvCommandQueue = () => cmdQueue.slice();
 const CMD_ACTIVATE = 1, CMD_RESTORE = 2, CMD_CLOSE = 3, CMD_MINIMIZE = 4, CMD_RUN = 5, CMD_REPUBLISH = 6;
 
+/* Shell-owned dialogs (About Program Manager, Run, Exit Windows: PVO with slot -1) are drawn inside
+   the desktop column, not as layers. One taller than the visible column would have no reachable
+   bottom, so the column itself pans vertically: a one-finger drag that starts on such a dialog moves
+   view.y within [0, dialogBottom - view.h]; the pan returns to 0 when the dialog goes away. */
+let shellPanY = 0;
+function tallShellDialogBottom(viewH) {
+  let bottom = 0;
+  for (const L of layers) if (L.kind === "O" && L.slot < 0 && L.wy + L.wh > viewH) bottom = Math.max(bottom, L.wy + L.wh);
+  return Math.min(bottom, SHELL_H);                      // the column's VRAM ends at SHELL_H rows
+}
+function shellPanClamp(viewH) {
+  const max = Math.max(0, tallShellDialogBottom(viewH) - viewH);
+  if (!max) { shellPanY = 0; return 0; }
+  shellPanY = Math.round(Math.max(0, Math.min(max, shellPanY)));   // whole guest rows: no resampling
+  return shellPanY;
+}
 /* The desktop view: which slice of the guest screen is the background, and at what scale. */
 let view = { x: 0, y: 0, w: 0, h: 0, scale: 1, ox: 0 };
 let placed = [];                     // the composited windows, as drawn, front-most last
@@ -968,7 +984,7 @@ function chooseView(src) {
   // In either orientation the column is arranged to the rows the viewport shows at this scale,
   // so a rotation re-runs the shell sizing for the new geometry.
   if (!keyboardUp()) wantShellHeight(Math.round(vh / scale));
-  return { x: 0, y: 0, w: shell.w, h: shell.h, scale,
+  return { x: 0, y: shellPanClamp(shell.h), w: shell.w, h: shell.h, scale,
            ox: Math.round((vw - shell.w * scale) / 2) };
 }
 
@@ -999,7 +1015,7 @@ function placeLayers(src) {
     if (L.kind === "S") {
       /* The shell takes part in z-order: when Program Manager is in front it is drawn again, on
          top of the applications, exactly where it already is in the desktop column. */
-      const x = Math.round(view.ox + L.wx * c), y = Math.round(L.wy * c);
+      const x = Math.round(view.ox + L.wx * c), y = Math.round((L.wy - view.y) * c);
       const hw = Math.round(L.ww * c), hh = Math.round(L.wh * c);
       out.push({ ...L, key, s: c, c, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
                  inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, shellCopy: true });
@@ -1017,7 +1033,7 @@ function placeLayers(src) {
         y = L.wy < owner.gy
           ? Math.round(owner.y + (L.wy - owner.wy) * c)                   // hangs off the chrome
           : Math.round(owner.y + owner.ht + (L.wy - owner.gy) * owner.s);
-      } else { x = Math.round(view.ox + L.wx * c); y = Math.round(L.wy * c); }
+      } else { x = Math.round(view.ox + L.wx * c); y = Math.round((L.wy - view.y) * c); }
       /* Shown as far as possible: anchored where it popped up, shifted up/left so the whole of it
          fits when it can. A popup taller or wider than the viewport (a long View menu, a combo
          drop-down) cannot scroll in the guest, so the user pans it instead: layerPos holds the pan,
@@ -1725,7 +1741,7 @@ function installTouch() {
      tap, and once the finger has travelled further than a tap allows it becomes a scroll of the
      window the press started in (line messages through PVMON, like two fingers), never a pointer
      drag. A finger that never travels is still a click. */
-  let oneScroll = null;
+  let oneScroll = null, shellPan = null;
   const down = ev => {
     window.pvPhase = "down";
     consumed = pressStart(ev);
@@ -1735,7 +1751,9 @@ function installTouch() {
       const h0 = hitTest(px, py);
       let pol = "drag", slot = -1, title = "";
       if (pressLayer && !pressLayer.transient && !pressLayer.shellCopy && h0.kind === "client") { pol = surfacePolicy(pressLayer); slot = pressLayer.slot; title = pressLayer.title; }
+      else if (insideShellDialog(h0) && tallShellDialogBottom(view.h) > view.h) { pol = "pan"; title = "shell dialog"; }   // a tall shell dialog: pan the column
       else if (insideShellClient(h0)) { pol = "scroll"; slot = SHELL_SCROLL_SLOT; title = "Program Manager"; }   // PVMON targets the active group
+      shellPan = pol === "pan" ? { startY: py, base: shellPanY, panning: false } : null;
       oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, t0: performance.now() } : null; }
     // A quick second tap near the first is a double-click: Windows 3.1 only pairs clicks a few
     // pixels apart, and fingers do not repeat to the pixel, so the second tap reuses the first
@@ -1768,6 +1786,16 @@ function installTouch() {
     const G = g;
     if (consumed || !G || G.longFired) return;
     clearTimeout(G.timer);
+    if (shellPan) {
+      const { py } = hostPoint(ev);
+      if (!shellPan.panning && Math.abs(py - shellPan.startY) > 8) {
+        shellPan.panning = true; G.scrolled = true;
+        if (lastTap) lastTap.dragged = true;
+        diag(`shell pan start base=${shellPan.base} max=${tallShellDialogBottom(view.h) - view.h}`);
+      }
+      if (shellPan.panning) { shellPanY = shellPan.base - (py - shellPan.startY) / view.scale; shellPanClamp(view.h); }
+      return;
+    }
     if (oneScroll) {
       const { px, py } = hostPoint(ev);
       if (!oneScroll.scrolling && Math.hypot(px - oneScroll.startX, py - oneScroll.startY) > 8) {
@@ -1848,6 +1876,8 @@ function installTouch() {
     pressActive = false;
     const G = g;
     const S = oneScroll; oneScroll = null;
+    const P = shellPan; shellPan = null;
+    if (P && P.panning) { if (G) { G.active = false; clearTimeout(G.timer); } noteInput(`shell pan -> ${Math.round(shellPanY)}`); return; }   // a pan ends with nothing pressed
     diag(`up dragging=${G && G.dragging} longFired=${G && G.longFired} scrolled=${!!(S && S.scrolling)} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
     noteInput(`up drag=${!!(G && G.dragging)} scroll=${!!(S && S.scrolling)} consumed=${consumed}`);
     if (G) { G.active = false; clearTimeout(G.timer); }

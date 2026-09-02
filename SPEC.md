@@ -1724,3 +1724,16 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   still active. Choose OK to end it." carries the DOS window's own title and gets Enter (N left the
   DOS box open); anything else (save prompts) still gets N. Media Player (448 wide, no thick frame)
   joins the fixed-layout set.
+
+### 2026-09-02 — tall shell dialogs: the desktop column pans
+- Shell-owned dialogs (PVO slot -1: About Program Manager, Run, Exit Windows) live inside the desktop
+  column, not as layers, so one taller than the visible rows had no reachable bottom. When any such
+  dialog's bottom exceeds `view.h`, a one-finger drag starting on it pans the column: `view.y` moves
+  within `[0, dialogBottom - view.h]` (capped at the column's 970 rows), whole rows; the shell copy
+  and un-owned transients follow the pan; hit-testing already maps through `view.y`. A tap is a
+  click as usual; two-finger scroll untouched; `view.y` returns to 0 when the dialog goes away.
+  Safety net only: the guest agent is stopping the reflow that made About PM ~900 rows.
+- Pane, 375x400 (view.h 374), Help > About Program Manager (O-1 8,79 336x680, bottom 759):
+  drag up 200 px -> view.y 188; further -> 385 (= 759-374, clamped; OK button and "KB Free" line
+  visible in the shot); tap on the panned dialog -> `button down/up`, view.y unchanged; drag back
+  down -> 57; Esc closes it -> view.y 0.
