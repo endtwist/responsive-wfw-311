@@ -768,8 +768,9 @@ async function placePointer(pt) {
   const seq = cursorSeq, t0 = performance.now();
   if (absPointer) {
     const [sw, sh] = screenSize();
-    const nx = Math.max(0, Math.min(65535, Math.round(pt.x * 65536 / sw)));
-    const ny = Math.max(0, Math.min(65535, Math.round(pt.y * 65536 / sh)));
+    // USER maps x = norm * cxScreen / 65536, truncating: aim for the middle of the pixel
+    const nx = Math.max(0, Math.min(65535, Math.round((pt.x + 0.5) * 65536 / sw)));
+    const ny = Math.max(0, Math.min(65535, Math.round((pt.y + 0.5) * 65536 / sh)));
     emulator.bus.send("pv-mouse-abs", [nx, ny]);
     emulator.bus.send("mouse-delta", [1, 0]);          // any packet: raises the interrupt
     while (cursorSeq === seq && performance.now() - t0 < 300) await sleep(4);
