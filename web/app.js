@@ -113,13 +113,14 @@ async function saveState(emulator) {
     if (typeof CompressionStream === "function") {
       blob = await new Response(blob.stream().pipeThrough(new CompressionStream("gzip"))).blob();
     }
+    const bytes = await blob.arrayBuffer();           // Safari's IndexedDB rejected a Blob here
     const db = await idb();
     await new Promise((res, rej) => {
       const tx = db.transaction("state", "readwrite");
-      tx.objectStore("state").put({ blob, at: Date.now() }, stateKey);
+      tx.objectStore("state").put({ bytes, at: Date.now() }, stateKey);
       tx.oncomplete = res; tx.onerror = () => rej(tx.error);
     });
-    status(`saved ${(blob.size / 1048576).toFixed(1)} MB`);
+    status(`saved ${(bytes.byteLength / 1048576).toFixed(1)} MB`);
   } catch (e) { status("save failed: " + e.message); }
 }
 async function loadState() {
@@ -132,7 +133,7 @@ async function loadState() {
       q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
     });
     if (!rec) return null;
-    let blob = rec.blob;
+    let blob = rec.blob || new Blob([rec.bytes]);
     if (typeof DecompressionStream === "function") {
       blob = await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).blob();
     }
@@ -246,8 +247,8 @@ const pvLog = [];
 window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, log: pvLog.slice(-40) });
 emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
-  let m = /^PVD (\d+) (\d+)(?: (\d+))?/.exec(line);
-  if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18 }; return; }
+  let m = /^PVD (\d+) (\d+)(?: (\d+))?(?: v(\d+))?/.exec(line);
+  if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18, ver: m[4] ? +m[4] : 0 }; return; }
   m = /^PVK (\d)/.exec(line);
   if (m) { wantKeyboard = m[1] === "1"; syncKeyboard(); return; }
   if (/^PVA/.test(line)) {
@@ -526,7 +527,7 @@ function drawWindow(g, src, w) {
 }
 
 /* Errors and a heartbeat go to the dev server: phones have no console to read. */
-let frames = 0, lastBeat = 0;
+let frames = 0, lastBeat = 0, lastIc = 0, lastBeatAt = 0;
 function report(kind, detail) {
   try { fetch("/__log", { method: "POST", body: `${kind} ${detail}`, keepalive: true }); } catch (e) {}
 }
@@ -539,7 +540,10 @@ function present() {
   const now = performance.now();
   if (now - lastBeat > 15000) {
     lastBeat = now;
-    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} layers=${layers.length} ready=${desktopReady}`);
+    const ic = emulator.v86 && emulator.v86.cpu.instruction_counter ? emulator.v86.cpu.instruction_counter[0] >>> 0 : 0;
+    const mips = lastIc ? ((ic - lastIc) >>> 0) / (now - lastBeatAt) / 1000 : 0;
+    lastIc = ic; lastBeatAt = now;
+    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} layers=${layers.length} ready=${desktopReady} mips=${mips.toFixed(1)} pvmon=${shell.ver || "?"}`);
   }
   requestAnimationFrame(present);
 }
@@ -720,7 +724,7 @@ function steerTo(pt) {
            Re-sending the delta blindly while the guest was busy (dropping a card repaints the
            table) drove the pointer several screens away, which looked like it was stuck. */
         const seq = cursorSeq, t0 = performance.now();
-        while (cursorSeq === seq && performance.now() - t0 < 400) await sleep(8);
+        while (cursorSeq === seq && performance.now() - t0 < 900) await sleep(8);
         if (cursorSeq === seq) break;          // no report: leave it, do not compound the error
       }
     } finally { steering = null; steerTarget = null; }
@@ -736,7 +740,7 @@ async function placePointer(pt) {
   if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) { diag(`place: bad target ${JSON.stringify(pt)}`); return; }
   const seq = cursorSeq, t0 = performance.now();
   emulator.bus.send("pv-command-string", [CMD_SETPOS, `${Math.round(pt.x)},${Math.round(pt.y)}`]);
-  while (cursorSeq === seq && performance.now() - t0 < 350) await sleep(8);
+  while (cursorSeq === seq && performance.now() - t0 < 1200) await sleep(8);
   const reported = cursorSeq !== seq;
   diag(`place ${pt.x},${pt.y} reported=${reported} after ${Math.round(performance.now() - t0)}ms cursor=${JSON.stringify(guestCursor)}`);
   // No report yet (nothing has moved the pointer since the restore) or off target: steer.
@@ -756,9 +760,21 @@ function hostPoint(ev) {
   return { px: ev.clientX - r.left, py: ev.clientY - r.top };
 }
 
-function canvasPoint(ev) {
+/* The layer a press started in. While the finger is down every move is mapped through that same
+   layer, even once the finger has left it: re-hit-testing mid-drag sent moves that drifted off a
+   small Solitaire layer into the desktop mapping, the pointer shot into the shell column, and the
+   card was dropped wherever that landed. */
+let pressLayer = null;
+function mapThrough(w, px, py) {
+  const dx = px - w.x, dy = py - w.y;
+  if (w.transient || w.shellCopy) return { x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
+  return { x: Math.round(w.gx + w.px + (dx - w.hl) / w.zs), y: Math.round(w.gy + w.py + (dy - w.ht) / w.zs) };
+}
+function canvasPoint(ev, startOfPress) {
   const { px, py } = hostPoint(ev);
+  if (!startOfPress && pressLayer) return mapThrough(pressLayer, px, py);
   const h = hitTest(px, py);
+  pressLayer = startOfPress ? (h.win && h.kind !== "desktop" ? h.win : null) : pressLayer;
   return { x: h.x, y: h.y };
 }
 
@@ -800,7 +816,7 @@ function installTouch() {
     window.pvPhase = "down";
     consumed = pressStart(ev);
     if (consumed) { diag(`down consumed=${consumed}`); return; }
-    const pt = canvasPoint(ev);
+    const pt = canvasPoint(ev, true);
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}`); }
     longFired = false; dragging = false; pressActive = true;
     queue(async () => {

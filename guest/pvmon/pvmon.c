@@ -44,7 +44,9 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define POLL_MS       40     /* also the latency of host commands, so keep it short */
+#define PVMON_VERSION 12     /* reported in PVD so the host log shows which build a snapshot holds */
+#define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
+#define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
 #define IDT_POLL      1
 #define IDT_ARRANGE   2
@@ -899,14 +901,14 @@ static void run_host_command(void)
         char b[64];
         if (arg >= 300 && arg <= (unsigned)GetSystemMetrics(SM_CYSCREEN)) g_shellH = arg;
         arrange_shell();
-        wsprintf(b, "PVD %u %u %d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION));
+        wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
         dbg(b);
         g_lastPub[0] = 0;
         return;
     }
     if (cmd == CMD_REPUBLISH) {
         char b[64];
-        wsprintf(b, "PVD %u %u %d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION));
+        wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
         dbg(b);
         dbg("PVA");
         g_lastPub[0] = 0;
@@ -1063,7 +1065,11 @@ static void poll(HWND hwnd)
     if (w < 320 || h < 200) return;
     g_hostW = w; g_hostH = h;
     if (g_dlgReflow) check_dialogs();
-    if (g_shellW) { run_host_command(); publish_layout(); report_focus(); }
+    if (g_shellW) {
+        static unsigned n;
+        run_host_command();
+        if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); }
+    }
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
@@ -1110,7 +1116,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             char b[64];
             /* The caption height lets the host tell the caption row of the chrome apart from
                the menu row below it, so each can be composited on its own terms. */
-            wsprintf(b, "PVD %u %u %d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION));
+            wsprintf(b, "PVD %u %u %d v%d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION), PVMON_VERSION);
             dbg(b);
         }
         if (g_live) { dbg("pvmon: live re-mode enabled"); find_user_state(); }
