@@ -30,3 +30,6 @@ image/boot-*.state.gz
 # Vercel CLI project link and its OIDC token file
 .vercel
 .env*
+
+# python bytecode (tools/grpadd.py imports ne-icons.py)
+__pycache__/
