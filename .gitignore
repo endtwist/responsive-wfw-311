@@ -5,6 +5,7 @@ node_modules/
 guest/ddk/
 image/*.img
 image/*.img.*
+image/parts/
 image/floppies/
 *.img
 *.iso
@@ -25,3 +26,7 @@ shots/
 image/boot.state.gz
 image/current.json
 image/boot-*.state.gz
+
+# Vercel CLI project link and its OIDC token file
+.vercel
+.env*

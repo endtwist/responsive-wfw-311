@@ -13,6 +13,15 @@ const params = new URLSearchParams(location.search);
 const manifest = await fetch("../image/current.json", { cache: "no-cache" }).then(r => r.ok ? r.json() : null).catch(() => null);
 const IMAGE = params.get("hda") || (manifest && manifest.image ? "../image/" + manifest.image : "../image/work-live.img");
 const SHIPPED_STATE = manifest && manifest.state ? "../image/" + manifest.state : "../image/boot.state.gz";
+/* Deployed form of the image (tools/split-image.py, run by tools/deploy.sh): fixed 256 KB parts,
+   each zstd-compressed, under image/parts/<stamp>/p-<start>-<end>.img.zst. v86 fetches whole
+   parts instead of byte ranges, so the static host needs neither Range support nor a 245 MB file
+   (Vercel's Hobby plan caps files at 100 MB), and the all-zero parts cost a few dozen bytes each.
+   ?hda= keeps the plain Range-loaded whole image for development. */
+const PARTS = !params.get("hda") && manifest && manifest.parts ? manifest.parts : null;
+const HDA = PARTS
+  ? { url: "../image/" + PARTS.dir + "/p.img.zst", use_parts: true, async: true, size: PARTS.size, fixed_chunk_size: PARTS.chunk, heads: 16, sectors_per_track: 32 }
+  : { url: IMAGE, async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 };
 
 /* ---------------------------------------------------------------- mode selection (SPEC 2.8)
  * The emulated mode tracks the viewport rather than snapping to fixed breakpoints. Windows 3.x
@@ -124,7 +133,8 @@ const dpi = params.get("dpi") ? +params.get("dpi") : (viewport()[0] < 600 ? 120 
    PVMON and screen layout no longer match this page, and it looks like a hang. */
 let stateKey = `wfw311:${IMAGE}:${dpi}`, stateKeyQualified = false, shippedStamp = "";
 const stateKeyReady = Promise.all([
-  fetch(IMAGE, { method: "HEAD" }).then(r => {
+  // (with part files the whole image is not served: the first part stands in for it)
+  fetch(PARTS ? HDA.url.replace(/p\.img\.zst$/, `p-0-${PARTS.chunk}.img.zst`) : IMAGE, { method: "HEAD" }).then(r => {
     if (!r.ok) throw new Error("HEAD " + r.status);
     stateKey += `:${r.headers.get("content-length")}:${r.headers.get("last-modified")}`;
     stateKeyQualified = true;
@@ -272,7 +282,7 @@ const emulator = new V86({
   screen_container: $("screen_container"),
   bios: { url: "../v86/bios/seabios.bin" },
   vga_bios: { url: "../v86/bios/vgabios.bin" },
-  hda: { url: IMAGE, async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
+  hda: HDA,
   boot_order: 0x132,
   autostart: false,
 });

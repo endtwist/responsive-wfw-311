@@ -3,7 +3,7 @@
   "short_name": "Windows 3.11",
   "description": "Windows for Workgroups 3.11, composited for a phone.",
   "id": "/",
-  "start_url": "/?remote=phone&diag=1",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "display_override": ["fullscreen", "standalone"],

@@ -1774,3 +1774,50 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   slots (Character Map 785 wide at x=640), which the `slot` check accepts for fixed-layout apps.
   Hearts' welcome box: OK is the default button but a no-op with an empty name, so the tour types a
   letter, then Enter.
+
+### 2026-09-02 — production deployment on Vercel
+
+- **URL:** https://responsive-wfw-311.vercel.app (project `responsive-wfw-311`, team
+  `joshuagross-projects`, which is the "joshuagross" account: the CLI refuses the bare user name as
+  a `--scope`). Static project, no framework, no build. Redeploy with `tools/deploy.sh` (or
+  `npx vercel@latest deploy --prod --scope joshuagross-projects` from the repo root after it has
+  been run once). The GitHub repo is *not* connected: the image is not in git, so every
+  deployment is a CLI upload of the working tree. Per-deployment `*-joshuagross-projects.vercel.app`
+  URLs are behind Vercel's deployment protection (302 to SSO); only the production alias is public.
+- **Hobby limit forces part files.** Vercel Hobby rejects any file over 100 MB ("File size limit
+  exceeded"); the image is 245 MB. `tools/split-image.py` cuts it into 978 fixed 256 KB parts,
+  each zstd-compressed (`image/parts/<stamp>/p-<start>-<end>.img.zst`, 18 MB in total: 864 of the
+  parts are all zeros and cost ~60 bytes each) and adds `parts: {dir, size, chunk}` to
+  `image/current.json`. app.js then gives v86 `use_parts: true` (`AsyncXHRPartfileBuffer`, zstd
+  decoded by the worker built into v86.wasm) instead of the Range-loaded whole image; `?hda=`
+  keeps the old path for development. The boot snapshot is unaffected (the buffer state formats
+  are shared). Side effects: no dependence on Range support at all (v86's Range path has no
+  fallback: a 200 to a ranged request is aborted, and `get_file_size` fails without
+  `Content-Range` — Vercel does honour Range, 206 on the parts and the snapshot, but nothing
+  relies on it now); the service worker caches parts like any other asset (they are immutable),
+  so a second load is closer to offline than the Range design allowed; the image-identity HEAD
+  for the local snapshot key goes to the first part. Cold load: 63 requests, 2.7 MB encoded
+  (snapshot 2 MB, wasm, two parts), desktop restored in ~2 s in headless Chrome.
+- **vercel.json:** `/` and `/:app([a-z]+)` rewrite to `/web/index.html`; `Service-Worker-Allowed: /`
+  on `/web/sw.js` (registration with scope `/` confirmed active); `application/manifest+json`,
+  `application/wasm`, octet-stream for `.bin`, parts and `.state.gz`; `immutable` year-long cache
+  on the stamped parts/snapshot, `no-cache` on `current.json`, the manifest and the worker.
+  Vercel brotli-encodes even octet-stream (`content-encoding: br` on the parts and on the gzip
+  snapshot): harmless, the browser undoes it and app.js still gunzips because the encoding is not
+  `gzip`. `/__log`, `/__cmd`, `/__shot`, `/__print` are 404 in production; the page ignores them.
+- **Manifest:** `start_url` is `/` (production). The dev server rewrites it to
+  `/?remote=phone&diag=1` when serving `/web/manifest.webmanifest`, so a phone installed from the
+  dev server is still the parked remote-control device; the URL query drives remote mode, not
+  the committed manifest.
+- **.vercelignore** lists what ships: `web/`, `v86/src` + `v86/lib` (the page imports the ES
+  modules, not `libv86.js`), `v86/build/v86.wasm`, `v86/bios/{seabios,vgabios}.bin`,
+  `image/current.json`, the current `boot-*.state.gz` and `image/parts/<stamp>`; `deploy.sh`
+  pins the last two to whatever `current.json` names so stale stamped pairs are not uploaded.
+- Verified on the production alias in headless Chrome (the shared Browser pane had no free tab):
+  `pvState().desktopReady` true and `emulator.is_running()` true at `/` and `/solitaire`
+  (Solitaire open in the second column), manifest + three icons 200, worker `activated` at scope
+  `/`, iPhone-size emulation (393x852 @3x) shows the phone shell column.
+- Caveat seen during the rollout: several other production deployments of the same project were
+  made in the same minutes from a tree without `vercel.json`/parts (404s on wasm, BIOSes, image;
+  worker rejected for scope). Whoever deploys must run `tools/deploy.sh` from a tree that has the
+  image built, or production regresses to that state.
