@@ -1661,3 +1661,40 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
 ### 2026-09-02 — image work-phone-20260902-145131 (PVMON v26, PVHOOK non-resizable rule)
 - Merged: guest batch (CMD_SCROLL slot 15 = shell → active MDI child; WS_THICKFRAME-less windows never shrunk; TapOpens=1 single-tap opens Program Manager items; PVK widened via KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD; DISPI index read-back-and-retry instead of cli — the cli/popf guard hung the system VM on the first click; dead-task guard frees slots and skips destroyed windows (Print Manager cascade); user-dragged icons stay put, ICON_ROW 88, MDI icons re-arranged, active group maximised), host (hold-to-drag on scroll surfaces, two-finger shell scroll, boot watchdog + BOOTFAIL bundle + automatic retry, keybar folded behind a `#keybartab`, contenteditable `#kbd` with single-source Enter/Backspace in beforeinput, no speculative focus (late focus on PVK 1 within 1 s), title-rule focus only for client taps outside the scrollbar strip, iconic shell not a scroll surface, real Windows flag icon, manifest start_url points at the parked dev instance), tour (stray dismissal, fixed-layout info, PVMON-stall detection, `--skip`).
 - Open on the phone: Chrome/Safari autofill row cannot be suppressed (all `?kbd=` kinds show it; standalone home-screen mode is the way out); microphone needs https; graphical printing (PSCRIPT) under investigation by an agent.
+
+### 2026-09-02 — graphical printing: PSCRIPT.DRV is the PDF Printer (agent, verified)
+- **The PSCRIPT "spin at CreateDC" does not reproduce** on an image built by the current
+  `build-image.sh` with `printer=PSCRIPT` (spooler on or off): cold-booted headless (`tools/print-test.mjs`)
+  and in the pane (cold boot, snapshot made with `?mkstate=1`), Notepad, Write (COMMDLG Print dialog +
+  Enter), Paintbrush (own Print dialog) and Cardfile all create the DC, spool to `C:\PRINT.PRN`, and
+  PVMON ships the job (`PVP-BEGIN 11676 … PVP-END`; heartbeats keep coming, idle samples sit in the
+  INT 2F 1689 halt). The earlier spin was observed before the two guest hangs fixed the same day (idle
+  hook halting with IF clear; PVHOOK.DLL without `-bd`) and with a boot snapshot from a different
+  WIN.INI; nothing PSCRIPT-specific was left to fix. No extra files were needed: PSCRIPT.DRV (expanded
+  3.11 media Disk06) + HPIII522.WPD in `image/changes/system/` suffice; PSCRIPT.HLP, TESTPS.TXT and
+  FINSTALL.DLL (Disk07) are only for the driver's setup/font-installer dialogs.
+- **Host side had the real bug:** `@jspawn/ghostscript-wasm@0.0.2` is an Emscripten MODULARIZE build
+  with `noInitialRun` and no `postRun` hook, so `psToPdf` (which passed `arguments`/`postRun`) waited
+  forever — the job was received (`print job 11673 bytes, PostScript`) and nothing else happened.
+  Now: `createModule({locateFile, print, printErr})`, `FS.writeFile`, synchronous `callMain([...])`
+  (returns the exit status), `FS.readFile("/out.pdf")`; a fresh instance per job (the 16 MB wasm is
+  browser-cached after the first). In the pane: 11.7 KB Notepad job → 5413-byte PDF in ~300 ms.
+- Both printers stay installed, one port: `[devices] PDF Printer=PSCRIPT,C:\PRINT.PRN` and
+  `Text Printer=TTY,C:\PRINT.PRN` (+ matching `[PrinterPorts]`); `printer=PSCRIPT|TTY` (build option)
+  only picks `[windows] device=`. Default is PSCRIPT. The host still tells the two apart by content
+  (`%!`/`^D%!` → Ghostscript, else the hand-made Courier PDF). PVMON's transport is base64 lines, so
+  binary jobs are safe too (a Paintbrush job is 107 KB of ASCII-hex image data anyway).
+- Diagnostics: `finishPrintJob` publishes `window.pvLastPrint = {name, type, bytes}` and reports
+  `print <name> <bytes> bytes`; with `?diag=1` it also POSTs the PDF to the dev server's new
+  `/__print` (→ `shots/print-<ms>.pdf`), since the pane's sandbox swallows downloads.
+  `tools/print-test.mjs [--image] [--apps PBRUSH,WRITE,CARDFILE,NOTEPAD]` cold-boots headless, prints
+  from each app (Paintbrush: four brush drags through the absolute pointer), converts each job with
+  the local `gs` and renders page 1 to PNG under `shots/print-test/`.
+- Evidence (this run, `work-phone` rebuilt with `printer=PSCRIPT spooler=no`): Paintbrush 106732-byte
+  job → 8.5 KB PDF, the four strokes render as an asterisk; Write README.WRI → 157 KB, 8 pages, 92 KB
+  PDF with proportional (Arial→Helvetica-substituted) text and the rule; Cardfile → 11.8 KB, the card
+  frame and text; pane Notepad → `shots/print-1788375391890.pdf`. PNGs in `shots/print-*.png`.
+- Image rebuild needed (main): `image/build-image.sh display=pvdisp dpi=120 sysfont=PVSYS.FON
+  mouse=PVMOUSE.DRV sound=1 load=PVMON.EXE live=1 shellw=352 shellh=760 spooler=no printer=PSCRIPT
+  out=work-phone.img` then a new boot snapshot (`?mkstate=1`). Only WIN.INI keys changed
+  (`[windows] device`, `[devices]`, `[PrinterPorts]`); no new files in `image/changes/`.

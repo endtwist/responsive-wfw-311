@@ -36,6 +36,19 @@ http.createServer((req, res) => {
     });
     return;
   }
+  // Print jobs (with ?diag=1): the page POSTs the finished PDF (or the raw job if the conversion
+  // failed) here, so a print can be checked without the browser's download UI: shots/print-<ms>.<ext>
+  if (url === "/__print" && req.method === "POST") {
+    const chunks = [];
+    const ext = ((new URL(req.url, "http://x").searchParams.get("ext") || "pdf").replace(/[^a-z0-9]/gi, "") || "pdf").slice(0, 8);
+    req.on("data", c => chunks.push(c));
+    req.on("end", () => {
+      const name = `print-${Date.now()}.${ext}`;
+      fs.writeFileSync(path.join(root, "shots", name), Buffer.concat(chunks));
+      res.writeHead(200, { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" }); res.end(name);
+    });
+    return;
+  }
   // Boot snapshot from the browser: POST the gzipped v86 state, it becomes image/boot.state.gz,
   // which the page restores on a cold visit so the desktop is up in seconds instead of a minute.
   if (url === "/__state" && req.method === "POST") {
