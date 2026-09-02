@@ -1,0 +1,15 @@
+LIBRARY MOUSE
+
+DESCRIPTION 'PS/2 mouse with paravirtual absolute pointing (responsive-wfw311)'
+EXETYPE WINDOWS
+
+CODE PRELOAD DISCARDABLE
+DATA PRELOAD FIXED SINGLE
+
+EXPORTS
+    Inquire		@1
+    Enable		@2
+    Disable		@3
+    MouseGetIntVect	@4
+    WEP
+

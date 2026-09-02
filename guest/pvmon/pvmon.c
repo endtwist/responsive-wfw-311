@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 15     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 16     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -890,9 +890,15 @@ static void publish_layout(void)
         case 'O':
             describe(g_wnds[i].hwnd, line, "PVO", owner_slot(g_wnds[i].owner));
             break;
-        case 'T':
+        case 'T': {
+            char cls[24]; int n;
             describe(g_wnds[i].hwnd, line, "PVT", -1);
+            /* transients have no title worth showing; report the class instead */
+            GetClassName(g_wnds[i].hwnd, cls, sizeof(cls));
+            n = lstrlen(line);
+            if (n + lstrlen(cls) + 2 < 128) { line[n] = ' '; lstrcpy(line + n + 1, cls); }
             break;
+        }
         case 'S':
             describe(g_wnds[i].hwnd, line, "PVS", -1);
             break;

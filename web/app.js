@@ -723,6 +723,7 @@ let steerTarget = null, steering = null;
 
 function steerTo(pt) {
   if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return Promise.resolve();
+  emulator.bus.send("pv-mouse-abs", null);              // relative motion from here on
   steerTarget = pt;
   if (!steering) steering = (async () => {
     try {
@@ -752,11 +753,33 @@ function steerTo(pt) {
    report of the new position is the cue that it has landed. Relative steering is kept for the
    motion of a drag, where it is the right tool. */
 const CMD_SETPOS = 9;
+/* Absolute pointing through the mouse driver (PVMOUSE.DRV): the target goes into the adapter's
+   registers normalised to 0..65535, and a PS/2 packet raises the mouse interrupt; the driver
+   reports SF_ABSOLUTE and USER puts the pointer there at interrupt time, however busy the
+   applications are. If no report comes (an image without the driver), PVMON's SetCursorPos is
+   the fallback. */
+let absPointer = params.get("relmouse") ? false : true, absMisses = 0;
+function screenSize() {
+  const src = document.querySelector("#screen_container canvas");
+  return src && src.width ? [src.width, src.height] : [SLOT_W * (1 + MAX_SLOTS), SHELL_H];
+}
 async function placePointer(pt) {
   if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) { diag(`place: bad target ${JSON.stringify(pt)}`); return; }
   const seq = cursorSeq, t0 = performance.now();
-  emulator.bus.send("pv-command-string", [CMD_SETPOS, `${Math.round(pt.x)},${Math.round(pt.y)}`]);
-  while (cursorSeq === seq && performance.now() - t0 < 800) await sleep(8);   // PVMON reports directly now
+  if (absPointer) {
+    const [sw, sh] = screenSize();
+    const nx = Math.max(0, Math.min(65535, Math.round(pt.x * 65536 / sw)));
+    const ny = Math.max(0, Math.min(65535, Math.round(pt.y * 65536 / sh)));
+    emulator.bus.send("pv-mouse-abs", [nx, ny]);
+    emulator.bus.send("mouse-delta", [1, 0]);          // any packet: raises the interrupt
+    while (cursorSeq === seq && performance.now() - t0 < 300) await sleep(4);
+    if (cursorSeq === seq) { absMisses++; if (absMisses >= 3) { absPointer = false; report("pointer", "no absolute reports: falling back to SetCursorPos"); } }
+    else absMisses = 0;
+  }
+  if (cursorSeq === seq) {
+    emulator.bus.send("pv-command-string", [CMD_SETPOS, `${Math.round(pt.x)},${Math.round(pt.y)}`]);
+    while (cursorSeq === seq && performance.now() - t0 < 800) await sleep(8);
+  }
   const reported = cursorSeq !== seq;
   diag(`place ${pt.x},${pt.y} reported=${reported} after ${Math.round(performance.now() - t0)}ms cursor=${JSON.stringify(guestCursor)}`);
   // No report yet (nothing has moved the pointer since the restore) or off target: steer.
