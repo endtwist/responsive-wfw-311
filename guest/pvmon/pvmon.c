@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 28     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 31     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -640,6 +640,17 @@ static BOOL reflow_dialog(HWND dlg, int screenW)
        repaints are generated on the way, then turn it back on and paint once. */
     SendMessage(dlg, WM_SETREDRAW, FALSE, 0L);
 
+    /* Only a right-hand column of buttons is moved (Run, the common Open/Save: OK, Cancel, Browse,
+       Help). If anything else falls off the edge (About Program Manager's value texts beside their
+       labels) the dialog is left as laid out: moving a value under its label made a 680-px stack. */
+    for (i = 0; i < g_nKids; i++) {
+        char kc[16];
+        if (g_kids[i].x + g_kids[i].cx <= dr.left + avail) continue;
+        if (GetClassName(g_kids[i].hwnd, kc, sizeof(kc)) <= 0 || lstrcmpi(kc, "Button") != 0) {
+            SendMessage(dlg, WM_SETREDRAW, TRUE, 0L);
+            return FALSE;
+        }
+    }
     /* Anything whose right edge still lands on screen keeps its place. */
     fitBottom = org.y;
     for (i = 0; i < g_nKids; i++) {
@@ -769,17 +780,35 @@ static void collect_apps(void)
     FreeProcInstance(proc);
 }
 
+static BOOL fixed_layout(HWND hwnd);
+static BOOL slot_free(int i)
+{
+    return g_slotWnd[i] == NULL || !IsWindow(g_slotWnd[i]) || is_dead(g_slotWnd[i]) || !IsWindowVisible(g_slotWnd[i]);
+}
+/* A fixed-layout window wider than one 640 column (Character Map at the 20 px system font) takes
+   two adjacent slots, so its right part is neither cropped nor overlapped by the next program;
+   both entries hold the window, so both free together when it goes. */
 static int slot_of(HWND hwnd)
 {
     int i, free = -1;
+    RECT rc;
     for (i = 0; i < MAX_SLOTS; i++) if (g_slotWnd[i] == hwnd) return i;
+    GetWindowRect(hwnd, &rc);
+    if (rc.right - rc.left > (int)SLOT_W && fixed_layout(hwnd)) {
+        for (i = 0; i < MAX_SLOTS - 1; i++)
+            if (slot_free(i) && slot_free(i + 1)) { g_slotWnd[i] = g_slotWnd[i + 1] = hwnd; return i; }
+        {
+            char t[24], b[64]; t[0] = 0; GetWindowText(hwnd, t, sizeof(t));
+            wsprintf(b, "pvmon: no double slot for %s", (LPSTR)t); dbg(b);
+        }
+    }
     for (i = 0; i < MAX_SLOTS; i++)
-        if (free < 0 && (g_slotWnd[i] == NULL || !IsWindow(g_slotWnd[i]) || is_dead(g_slotWnd[i]) ||
-                         !IsWindowVisible(g_slotWnd[i]))) free = i;   /* a closed program's window lingers hidden while its task exits */
+        if (free < 0 && slot_free(i)) free = i;   /* a closed program's window lingers hidden while its task exits */
     if (free < 0) return -1;
     g_slotWnd[free] = hwnd;
     return free;
 }
+static BOOL double_slot(HWND hwnd, int slot) { return slot >= 0 && slot + 1 < MAX_SLOTS && g_slotWnd[slot + 1] == hwnd; }
 
 /* The slot of an owned window is its owner's (following owner chains); -1 if none. */
 static int owner_slot(HWND owner)
@@ -964,7 +993,7 @@ static void park(HWND hwnd, int slot)
        program is only kept inside its 640-wide column. */
     {
         BOOL fixed = fixed_layout(hwnd);
-        int maxW = fixed ? (int)SLOT_W : (int)g_shellW;
+        int maxW = fixed ? (double_slot(hwnd, slot) ? 2 * (int)SLOT_W : (int)SLOT_W) : (int)g_shellW;
         int maxH = fixed ? screenH : min((int)g_shellH, max_height_for(hwnd));
         if (rc.right - rc.left > maxW || rc.bottom - rc.top > maxH) {
             char t[24]; t[0] = 0; GetWindowText(hwnd, t, sizeof(t));
@@ -975,7 +1004,7 @@ static void park(HWND hwnd, int slot)
             return;
         }
     }
-    if (rc.left < slotX || rc.left >= slotX + (int)SLOT_W || rc.top < 0) {
+    if (rc.left != slotX || rc.top < 0) {
         SetWindowPos(hwnd, NULL, slotX, 0, 0, 0,
                      SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
     }
@@ -1438,7 +1467,11 @@ BOOL CALLBACK __export FindWideDialog(HWND hwnd, LPARAM lParam)
         for (hops = 0; o && hops < 8 && GetWindow(o, GW_OWNER); hops++) o = GetWindow(o, GW_OWNER);
         if (GetClassName(o, ocls, sizeof(ocls)) <= 0 || lstrcmp(ocls, "Progman") != 0) return TRUE;
     }
-    if (rc.right - rc.left > (int)lParam - 2 * DLG_MARGIN || rc.left < 0 || rc.right > (int)lParam) {
+    /* Only a dialog that genuinely overflows the column is reflowed (Run's Browse: the 604-wide
+       COMMDLG Open). One a little wider (About Program Manager 370, Exit Windows 370) is left as
+       laid out and clipped by a few pixels at the right: reflowing it stacked its label/value
+       rows into a dialog taller than the screen. Position is clamped by publish_layout. */
+    if (rc.right - rc.left > (int)lParam) {
         g_wideDlg = hwnd; return FALSE;
     }
     return TRUE;
@@ -1453,7 +1486,12 @@ static void check_dialogs(void)
     if (!proc) return;
     EnumWindows((WNDENUMPROC)proc, (LPARAM)screenW);
     FreeProcInstance(proc);
-    if (g_wideDlg) reflow_dialog(g_wideDlg, screenW);
+    if (g_wideDlg) {
+        /* a dialog the reflow declined (not a button column) is asked once, not every poll */
+        static HWND noReflow[8]; static int at; int i;
+        for (i = 0; i < 8; i++) if (noReflow[i] == g_wideDlg) return;
+        if (!reflow_dialog(g_wideDlg, screenW)) noReflow[at++ & 7] = g_wideDlg;
+    }
 }
 
 static BOOL live_remode(unsigned w, unsigned h)
@@ -1547,6 +1585,9 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         HDC hdc; TEXTMETRIC tm; char buf[80];
         g_lastGen = rd(R_GEN);
         g_live = GetProfileInt("PVMon", "Live", 0) != 0;
+        /* Shell dialogs wider than the column are reflowed only when what falls off is a column of
+           buttons (Run 483 -> 327); anything else (About Program Manager 505x360, values beside
+           labels) is left as laid out at x=0, clipped at the right. */
         g_dlgReflow = GetProfileInt("PVMon", "DialogReflow", 1) != 0;
         g_shellW = (unsigned)GetProfileInt("PVMon", "ShellWidth", 0);
         g_shellH = (unsigned)GetProfileInt("PVMon", "ShellHeight", 0);

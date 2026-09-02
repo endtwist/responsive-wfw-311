@@ -1571,3 +1571,20 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   host scales it uniformly); `Size.PBRUSH`/`MaxHeight.PBRUSH` removed.
 - Hearts' welcome dialog: OK is the default button but does nothing while the name field is empty;
   typing a letter first, then Enter, closes it (verified); Alt+Q quits.
+
+### 2026-09-02 — shell dialogs: reflow only button columns; wide fixed windows take two slots (PVMON v31)
+- **About Program Manager** (natural 505x360 at the 20 px font) was reflowed into a 336x680 stack
+  (values moved under their labels). The shell-dialog reflow now runs only when everything that
+  falls off the right edge is a `Button` (a right-hand button column: Run 483 -> 327, the Open/Save
+  dialogs); anything else is left as laid out at x=0, top visible, clipped at the right (About PM:
+  its OK button is off the column, Esc closes it; Exit Windows 370: both buttons visible). A dialog
+  the reflow declined is remembered so it is not re-tried every poll. Control Panel's About (owner
+  chain not Progman) is untouched: `PVO 0 640 600 505 360` below Control Panel.
+  Host suggestion: a `PVO -1` wider than the shell column could be drawn as its own scaled layer.
+- **Wide fixed-layout windows**: PVMON reports the true rect (the old park clamp cropped Character
+  Map to 640); a fixed-layout window wider than one column takes **two adjacent slots** (both entries
+  hold the window, both free with it; `pvmon: no double slot for <title>` when none). Character Map
+  is now `PVW 0 640 0 785 278` with the full grid; tour `slot` reads it as "not in slot 0" — the tour
+  should accept a window spanning slot n and n+1 when both are its own.
+- Tour after this batch: TERMINAL launch/close/kbd pass, WINFILE pass; CHARMAP `fit`/`slot` are the
+  fixed-layout/double-slot cases above.
