@@ -1532,3 +1532,26 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   Program Manager's client (guest 282,582) -> `scroll start slot=15 Program Manager`,
   `slot=15 dir=2 lines=2`, no button events; a tap at the same spot -> `button down/up`, no scroll;
   a drag on the icon row -> ordinary pointer drag.
+
+### 2026-09-02 — hold to drag on scroll surfaces; boot watchdog
+- On every one-finger-scroll surface (Program Manager's groups, File Manager, Write, Notepad, …) a
+  plain drag scrolls; a finger held still for `HOLD_MS` = 350 ms and then moved is a guest
+  left-button drag from the hold point (button down, follow, up on release: moving a group window
+  by its MDI caption, an icon, a selection). A hold released without moving (>= 500 ms) is the right
+  button; a short tap is a click. On scroll surfaces the right-click timer no longer fires during
+  the hold, so the decision is made on movement/release. Trace: `hold-drag start slot=… after …ms`.
+  Two-finger scroll also targets the shell (slot 15) when the midpoint is inside Program Manager's
+  client. Pane: plain drag -> `CMD_SCROLL slot 0`; hold 1 s + move -> `hold-drag start`, button
+  down, `drag released at …`, no scroll commands; hold 1 s + release -> `button down/up right`;
+  two fingers on PM's groups -> `slot 15 dir 2`, on the icon row -> nothing.
+- Boot watchdog: every boot step is recorded (`boot.steps`), the boot sequence runs in try/catch and
+  `unhandledrejection`/`error` are collected. 15 s after load with the emulator not running, or
+  40 s after a snapshot restore without `PVA`, a `BOOTFAIL {json}` bundle goes to `/__log` (status
+  text, path local/shipped/cold with byte sizes, restored/desktopReady, errors, steps, protocol
+  tail, viewport, hidden, UA), the local snapshot and the first frame are wiped and the page
+  restarts with `bootretry=1` (which skips the local snapshot; a second failure only reports).
+  `?bootfailtest=1` simulates a throw before `run()`: pane -> `boot failed: …`, `BOOTFAIL {"why":
+  "emulator not running 15 s after load", "running":false,"ic":0,"path":"shipped",…}`, reload with
+  `bootretry=1`, `status=restored running=true`. A local snapshot is never saved before
+  `desktopReady` (`state not saved: desktop not ready`, seen on the failed page's pagehide) or
+  within 30 s of a WATCHDOG bundle while the screen has not changed since.

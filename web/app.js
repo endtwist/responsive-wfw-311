@@ -151,6 +151,10 @@ async function saveState(emulator) {
   try {
     await stateKeyReady;
     if (!stateKeyQualified) return;                     // cannot label it: do not keep it
+    // A snapshot of a guest that has not shown its desktop, or that the watchdog has just found
+    // stuck, would restore straight back into the fault: never keep one of those.
+    if (!desktopReady) { report("state", "not saved: desktop not ready"); return; }
+    if (wd.activeSince && performance.now() - wd.activeSince < 30000 && wd.lastChange < wd.activeSince) { report("state", "not saved: watchdog condition active"); return; }
     const raw = await emulator.save_state();
     let blob = new Blob([raw]);
     if (typeof CompressionStream === "function") {
@@ -278,7 +282,37 @@ if (params.get("remote")) import("./remote.js").then(m => m.run(params.get("remo
 
 function status(msg) { $("status").textContent = msg; }
 
+/* Boot watchdog. A phone once sat on a black screen with the status stuck at "loading": the
+   emulator never started (is_running() false, instruction counter 0) and nothing was logged; a
+   ?reset=1 cured it, so the local snapshot / first-frame path was to blame. Every step of the boot
+   is recorded here; 15 s after load with the emulator not running, or 40 s without the desktop
+   after a snapshot restore, a BOOTFAIL bundle goes to the dev server, the local snapshot and frame
+   are wiped and the page restarts from the shipped snapshot -- once (loop guard in the URL). */
+const boot = { path: "none", localBytes: 0, shippedBytes: 0, errors: [], steps: [], retry: params.get("bootretry") === "1" };
+function bootStep(s) { boot.steps.push(`${Math.round(performance.now())} ${s}`); }
+window.addEventListener("unhandledrejection", ev => boot.errors.push("rejection: " + String(ev.reason && (ev.reason.stack || ev.reason)).slice(0, 300)));
+window.addEventListener("error", ev => boot.errors.push(`error: ${ev.message} @${ev.filename}:${ev.lineno}`));
+async function bootFail(why) {
+  let running = false, ic = 0;
+  try { running = !!(emulator.is_running && emulator.is_running()); ic = emulator.get_instruction_counter() >>> 0; } catch (e) {}
+  const bundle = { why, status: $("status").textContent, running, ic, path: boot.path, localBytes: boot.localBytes, shippedBytes: boot.shippedBytes,
+                   restored, desktopReady, retry: boot.retry, errors: boot.errors.slice(-10), steps: boot.steps.slice(-20), protocol: pvLog.slice(-10),
+                   vp: fullViewport(), hidden: document.hidden, ua: navigator.userAgent };
+  report("BOOTFAIL", JSON.stringify(bundle));
+  if (boot.retry) { status("boot failed twice; see log"); return; }      // loop guard: one automatic retry
+  try { await clearState(); } catch (e) {}
+  try { const db = await idb(); await new Promise(res => { const tx = db.transaction("state", "readwrite"); tx.objectStore("state").delete(FRAME_KEY); tx.oncomplete = tx.onerror = res; }); } catch (e) {}
+  const u = new URL(location.href);
+  u.searchParams.delete("bootfailtest"); u.searchParams.set("bootretry", "1");
+  status("restarting from the shipped snapshot");
+  location.replace(u.toString());
+}
+setTimeout(() => { let running = false; try { running = !!(emulator.is_running && emulator.is_running()); } catch (e) {} if (!running) bootFail("emulator not running 15 s after load"); }, 15000);
+setTimeout(() => { if (restored && !desktopReady) bootFail("snapshot restored but no desktop after 40 s"); }, 40000);
+
 emulator.add_listener("emulator-ready", async () => {
+ try {
+  bootStep("emulator-ready");
   emulator.bus.send("pv-set-dpi", dpi);
   emulator.bus.send("sb16-dsp-version", [2, 1]);     // Windows 3.x's Sound Blaster driver wants a 2.x DSP
   requestMode(true);
@@ -289,20 +323,35 @@ emulator.add_listener("emulator-ready", async () => {
   if (params.get("reset")) {
     try { await new Promise(r => { const d = indexedDB.deleteDatabase(DB); d.onsuccess = d.onerror = d.onblocked = r; }); } catch (e) {}
   }
-  let snap = params.get("fresh") || params.get("reset") ? null : await loadState();
-  if (!snap && !params.get("fresh") && !params.get("mkstate")) { snap = await loadShippedState(); report("state", `shipped snapshot ${snap ? snap.byteLength + " bytes" : "unavailable"}`); }
+  let snap = params.get("fresh") || params.get("reset") || boot.retry ? null : await loadState();
+  if (snap) { boot.path = "local"; boot.localBytes = snap.byteLength; bootStep(`local snapshot ${snap.byteLength}`); }
+  if (!snap && !params.get("fresh") && !params.get("mkstate")) {
+    snap = await loadShippedState();
+    if (snap) { boot.path = "shipped"; boot.shippedBytes = snap.byteLength; }
+    bootStep(`shipped snapshot ${snap ? snap.byteLength : "unavailable"}`);
+    report("state", `shipped snapshot ${snap ? snap.byteLength + " bytes" : "unavailable"}`);
+  }
+  if (params.get("bootfailtest") === "1") throw new Error("bootfailtest: simulated failure before run()");
   if (snap) {
     try {
       await emulator.restore_state(snap);
       status("restored");
       restored = true;
-    } catch (e) { status("restore failed, cold boot"); firstFrameUntil = 0; }
+      bootStep("restored");
+    } catch (e) { status("restore failed, cold boot"); firstFrameUntil = 0; boot.errors.push("restore: " + (e && e.message)); bootStep("restore failed"); }
   } else {
     status("booting");
+    boot.path = "cold";
     firstFrameUntil = 0;                                 // a cold boot shows its own DOS and logo
   }
   emulator.run();
+  bootStep("run");
   if (restored) setTimeout(() => sendCommand(CMD_REPUBLISH, 0), 300);
+ } catch (e) {
+  boot.errors.push("boot: " + (e && (e.stack || e.message || e)));
+  report("boot", "failed: " + (e && (e.stack || e.message || e)));
+  status("boot failed");
+ }
 });
 
 emulator.add_listener("screen-set-size", s => {
@@ -1588,6 +1637,10 @@ function dragMove(ev) {
 }
 
 const LONG_PRESS_MS = 500;
+/* On a one-finger-scroll surface a plain drag scrolls; a finger held still this long first and
+   then moved is a guest left-button drag instead (hold to move: a group window by its caption, an
+   icon, a selection). A hold released without moving is the right button, as everywhere else. */
+const HOLD_MS = 350;
 let touchInstalled = false;
 function installTouch() {
   const c = $("pres");
@@ -1646,7 +1699,7 @@ function installTouch() {
       let pol = "drag", slot = -1, title = "";
       if (pressLayer && !pressLayer.transient && !pressLayer.shellCopy && h0.kind === "client") { pol = surfacePolicy(pressLayer); slot = pressLayer.slot; title = pressLayer.title; }
       else if (insideShellClient(h0)) { pol = "scroll"; slot = SHELL_SCROLL_SLOT; title = "Program Manager"; }   // PVMON targets the active group
-      oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title } : null; }
+      oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, t0: performance.now() } : null; }
     // A quick second tap near the first is a double-click: Windows 3.1 only pairs clicks a few
     // pixels apart, and fingers do not repeat to the pixel, so the second tap reuses the first
     // tap's exact point.
@@ -1659,11 +1712,12 @@ function installTouch() {
     }
     { const { px, py } = hostPoint(ev); lastTap = { t: now, px, py, pt, dragged: false }; }
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}${oneScroll ? " policy=scroll" : ""}`); noteInput(`down ${h.kind} ${pt.x},${pt.y} ${h.win && h.win.title || ""}`); }
-    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py) };
+    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py), scrollSurface: !!oneScroll };
     pressActive = true;
     queue(async () => {
       await placePointer(pt);
       if (!G.active || G.dragging) return;
+      if (G.scrollSurface) return;                         // on a scroll surface the hold is decided on the release (or becomes a drag)
       G.timer = setTimeout(() => queue(async () => {          // long press is the right button
         if (!G.active || G.dragging) return;
         G.longFired = true;
@@ -1680,9 +1734,16 @@ function installTouch() {
     if (oneScroll) {
       const { px, py } = hostPoint(ev);
       if (!oneScroll.scrolling && Math.hypot(px - oneScroll.startX, py - oneScroll.startY) > 8) {
-        oneScroll.scrolling = true; G.scrolled = true;
-        if (lastTap) lastTap.dragged = true;
-        diag(`scroll start slot=${oneScroll.slot} ${oneScroll.title}`);
+        if (performance.now() - oneScroll.t0 >= HOLD_MS) {
+          // held still first, then moved: a guest left-button drag from the hold point
+          diag(`hold-drag start slot=${oneScroll.slot} ${oneScroll.title} after ${Math.round(performance.now() - oneScroll.t0)}ms`);
+          noteInput("hold-drag");
+          oneScroll = null;
+        } else {
+          oneScroll.scrolling = true; G.scrolled = true;
+          if (lastTap) lastTap.dragged = true;
+          diag(`scroll start slot=${oneScroll.slot} ${oneScroll.title}`);
+        }
       }
       if (oneScroll.scrolling) {
         oneScroll.accX += px - oneScroll.lastX; oneScroll.accY += py - oneScroll.lastY;
@@ -1691,8 +1752,7 @@ function installTouch() {
         if (ny) { send(ny > 0 ? 1 : 2, Math.abs(ny)); oneScroll.accY -= ny * SCROLL_STEP; }   // finger down = content up = line up
         if (nx) { send(nx > 0 ? 3 : 4, Math.abs(nx)); oneScroll.accX -= nx * SCROLL_STEP; }
       }
-      oneScroll.lastX = px; oneScroll.lastY = py;
-      return;
+      if (oneScroll) { oneScroll.lastX = px; oneScroll.lastY = py; return; }
     }
     G.latest = canvasPoint(ev);
     if (!G.dragging) {
@@ -1762,6 +1822,10 @@ function installTouch() {
     }
     if (!G) return;
     if (S && S.scrolling) return;                       // a scroll ends with nothing pressed
+    if (S && !G.dragging && performance.now() - S.t0 >= LONG_PRESS_MS) {   // a hold released still: right button
+      queue(async () => { button(true, true); await sleep(60); button(false, true); });
+      return;
+    }
     if (!G.dragging && !G.longFired && ev && ev.type === "touchend") tapKeyboard(G.hit);
     queue(async () => {
       if (G.dragging) { button(false, false); diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
@@ -1784,8 +1848,12 @@ function installTouch() {
       if (G) { G.active = false; clearTimeout(G.timer); if (G.dragging) queue(async () => button(false, false)); g = null; }
       const m = mid(ev.touches);
       const win = layerUnder(m);
-      twoFinger = { last: m, accX: 0, accY: 0, dist: dist(ev.touches), win,
-                    slot: win && win.slot >= 0 ? win.slot : -1 };
+      let slot = win && win.slot >= 0 ? win.slot : -1;
+      if (!win) {                                          // Program Manager's groups scroll too (slot 15 = the shell)
+        const r = c.getBoundingClientRect();
+        if (insideShellClient(hitTest(m.x - r.left - safe.l, m.y - r.top - safe.t + keyboardShift()))) slot = SHELL_SCROLL_SLOT;
+      }
+      twoFinger = { last: m, accX: 0, accY: 0, dist: dist(ev.touches), win, slot };
       ev.preventDefault();
       return;
     }
@@ -1939,7 +2007,7 @@ function watchdog(force) {
   const inputStuck = wd.lastInput && now - wd.lastInput > 5000 && wd.lastChange < wd.lastInput && now - wd.lastInput < 20000;
   if (!beatStale && !inputStuck) return;
   if (now - wd.lastBundle < 60000) return;
-  wd.lastBundle = now;
+  wd.lastBundle = now; wd.activeSince = now;
   const bundle = {
     why: beatStale ? `heartbeat silent ${Math.round(now - wd.lastBeat)}ms` : `input ${Math.round(now - wd.lastInput)}ms ago, no frame change since`,
     at: new Date().toISOString(), mips: +wdMips.toFixed(2), running: emulator.is_running && emulator.is_running(),
