@@ -912,9 +912,17 @@ function placeLayers(src) {
          so Program Manager's caption stays reachable behind it; a layer taller than that room is
          top-aligned. The user can still drag it anywhere, including off the edges. */
       const capStrip = Math.round(shell.cap * c) + Math.round(inset.l * c);
-      p = layerPos[key] = owner
-        ? { x: Math.round(owner.x + (owner.hw - hw) / 2), y: Math.round(owner.y + (owner.hh - hh) / 2) }
-        : { x: Math.max(0, Math.round((vw - hw) / 2)), y: Math.max(0, Math.min(capStrip, vh - hh)) };
+      if (owner) {
+        // A dialog the guest placed clear of its owner goes below the owner here too, when there is
+        // room, so the owner stays visible (a Save prompt with its document, an Open box with the
+        // recorder); otherwise centred on the owner.
+        const below = owner.y + owner.hh;
+        p = layerPos[key] = below + hh <= vh
+          ? { x: Math.max(0, Math.round(owner.x + (owner.hw - hw) / 2)), y: below }
+          : { x: Math.round(owner.x + (owner.hw - hw) / 2), y: Math.round(owner.y + (owner.hh - hh) / 2) };
+      } else {
+        p = layerPos[key] = { x: Math.max(0, Math.round((vw - hw) / 2)), y: Math.max(0, Math.min(capStrip, vh - hh)) };
+      }
     }
     // A window that fits stays entirely on screen; one that does not may hang off the edges, but
     // never so far that less than a thumb's width of it is left to grab.
