@@ -739,7 +739,8 @@ async function placePointer(pt) {
   while (cursorSeq === seq && performance.now() - t0 < 350) await sleep(8);
   const reported = cursorSeq !== seq;
   diag(`place ${pt.x},${pt.y} reported=${reported} after ${Math.round(performance.now() - t0)}ms cursor=${JSON.stringify(guestCursor)}`);
-  if (guestCursor && (Math.abs(guestCursor.x - pt.x) > 1 || Math.abs(guestCursor.y - pt.y) > 1)) {
+  // No report yet (nothing has moved the pointer since the restore) or off target: steer.
+  if (!guestCursor || Math.abs(guestCursor.x - pt.x) > 1 || Math.abs(guestCursor.y - pt.y) > 1) {
     await steerTo(pt);
     diag(`steered -> ${JSON.stringify(guestCursor)}`);
   }
