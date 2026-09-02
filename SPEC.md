@@ -1076,3 +1076,29 @@ time slice) / 1689h (kernel idle), which kept the emulator at 60-90 MIPS and a p
 after the wake-up, which is what "yield" means). Idle: 0.1 MIPS, input still immediate. Also:
 `_DEFAULT.PIF` windowed; the phone's "DOS window never appears" is DOS VM start-up dragging the
 emulator to ~3 MIPS (5 s in the pane at 55 MIPS), i.e. the DOS VM speed item.
+
+**2026-09-02 — CBT hook, printer, immutable builds, tearing (part 1).**
+- `PVHOOK.DLL` (guest/pvhook, Open Watcom `system windows_dll`): a system-wide WH_CBT hook.
+  HCBT_CREATEWND rewrites the CREATESTRUCT so application windows are born in the staging column
+  (x=640) sized to `[PVMon] DefaultSize` (or `Size.<MODULE>`, unless in `KeepSize`) and owned
+  windows are centred on their owner in the owner's column. Verified: Hearts' welcome dialog first
+  appears at x=663 (never in the desktop column); Notepad opens 352x600 (1:1 on the phone). PVMON
+  loads it at start ("CBT hook installed") and keeps its poll-time parking as the fallback.
+- Printing: "PDF Printer" = stock PSCRIPT.DRV + HP LaserJet III PostScript description, port
+  `C:\PRINT.PS`. PVMON ships the finished file over the debug channel as `PVP-BEGIN/PVP <b64>/PVP-END`
+  and deletes it; the page converts with Ghostscript wasm (@jspawn/ghostscript-wasm, loaded on
+  first use) and triggers a download. Status: Notepad printing gave "Not enough memory to print"
+  (CreateDC failing); the per-printer section is now written under both `[PSCRIPT,...]` and
+  `[PostScript,...]`; retest pending.
+- Immutable builds: `build-image.sh` clones each build to `work-phone-<stamp>.img`, writes
+  `image/current.json` {image, state}; the page reads the manifest (top-level await) and mkstate
+  writes `boot-<stamp>.state.gz`. Cause: the phone restored a snapshot over a newer image and hit
+  "Segment Load Failure in PVDISP.DRV at 0001:3E11".
+- Tearing, part 1 (agent): the interrupt-time software cursor switched the PV banks under a running
+  blit (CURSOR.ASM saved the inert V7 registers, not the PV shadows). Fixed and merged (f744552);
+  residue still reproduces with the cursor hidden, so a second cause remains (under investigation).
+- Idle hook (v86 INT 2F 1680/1689) merged earlier; pointer hidden on touch; caption tap activates;
+  caption long-press toggles the soft keyboard; layers draggable off-screen; DOS box keyboard via
+  class "tty".
+- Sound: WfW's SNDBLST2.DRV refuses v86's SB16 even at DSP 2.1 (agent investigating); off by
+  default. DOS VM speed: agent investigating v86's V86-mode/JIT path.
