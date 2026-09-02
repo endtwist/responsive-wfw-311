@@ -152,7 +152,13 @@ static WinInfo g_info[MAX_INFO];
    box: PVMON froze until Ctrl+Esc). The hook sees HCBT_DESTROYWND first and remembers the last
    few, and PVMON skips them (PvHookIsDead) while IsWindow still says yes. */
 static HWND g_dead[8]; static int g_deadAt;
+static BOOL g_dirty;             /* the hook published a list: PVMON must publish again after it */
 static void mark_dead(HWND h) { g_dead[g_deadAt++ & 7] = h; }
+/* Window handles are recycled quickly: a program launched right after another closed can get the
+   dead one's handle, and PVMON would never publish it (Control Panel after File Manager, Media
+   Player after Sound Recorder: launch timeouts). Creation clears the mark. */
+static void unmark_dead(HWND h) { int i; for (i = 0; i < 8; i++) if (g_dead[i] == h) g_dead[i] = NULL; }
+BOOL FAR PASCAL __export PvHookTakeDirty(void) { BOOL d = g_dirty; g_dirty = FALSE; return d; }
 BOOL FAR PASCAL __export PvHookIsDead(HWND h)
 {
     int i;
@@ -310,6 +316,7 @@ static void hook_publish(HWND skip)
         pv_dbg(line);
     }
     pv_dbg("PVE");
+    g_dirty = TRUE;
 }
 
 /* Where an owned window goes so that it covers as little of its owner as possible: below the
@@ -484,7 +491,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             for (hops = 0; h && hops < 8 && (GetWindowLong(h, GWL_STYLE) & WS_CHILD); hops++) h = GetParent(h);
         }
         if (h && GetClassName(h, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0 && !(GetWindowLong(h, GWL_STYLE) & WS_CHILD)) {
-            if (code != HCBT_DESTROYWND && !GetWindow(h, GW_OWNER) && !shell_task(h) && !task_main_window(h) && IsWindowVisible(h)) {
+            if (code != HCBT_DESTROYWND && !GetWindow(h, GW_OWNER) && !shell_task(h) && !task_main_window(h)) {
                 /* a dialog that is a program of its own (Task List) centred itself on the screen:
                    put it at the top of the column it fell in before it is reported */
                 RECT rc; int colX;
@@ -498,6 +505,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             g_force = NULL;
         }
     }
+    if (code == HCBT_CREATEWND) unmark_dead((HWND)wParam);
     if (code == HCBT_CREATEWND) {
         HWND hwnd = (HWND)wParam;
         LPCBT_CREATEWND cbt = (LPCBT_CREATEWND)lParam;

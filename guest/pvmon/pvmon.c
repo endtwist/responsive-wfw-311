@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 26     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 27     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -89,7 +89,9 @@ typedef BOOL (FAR PASCAL *HOOKINSTALL)(void);
 typedef void (FAR PASCAL *HOOKREMOVE)(void);
 typedef void (FAR PASCAL *HOOKSETSHELL)(int, int);
 typedef BOOL (FAR PASCAL *HOOKISDEAD)(HWND);
+typedef BOOL (FAR PASCAL *HOOKTAKEDIRTY)(void);
 static HOOKISDEAD g_isDead;
+static HOOKTAKEDIRTY g_takeDirty;
 /* A window the hook has seen HCBT_DESTROYWND for: its task may be gone, and a cross-task
    SendMessage to it (GetWindowText, SetWindowPos) can block PVMON until something else wakes
    the scheduler. Such windows are left alone even while IsWindow still says yes. */
@@ -111,6 +113,7 @@ static void install_hook(void)
     if ((UINT)g_hookDll < 32) { g_hookDll = NULL; dbg("pvmon: PVHOOK.DLL not found"); return; }
     inst = (HOOKINSTALL)GetProcAddress(g_hookDll, "PvHookInstall");
     g_isDead = (HOOKISDEAD)GetProcAddress(g_hookDll, "PvHookIsDead");
+    g_takeDirty = (HOOKTAKEDIRTY)GetProcAddress(g_hookDll, "PvHookTakeDirty");
     dbg(inst && inst() ? "pvmon: hooks installed (windows are born in their slots and clamped to the frame)" : "pvmon: CBT hook failed");
     hook_set_shell();
 }
@@ -1492,6 +1495,10 @@ static void poll(HWND hwnd)
     if (g_shellW) {
         static unsigned n;
         run_host_command();
+        /* the hook published a list of its own (a dialog came or went): ours must follow, even if
+           what we see is what we last said, or the host keeps the hook's snapshot (a closed DOS
+           box "still published") */
+        if (g_takeDirty && g_takeDirty()) g_lastPub[0] = 0;
         if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); enforce_cursor(); }
         if (n % HEARTBEAT_POLLS == 0) { heartbeat(); ship_print_job(); }   /* about once a second */
     }
