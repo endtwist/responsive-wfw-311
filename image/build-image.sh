@@ -7,8 +7,8 @@
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; esac; done
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
@@ -28,13 +28,13 @@ TMP=$(mktemp -d)
 } > $TMP/AUTOEXEC.BAT
 mcopy -o $M $TMP/AUTOEXEC.BAT ::/AUTOEXEC.BAT
 mcopy -n $M ::/WINDOWS/SYSTEM.INI $TMP/SYSTEM.INI
-python3 ../tools/inied.py $TMP/SYSTEM.INI display=$DISPLAY_DRV res=$RES dpi=$DPI ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV}
+python3 ../tools/inied.py $TMP/SYSTEM.INI display=$DISPLAY_DRV res=$RES dpi=$DPI ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND}
 mcopy -o $M $TMP/SYSTEM.INI ::/WINDOWS/SYSTEM.INI
 # DPI variants for PVDPI.EXE to choose between at each Windows start (SPEC 2.6).
 # Fonts must match the DPI PVDISP.DRV reports from HOST_DPI or text metrics go wrong.
 for d in 96 120; do
   cp $TMP/SYSTEM.INI $TMP/SYSTEM.$d
-  python3 ../tools/inied.py $TMP/SYSTEM.$d display=$DISPLAY_DRV res=$RES dpi=$d ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV}
+  python3 ../tools/inied.py $TMP/SYSTEM.$d display=$DISPLAY_DRV res=$RES dpi=$d ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND}
   mcopy -o $M $TMP/SYSTEM.$d ::/WINDOWS/SYSTEM.$d
 done
 # WIN.INI: [windows] load= (companion utility), e.g. load=PVMON.EXE; load=- clears it
@@ -47,6 +47,11 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
   PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.MaxHeight.WINFILE=600 PVMon.Size.WINOA386=400x340 \
+  "windows.device=PDF Printer,PSCRIPT,C:\\PRINT.PS" \
+  "devices.PDF Printer=PSCRIPT,C:\\PRINT.PS" \
+  "PrinterPorts.PDF Printer=PSCRIPT,C:\\PRINT.PS,15,45" \
+  "Ports.C:\\PRINT.PS=" \
+  "PSCRIPT,C:\\PRINT.PS::device=HP LaserJet III PostScript" \
   "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )"
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
 # File Manager remembers its window from its last run, which on this image was a 1024x768 session;

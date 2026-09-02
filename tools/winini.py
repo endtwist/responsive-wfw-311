@@ -20,7 +20,10 @@ def setkey(secs, sec, key, val):
     secs.append([sec, [f"{key}={val}", ""]])
 secs = parse(text)
 for a in sys.argv[2:]:
-    sk, val = a.split("=", 1); sec, key = sk.split(".", 1); setkey(secs, sec, key, val)
+    sk, val = a.split("=", 1)
+    # "section::key=value" for section names that contain a dot (e.g. "PSCRIPT,C:\PRINT.PS")
+    sec, key = sk.split("::", 1) if "::" in sk else sk.split(".", 1)
+    setkey(secs, sec, key, val)
 out = []
 for name, lines in secs:
     if name: out.append(f"[{name}]")

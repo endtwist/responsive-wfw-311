@@ -20,11 +20,23 @@ def setkey(secs, sec, key, val):
                 if re.match(rf"^{re.escape(key)}\s*=", l, re.I): s[1][i] = f"{key}={val}"; return
             s[1].insert(0, f"{key}={val}"); return
     secs.append([sec, [f"{key}={val}", ""]])
+def addline(secs, sec, line):
+    """Add a line to a section unless an identical one is there ([386Enh] has many device= lines)."""
+    for s in secs:
+        if s[0] and s[0].lower() == sec.lower():
+            if any(l.strip().lower() == line.lower() for l in s[1]): return
+            s[1].insert(0, line); return
+    secs.append([sec, [line, ""]])
 secs = parse(text)
 large = dpi == "120"
 fonts = ("8514fix.fon", "8514oem.fon", "8514sys.fon") if large else ("vgafix.fon", "vgaoem.fon", "vgasys.fon")
 setkey(secs, "boot", "fixedfon.fon", fonts[0]); setkey(secs, "boot", "oemfonts.fon", fonts[1])
 if opts.get("mousedrv"): setkey(secs, "boot", "mouse.drv", opts["mousedrv"])
+if opts.get("sound"):
+    # Sound Blaster 2.0 driver on v86's SB16 (port 220, IRQ 5, DMA 1); VSBD virtualises it for DOS boxes
+    setkey(secs, "drivers", "wave", "sndblst2.drv")
+    setkey(secs, "sndblst.drv", "port", "220"); setkey(secs, "sndblst.drv", "int", "5"); setkey(secs, "sndblst.drv", "dmachannel", "1")
+    addline(secs, "386Enh", "device=vsbd.386")
 # sysfont=PVSYS.FON: a taller system font (tools/mkfon.py) makes captions, menus and caption
 # boxes bigger, which is how the chrome becomes thumb-sized with only Windows' own pixels.
 setkey(secs, "boot", "fonts.fon", opts.get("sysfont", fonts[2]) if large else fonts[2])
