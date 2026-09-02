@@ -926,3 +926,25 @@ framebuffer to draw underneath it, so a smaller overlay would leave a ring of th
 pixels around itself. The variant that avoids this is to frame the *focused* window: give it the
 whole screen so scaling to fit it is scaling only it, and scale back to the shell strip on return
 to the desktop. That is a small change from what exists and has not been built yet.
+
+**2026-09-01 (late) — windows composited as layers with their own chrome.**
+
+The guest screen is now one row of 640-column slots: the shell in a 448-wide column, every
+application window parked in a column of its own (`MAX_SLOTS` = 2). PVMON publishes each
+window's window rect, client rect and title (`PVB`/`PVW`/`PVE`), back to front, and keeps a window
+in its slot for life so activation never moves it. The host draws the shell column as the desktop
+and each application over it: the client area at whatever scale fits, and the chrome nine-sliced
+from the guest's own pixels at 1:1, so captions, menus, and the system/min/max boxes stay
+finger-sized and are real (they click through to the guest). The caption strip between the boxes
+is cropped around its centre rather than squeezed, so the title stays crisp. The caption is the
+drag handle; dragging only moves where the host draws the layer. Oversized (maximised) windows are
+pulled back to their slot by PVMON. Verified: Solitaire + Clock + Task List layered over Program
+Manager; z-order follows the guest (Alt+Tab); drag moves by the exact delta.
+
+Known, not yet fixed: (1) torn repaints in Solitaire during play -- `PLYBITM8.ASM
+SetCurrentBankDL` still programs the V7 registers (3C2, SEQ F6/F9) directly instead of the PV bank
+shadows, so PolyBitmap draws through a stale bank; (2) transient top-level windows placed by
+Windows in screen space (the Alt+Tab switcher `#32771`, menus) land inside whichever slot column
+they fall in and need their own 1:1 layer path anchored to the owning layer; (3) a third
+application gets no slot and is never published (Hearts). A stale `C:\WINDOWS\PVMON.EXE`
+shadowed the staged binary for a while; PVMON is now staged in `changes/windows`.

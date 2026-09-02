@@ -42,14 +42,39 @@ const ZOOM_MIN = 0.5, ZOOM_MAX = 6;
 
 const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
 
+/* Layout of the virtual screen on a narrow display:
+ *
+ *   +-----------+----------+----------+  <- each column is 640 wide, always, so applications
+ *   | shell     | app slot | app slot |     lay out as they were designed to
+ *   | SHELL_W   | 0        | 1        |
+ *   +-----------+----------+----------+
+ *
+ * The shell column is the desktop. Every application window is parked in a column of its own,
+ * in screen space the desktop view never draws. The host then composites: the shell fills the
+ * viewport as the background, and each application's CLIENT area is drawn over the top at its
+ * own scale, under a title bar the host draws itself in host pixels. So several windows are
+ * visible at once, their contents shrink to fit a phone, and their chrome stays finger-sized
+ * and crisp instead of shrinking with them. Windows itself sees none of this: as far as it is
+ * concerned the windows sit side by side on one wide screen.
+ */
+const SHELL_W = 448;             // width of the shell column on a narrow display
+const SLOT_W = 640;              // width of each application column (must match pvmon.c)
+const MAX_SLOTS = 2;             // application columns (must match pvmon.c)
+const WIN_MARGIN = 8;
+
+function narrow() { return viewport()[0] < 600; }
+
 function computeMode() {
   const [vw, vh] = viewport();
-  const floorW = MIN_W;          // always a full-width screen; the host scales the picture
-  let scale = Math.max(1, floorW / vw, MIN_H / vh);
+  if (narrow()) {
+    const shellH = Math.min(MAX_H, Math.round(vh * SHELL_W / vw) & ~1);
+    return { w: SLOT_W * (1 + MAX_SLOTS), h: shellH, zoom: 1, shellH };
+  }
+  let scale = Math.max(1, MIN_W / vw, MIN_H / vh);
   scale = Math.min(scale, MAX_W / vw, MAX_H / vh);
-  const w = Math.max(floorW, Math.min(MAX_W, Math.floor(vw * scale / 8) * 8));
+  const w = Math.max(MIN_W, Math.min(MAX_W, Math.floor(vw * scale / 8) * 8));
   const h = Math.max(MIN_H, Math.min(MAX_H, Math.floor(vh * scale / 2) * 2));
-  return { w, h, zoom: scale };
+  return { w, h, zoom: scale, shellH: 0 };
 }
 
 const initial = computeMode();
@@ -157,27 +182,192 @@ emulator.add_listener("screen-set-size", s => {
 let guestCursor = null;
 emulator.bus.register("pv-cursor", xy => { guestCursor = { x: xy[0], y: xy[1] }; });
 
-// PVMON reports the width of the occupied part of the screen. Scale so that fills the viewport.
-let contentW = 0;
+/* What the guest says is where: the shell column's size, and one entry per application window
+   giving the client rectangle it occupies in guest screen space, back to front. */
+let shell = { w: SHELL_W, h: 0, cap: 18 };
+let layers = [];
+let pendingLayers = null;
+const layerPos = {};                 // slot -> host position, moved by dragging
+
+const pvLog = [];
+window.pvState = () => ({ shell, layers, placed, view, log: pvLog.slice(-40) });
 emulator.bus.register("pv-debug", line => {
-  const m = /^PVW (\d+)/.exec(line);
-  if (!m) return;
-  contentW = +m[1];
-  applyAutoZoom();
+  pvLog.push(line);
+  let m = /^PVD (\d+) (\d+)(?: (\d+))?/.exec(line);
+  if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18 }; return; }
+  if (/^PVB /.test(line)) { pendingLayers = []; return; }
+  m = /^PVW (\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
+  if (m && pendingLayers) {
+    pendingLayers.push({
+      slot: +m[1], wx: +m[2], wy: +m[3], ww: +m[4], wh: +m[5],
+      gx: +m[6], gy: +m[7], gw: +m[8], gh: +m[9], title: m[10] || "",
+    });
+    return;
+  }
+  if (/^PVE/.test(line) && pendingLayers) {
+    layers = pendingLayers; pendingLayers = null;
+    const live = new Set(layers.map(l => l.slot));
+    for (const k of Object.keys(layerPos)) if (!live.has(+k)) delete layerPos[k];
+  }
 });
 
-function applyAutoZoom() {
-  const c = document.querySelector("#screen_container canvas");
-  if (!autoZoom || !c || !c.width || !contentW) return;
-  const [vw] = viewport();
-  const want = (vw / (contentW + 8)) / fitScale(c);      // relative to the fit scale
-  const z = Math.max(1, Math.min(ZOOM_MAX, want));
-  if (Math.abs(z - zoom) < 0.02) return;
-  zoom = z;
-  fitCanvas();
-  const box = $("screen_container");
-  box.scrollLeft = 0; box.scrollTop = 0;                 // content starts at the top left
+/* The desktop view: which slice of the guest screen is the background, and at what scale. */
+let view = { x: 0, y: 0, w: 0, h: 0, scale: 1, ox: 0 };
+let placed = [];                     // the composited windows, as drawn, front-most last
+
+function chooseView(src) {
+  const [vw, vh] = viewport();
+  if (!narrow() || !shell.h) {                      // wide display: just show the whole screen
+    const scale = Math.min(vw / src.width, vh / src.height);
+    return { x: 0, y: 0, w: src.width, h: src.height, scale, ox: 0 };
+  }
+  const scale = Math.min(vw / shell.w, vh / shell.h);
+  return { x: 0, y: 0, w: shell.w, h: shell.h, scale,
+           ox: Math.round((vw - shell.w * scale) / 2) };
 }
+
+/* Where each window lands on the host, and how its chrome is cut up.
+
+   The chrome is the guest's own pixels, drawn at one host pixel per guest pixel, so it stays
+   exactly as crisp and as large as it is on the desktop behind while the client area inside it
+   shrinks to fit. The caption row is composited in three pieces: the system box on the left and
+   the minimise and maximise boxes on the right keep their corners untouched, and only the strip
+   of caption between them is squeezed to span the gap. The menu row below is drawn from the left
+   and cropped, since menu titles are left-aligned. */
+function placeLayers() {
+  const [vw, vh] = viewport();
+  const out = [];
+  layers.forEach((L, i) => {
+    const inset = {                                  // frame thickness, straight from the guest
+      l: Math.max(0, L.gx - L.wx),
+      t: Math.max(0, L.gy - L.wy),
+      b: Math.max(0, (L.wy + L.wh) - (L.gy + L.gh)),
+    };
+    const capRow = Math.min(inset.t, inset.l + shell.cap);   // border plus caption
+    const menuRow = inset.t - capRow;                        // menu bar, if the window has one
+    const box = Math.max(12, shell.cap);                     // a caption box is square
+    const chromeW = 2 * inset.l;
+    const availW = vw - 2 * WIN_MARGIN - chromeW;
+    const availH = vh - 2 * WIN_MARGIN - inset.t - inset.b;
+    const s = Math.min(view.scale, availW / L.gw, availH / L.gh);
+    const cw = Math.round(L.gw * s), ch = Math.round(L.gh * s);
+    const hw = cw + chromeW, hh = ch + inset.t + inset.b;
+    let p = layerPos[L.slot];
+    if (!p) {
+      p = layerPos[L.slot] = { x: Math.round((vw - hw) / 2) + i * 16,
+                               y: Math.round(vh * 0.12) + i * 16 };
+    }
+    const x = Math.max(40 - hw, Math.min(vw - 40, p.x));
+    const y = Math.max(0, Math.min(vh - capRow, p.y));
+    out.push({ ...L, s, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box });
+  });
+  return out;
+}
+
+/* Hit test in host pixels, front-most first. Everything on a window except the middle of its
+   caption is a real guest click at the mapped pixel, so the system box, the minimise and
+   maximise boxes and the menus all behave exactly as they do on the desktop. The caption between
+   those boxes is the drag handle, and dragging it only changes where the host draws the layer. */
+function hitTest(px, py) {
+  for (let i = placed.length - 1; i >= 0; i--) {
+    const w = placed[i];
+    if (px < w.x || px > w.x + w.hw) continue;
+    if (py < w.y || py > w.y + w.hh) continue;
+    const dx = px - w.x, dy = py - w.y;
+    if (dy >= w.inset.t && dy < w.inset.t + w.ch &&
+        dx >= w.inset.l && dx < w.inset.l + w.cw) {
+      return { kind: "client", win: w,
+               x: Math.round(w.gx + (dx - w.inset.l) / w.s),
+               y: Math.round(w.gy + (dy - w.inset.t) / w.s) };
+    }
+    if (dy < w.capRow) {                              // caption row: boxes click, middle drags
+      const leftEnd = w.inset.l + w.box;
+      const rightStart = w.hw - w.inset.l - 2 * w.box;
+      if (dx < leftEnd) return { kind: "chrome", win: w, x: w.wx + dx, y: w.wy + dy };
+      if (dx >= rightStart)
+        return { kind: "chrome", win: w, x: w.wx + w.ww - (w.hw - dx), y: w.wy + dy };
+      return { kind: "drag", win: w };
+    }
+    if (dy < w.inset.t)                               // menu row is drawn 1:1 from the left
+      return { kind: "chrome", win: w, x: w.wx + dx, y: w.wy + dy };
+    return { kind: "drag", win: w };                  // the frame itself drags, like the caption
+  }
+  return { kind: "desktop",
+           x: Math.round(view.x + (px - view.ox) / view.scale),
+           y: Math.round(view.y + py / view.scale) };
+}
+
+function drawWindow(g, src, w) {
+  const { inset, capRow, menuRow, box } = w;
+  const midSrcW = w.ww - 2 * inset.l - 3 * box;       // the caption strip between the boxes
+  const midDstW = w.hw - 2 * inset.l - 3 * box;
+
+  g.imageSmoothingEnabled = false;
+  g.drawImage(src, w.wx, w.wy, inset.l + box, capRow, w.x, w.y, inset.l + box, capRow);
+  g.drawImage(src, w.wx + w.ww - inset.l - 2 * box, w.wy, inset.l + 2 * box, capRow,
+              w.x + w.hw - inset.l - 2 * box, w.y, inset.l + 2 * box, capRow);
+  if (midSrcW > 0 && midDstW > 0) {
+    if (midDstW <= midSrcW) {
+      /* The caption is narrower on the host than in the guest, so the strip between the boxes
+         is cropped rather than squeezed: equal slivers of empty caption come off each side and
+         the title, which Windows centres, stays centred, at its own size and perfectly crisp.
+         Only a title too long for the gap loses its ends, which is what Windows does anyway. */
+      const cut = Math.floor((midSrcW - midDstW) / 2);
+      g.drawImage(src, w.wx + inset.l + box + cut, w.wy, midDstW, capRow,
+                  w.x + inset.l + box, w.y, midDstW, capRow);
+    } else {                                          // wider on the host: pad, do not stretch
+      const pad = midDstW - midSrcW;
+      g.drawImage(src, w.wx + inset.l + box, w.wy, 2, capRow,
+                  w.x + inset.l + box, w.y, pad, capRow);
+      g.drawImage(src, w.wx + inset.l + box, w.wy, midSrcW, capRow,
+                  w.x + inset.l + box + pad, w.y, midSrcW, capRow);
+    }
+  }
+  if (menuRow > 0) {
+    const mw = Math.min(w.ww, w.hw);
+    g.drawImage(src, w.wx, w.wy + capRow, mw, menuRow, w.x, w.y + capRow, mw, menuRow);
+    if (w.hw > mw)                                    // pad with the menu bar's own background
+      g.drawImage(src, w.wx + mw - 2, w.wy + capRow, 2, menuRow,
+                  w.x + mw, w.y + capRow, w.hw - mw, menuRow);
+  }
+  if (inset.l > 0) {                                  // side borders, stretched only lengthways
+    g.drawImage(src, w.wx, w.gy, inset.l, w.gh, w.x, w.y + inset.t, inset.l, w.ch);
+    g.drawImage(src, w.gx + w.gw, w.gy, inset.l, w.gh,
+                w.x + inset.l + w.cw, w.y + inset.t, inset.l, w.ch);
+  }
+  if (inset.b > 0)
+    g.drawImage(src, w.wx, w.gy + w.gh, Math.min(w.ww, w.hw), inset.b,
+                w.x, w.y + inset.t + w.ch, Math.min(w.hw, w.ww), inset.b);
+  g.imageSmoothingEnabled = w.s < 1;                  // the client, at the scale that fits
+  g.drawImage(src, w.gx, w.gy, w.gw, w.gh, w.x + inset.l, w.y + inset.t, w.cw, w.ch);
+}
+
+function present() {
+  const src = document.querySelector("#screen_container canvas");
+  const pres = $("pres");
+  if (src && src.width && pres) {
+    const [vw, vh] = viewport();
+    const dpr = window.devicePixelRatio || 1;
+    if (pres.width !== Math.round(vw * dpr) || pres.height !== Math.round(vh * dpr)) {
+      pres.width = Math.round(vw * dpr); pres.height = Math.round(vh * dpr);
+      pres.style.width = vw + "px"; pres.style.height = vh + "px";
+    }
+    view = chooseView(src);
+    const g = pres.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.imageSmoothingEnabled = false;
+    g.fillStyle = "#000";
+    g.fillRect(0, 0, vw, vh);
+    const dw = view.w * view.scale, dh = view.h * view.scale;
+    g.drawImage(src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
+
+    placed = narrow() ? placeLayers() : [];
+    for (const w of placed) drawWindow(g, src, w);    // back to front
+  }
+  requestAnimationFrame(present);
+}
+requestAnimationFrame(present);
+window.pvPresent = present;
 window.pvGuestCursor = () => guestCursor;
 
 /* ------------------------------------------------------------------------- mode controller */
@@ -272,13 +462,39 @@ function setZoom(z, anchor) {
  */
 const LONG_PRESS_MS = 500;
 
+/* A tap is resolved against the composited layers: a title bar drags that window about, and
+   anything else becomes a guest click at the pixel the user actually touched, even though each
+   layer is drawn at its own scale and offset. */
+function hostPoint(ev) {
+  const r = $("pres").getBoundingClientRect();
+  return { px: ev.clientX - r.left, py: ev.clientY - r.top };
+}
+
 function canvasPoint(ev) {
-  const c = document.querySelector("#screen_container canvas");
-  const r = c.getBoundingClientRect();
-  return {
-    x: Math.round((ev.clientX - r.left) / r.width * c.width),
-    y: Math.round((ev.clientY - r.top) / r.height * c.height),
-  };
+  const { px, py } = hostPoint(ev);
+  const h = hitTest(px, py);
+  return { x: h.x, y: h.y };
+}
+
+/* Dragging a window is entirely a host affair: only where the layer is drawn changes, so it is
+   as smooth as the display and the guest never learns the window moved. */
+let chromeDrag = null;
+
+function dragStart(ev) {
+  const { px, py } = hostPoint(ev);
+  const h = hitTest(px, py);
+  if (h.kind !== "drag") return false;
+  const p = layerPos[h.win.slot];
+  chromeDrag = { slot: h.win.slot, dx: px - p.x, dy: py - p.y };
+  return true;
+}
+
+function dragMove(ev) {
+  if (!chromeDrag) return false;
+  const { px, py } = hostPoint(ev);
+  layerPos[chromeDrag.slot] = { x: Math.round(px - chromeDrag.dx),
+                                y: Math.round(py - chromeDrag.dy) };
+  return true;
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -304,7 +520,7 @@ function button(down, right) { emulator.bus.send("mouse-click", [down && !right,
 
 let touchInstalled = false;
 function installTouch() {
-  const c = document.querySelector("#screen_container canvas");
+  const c = $("pres");
   if (!c || touchInstalled) return;
   touchInstalled = true;
   // Steering the pointer takes several packets, so the gesture handlers are serialised: a
@@ -327,6 +543,7 @@ function installTouch() {
     }
     if (ev.touches.length !== 1) return;
     ev.preventDefault();
+    if (dragStart(ev.touches[0])) return;
     const pt = canvasPoint(ev.touches[0]);
     longFired = false; dragging = false;
     queue(async () => {
@@ -355,6 +572,7 @@ function installTouch() {
     if (ev.touches.length !== 1) return;
     ev.preventDefault();
     clearTimeout(pressTimer);
+    if (dragMove(ev.touches[0])) return;
     const pt = canvasPoint(ev.touches[0]);
     queue(async () => {
       if (longFired) return;
@@ -366,6 +584,7 @@ function installTouch() {
   c.addEventListener("touchend", ev => {
     ev.preventDefault();
     clearTimeout(pressTimer);
+    if (chromeDrag) { chromeDrag = null; return; }
     if (panLast) { panLast = null; pinchDist = 0; return; }   // finishing a two-finger gesture
     queue(async () => {
       if (dragging) { button(false, false); dragging = false; return; }
@@ -373,6 +592,30 @@ function installTouch() {
       button(true, false); await sleep(60); button(false, false);   // tap is a left click
     });
   }, { passive: false });
+
+  // The same gestures with a mouse, since the v86 canvas itself is off-screen in this mode.
+  let mouseDown = false, mouseDragging = false;
+  c.addEventListener("mousedown", ev => {
+    ev.preventDefault();
+    if (dragStart(ev)) { mouseDown = true; return; }
+    mouseDown = true; mouseDragging = false;
+    const pt = canvasPoint(ev);
+    queue(async () => { await steerTo(pt); button(true, ev.button === 2); });
+  });
+  window.addEventListener("mousemove", ev => {
+    if (!mouseDown) return;
+    if (dragMove(ev)) return;
+    const pt = canvasPoint(ev);
+    mouseDragging = true;
+    queue(() => steerTo(pt));
+  });
+  window.addEventListener("mouseup", ev => {
+    if (!mouseDown) return;
+    mouseDown = false;
+    if (chromeDrag) { chromeDrag = null; return; }
+    queue(async () => { button(false, ev.button === 2); });
+  });
+  c.addEventListener("contextmenu", ev => ev.preventDefault());
 }
 
 /* ------------------------------------------------------------- on-screen keyboard (SPEC 2.5)

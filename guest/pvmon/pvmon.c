@@ -55,9 +55,20 @@ static void dbgnum(const char *s, unsigned a, unsigned b)
     char buf[64]; wsprintf(buf, "%s %ux%u", (LPSTR)s, a, b); dbg(buf);
 }
 
+static BOOL is_transient(HWND hwnd, char *cls, int len);
+
 static HINSTANCE g_hInst;
-static unsigned g_shellW;          /* WIN.INI [PVMon] ShellWidth: keep the shell this narrow */
-static unsigned g_lastPub;         /* last content width published to the host */
+/* The screen is deliberately taller than anything the host displays at once. The shell lives in
+   the top ShellWidth x ShellHeight corner, which is the only part shown as "the desktop"; every
+   application window is parked below that, in screen space the host never draws directly. The
+   host then composites: it shows the shell region, or an application's region, each scaled on its
+   own. Windows has no idea -- as far as it is concerned this is one big screen and the windows
+   are simply somewhere on it. That is what gives each application its own framebuffer without
+   Windows having any notion of one. */
+static unsigned g_shellW, g_shellH;
+#define SLOT_W   640               /* each application gets a full-width slot of its own */
+#define MAX_SLOTS 2          /* shell column + this many application columns */
+static char g_lastPub[128];         /* last line published to the host, to avoid repeats */
 static unsigned g_fitW, g_fitH;     /* screen the window fixer is fitting to */
 static unsigned g_prevW, g_prevH;   /* screen it is fitting from */
 
@@ -90,8 +101,12 @@ static void repaint_tree(HWND hwnd)
 BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
 {
     RECT rc;
+    char cls[24];
     int w, h, x, y;
+    BOOL isShell;
     if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+    if (is_transient(hwnd, cls, sizeof(cls))) return TRUE;   /* leave menus where they pop up */
+    isShell = lstrcmp(cls, "Progman") == 0;
     GetWindowRect(hwnd, &rc);
     w = rc.right - rc.left; h = rc.bottom - rc.top;
     x = rc.left; y = rc.top;
@@ -111,6 +126,8 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
        width and it re-laid its tableau into a column of overlapping cards. Applications of this
        era lay out to their own window size, so a window that no longer fits is better left its
        own size and pinned to the top left than resized into nonsense. */
+    if (isShell) { x = 0; y = 0; }
+    else if (g_shellW) return TRUE;   /* applications are placed by publish_layout, not here */
     if (x + w > (int)g_fitW) x = (int)g_fitW - w;
     if (y + h > (int)g_fitH) y = (int)g_fitH - h;
     if (x < 0) x = 0;
@@ -177,6 +194,7 @@ static void arrange_shell(void)
     /* On a narrow display the shell is kept to a comfortable strip rather than the whole screen,
        so the host can magnify that strip and still show all of it. */
     if (g_shellW && (unsigned)cx > g_shellW) cx = (int)g_shellW;
+    if (g_shellH && (unsigned)cy > g_shellH) cy = (int)g_shellH;
     SetWindowPos(pm, NULL, 0, 0, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
     mdi = GetWindow(pm, GW_CHILD);               /* Program Manager's MDI client */
     if (!mdi) return;
@@ -581,51 +599,125 @@ static BOOL reflow_dialog(HWND dlg, int screenW)
     return TRUE;
 }
 
-/* How far to the right does the content on screen reach? */
-static unsigned g_needW;
-
-BOOL CALLBACK __export MeasureWindow(HWND hwnd, LPARAM lParam)
+/* Menus, combo drop-downs and the like are top-level windows in their own right, so they turn up
+   in a window enumeration looking exactly like an application. They must not be parked or framed:
+   a menu belongs wherever its owner is, and treating one as the application meant an open menu
+   was moved away from its window and then blown up to fill the screen on its own. */
+static BOOL is_transient(HWND hwnd, char *cls, int len)
 {
-    RECT rc;
+    if (GetClassName(hwnd, cls, len) <= 0) return TRUE;
+    return lstrcmp(cls, "#32768") == 0        /* menu */
+        || lstrcmp(cls, "ComboLBox") == 0     /* combo box drop-down */
+        || lstrcmp(cls, "PVMonitor") == 0;    /* ourselves */
+}
+
+/* Collect the application windows, front to back, and give each one a slot of its own.
+
+   Each application is parked in a slot to the right of the shell, in screen space no view ever
+   shows directly, and its CLIENT rectangle is published. The host draws the shell strip as the
+   desktop, then draws each application's client area over the top, every one scaled and placed
+   on its own, under a title bar the host draws itself at host scale. So the contents shrink to
+   fit a phone while the chrome stays finger-sized and crisp, and the windows are side by side in
+   the guest but layered on the host. Windows is none the wiser.
+
+   A window keeps its slot for its whole life: the slot is not re-derived from z-order, or every
+   activation would physically move windows about and force a repaint of each one. */
+static HWND g_apps[MAX_SLOTS];
+static int g_nApps;
+static HWND g_slotWnd[MAX_SLOTS];
+
+BOOL CALLBACK __export FindApp(HWND hwnd, LPARAM lParam)
+{
     char cls[24];
-    unsigned w;
+    if (g_nApps >= MAX_SLOTS) return FALSE;
     if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
-    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return TRUE;
-    if (lstrcmp(cls, "PVMonitor") == 0) return TRUE;      /* our own hidden window */
-    GetWindowRect(hwnd, &rc);
-    w = (unsigned)(rc.right > 0 ? rc.right : 0);
-    if (w > g_needW && w <= 2560) g_needW = w;
+    if (is_transient(hwnd, cls, sizeof(cls))) return TRUE;
+    if (lstrcmp(cls, "Progman") == 0) return TRUE;
+    g_apps[g_nApps++] = hwnd;      /* EnumWindows runs front to back */
     return TRUE;
 }
 
-static unsigned content_width(void)
+static void collect_apps(void)
 {
     FARPROC proc;
-    g_needW = 0;
-    proc = MakeProcInstance((FARPROC)MeasureWindow, g_hInst);
-    if (!proc) return 0;
+    g_nApps = 0;
+    proc = MakeProcInstance((FARPROC)FindApp, g_hInst);
+    if (!proc) return;
     EnumWindows((WNDENUMPROC)proc, 0L);
     FreeProcInstance(proc);
-    return g_needW;
 }
 
-/* Tell the host how much of the screen actually has content on it.
- *
- * The screen itself stays a fixed size, so nothing in the guest ever re-modes and nothing
- * flashes. Instead the host scales what it shows: when only the shell is up it can magnify the
- * narrow strip the shell occupies, and when something wide like Solitaire is open it scales out
- * to show all of it. Solitaire genuinely is laid out at the full width -- it is the picture that
- * is scaled, not the application -- so its table is correct and clicks still land, because the
- * host maps taps through the same scale. */
-static void publish_content_width(void)
+static int slot_of(HWND hwnd)
 {
-    unsigned w = content_width();
-    char buf[32];
-    if (!w) w = g_shellW ? g_shellW : (unsigned)GetSystemMetrics(SM_CXSCREEN);
-    if (w == g_lastPub) return;
-    g_lastPub = w;
-    wsprintf(buf, "PVW %u", w);
-    dbg(buf);
+    int i, free = -1;
+    for (i = 0; i < MAX_SLOTS; i++) if (g_slotWnd[i] == hwnd) return i;
+    for (i = 0; i < MAX_SLOTS; i++)
+        if (free < 0 && (g_slotWnd[i] == NULL || !IsWindow(g_slotWnd[i]))) free = i;
+    if (free < 0) return -1;
+    g_slotWnd[free] = hwnd;
+    return free;
+}
+
+static void publish_layout(void)
+{
+    RECT rc;
+    POINT pt;
+    char state[128], line[128], title[24];
+    RECT wr;
+    int i, slot, slotX;
+
+    collect_apps();
+    state[0] = 0;
+
+    for (i = g_nApps - 1; i >= 0; i--) {          /* back to front, so the host draws in order */
+        slot = slot_of(g_apps[i]);
+        if (slot < 0) continue;
+        slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
+        GetWindowRect(g_apps[i], &rc);
+        /* A window may not leave its slot. Maximising is one tap away and would otherwise make
+           the window as wide as the whole virtual screen, overlapping the next slot and forcing
+           the host to scale it down to nothing, so an oversized window is pulled back to the
+           slot. Windows accepts this as an ordinary size change and re-lays itself out. */
+        if (rc.right - rc.left > (int)SLOT_W || rc.bottom - rc.top > (int)g_shellH) {
+            SetWindowPos(g_apps[i], NULL, slotX, 0,
+                         min(rc.right - rc.left, (int)SLOT_W),
+                         min(rc.bottom - rc.top, (int)g_shellH),
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        } else if (rc.left < slotX || rc.left >= slotX + (int)SLOT_W || rc.top < 0) {
+            SetWindowPos(g_apps[i], NULL, slotX, 0, 0, 0,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+        }
+        /* Both rectangles go to the host: it draws the real chrome from the window rectangle
+           at its own scale, and the client area inside it at the scale that makes it fit. */
+        GetWindowRect(g_apps[i], &wr);
+        GetClientRect(g_apps[i], &rc);
+        pt.x = rc.left; pt.y = rc.top;
+        ClientToScreen(g_apps[i], &pt);
+        wsprintf(line, "%d %d %d %d %d %d;", slot, wr.left, wr.top, pt.x, pt.y,
+                 rc.right - rc.left);
+        if (lstrlen(state) + lstrlen(line) < sizeof(state) - 2) lstrcat(state, line);
+    }
+
+    if (lstrcmp(state, g_lastPub) == 0) return;
+    lstrcpy(g_lastPub, state);
+
+    wsprintf(line, "PVB %d", g_nApps);
+    dbg(line);
+    for (i = g_nApps - 1; i >= 0; i--) {
+        slot = slot_of(g_apps[i]);
+        if (slot < 0) continue;
+        GetWindowRect(g_apps[i], &wr);
+        GetClientRect(g_apps[i], &rc);
+        pt.x = rc.left; pt.y = rc.top;
+        ClientToScreen(g_apps[i], &pt);
+        title[0] = 0;
+        GetWindowText(g_apps[i], title, sizeof(title));
+        wsprintf(line, "PVW %d %d %d %d %d %d %d %d %d %s", slot,
+                 wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+                 pt.x, pt.y, rc.right - rc.left, rc.bottom - rc.top, (LPSTR)title);
+        dbg(line);
+    }
+    dbg("PVE");
 }
 
 /* Find dialogs that overflow the screen and reflow them. */
@@ -703,7 +795,7 @@ static void poll(HWND hwnd)
     if (w < 320 || h < 200) return;
     g_hostW = w; g_hostH = h;
     if (g_dlgReflow) check_dialogs();
-    publish_content_width();
+    if (g_shellW) publish_layout();
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
     if (gen != g_lastGen) { g_lastGen = gen; g_stable = 0; g_wantW = w; g_wantH = h; }
@@ -739,6 +831,20 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         g_live = GetProfileInt("PVMon", "Live", 0) != 0;
         g_dlgReflow = GetProfileInt("PVMon", "DialogReflow", 1) != 0;
         g_shellW = (unsigned)GetProfileInt("PVMon", "ShellWidth", 0);
+        g_shellH = (unsigned)GetProfileInt("PVMon", "ShellHeight", 0);
+        /* The screen is now one row of columns, so the shell column is the full screen height
+           unless WIN.INI says otherwise. */
+        if (!g_shellH) g_shellH = (unsigned)GetSystemMetrics(SM_CYSCREEN);
+        /* The screen is now one row of columns, so the shell column is the full screen height
+           unless SYSTEM.INI says otherwise. */
+        if (!g_shellH) g_shellH = (unsigned)GetSystemMetrics(SM_CYSCREEN);
+        if (g_shellW) {
+            char b[64];
+            /* The caption height lets the host tell the caption row of the chrome apart from
+               the menu row below it, so each can be composited on its own terms. */
+            wsprintf(b, "PVD %u %u %d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION));
+            dbg(b);
+        }
         if (g_live) { dbg("pvmon: live re-mode enabled"); find_user_state(); }
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);
