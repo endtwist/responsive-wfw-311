@@ -1199,3 +1199,91 @@ iOS keyboard (needs a gesture map or a hardware keyboard).
   intact, DOS text visible (105 text rows, 218 after `dir`), the VM's text/font pages in
   `pv_text_mem` (16K), the VDD's traffic never reaches `svga_memory`. No driver or image rebuild
   needed: vga.js is loaded as a source module.
+
+### 2026-09-02 — geometry invariant (PVHOOK), owned dialogs off the owner, hook-side publish, icon row
+Phone round bugs 1-7 plus the DOS-box close lockup, all guest-side (PVMON v22, PVHOOK.DLL; PLAN.md
+Fix 1, 2 and 4). One rule now, enforced in the hook DLL at every path a window's rectangle changes:
+*no top-level window is larger than the phone frame (ShellWidth x the runtime shell height), every
+window lives in its column, fixed-layout programs are never resized, only kept in their column.*
+
+- **Root causes found.** (1) Program Manager's minimised icon vanished because `CMD_SHELLSIZE`
+  (Safari's bars come and go, so it arrives at any time) ran `arrange_shell` on the *iconic* shell:
+  `SetWindowPos` on a minimised window sizes the icon window, so the icon became a 352x664 iconic
+  window with the icon drawn in its middle (reproduced in the pane). Now: an iconic shell is left
+  alone and arranged on restore. (2) Task List / Sound Recorder were mangled by `DefaultSize`
+  (352x600) applied to dialog-template main windows and by the shell-column dialog reflow catching
+  *unowned* dialogs. (3) Maximise went to 2560x970 because nothing gave USER a maximised size; PVMON
+  only restored it afterwards. (4) Owned dialogs were captured twice because they overlap the owner
+  in VRAM. (5) Exit Windows was invisible because it is an *unowned, system-modal* box Windows
+  centres on the 2560-column screen (x≈1100), and while a system-modal window is up PVMON's timer
+  never runs (heartbeat stopped), so PVMON can neither move nor report it; the same mechanism is the
+  DOS-box close lockup (WinOldAp's "Application still active", task lock held). (6) Notepad's
+  vertical scroll bar: Notepad's *main window* has WS_VSCROLL/WS_HSCROLL, so the bar is non-client
+  area between the client and the right border; the reported rects are right (window 352, client
+  313 wide), the host draws the right border as wide as the left one (4 px) and cuts the 35-px bar.
+  Host change needed: `inset.r = (wx+ww) - (gx+gw)` and blit the right strip that wide.
+- **PVHOOK.DLL** (guest/pvhook): WH_CBT + WH_CALLWNDPROC. `HCBT_CREATEWND`: application windows
+  born at x=640 sized to `Size.<MOD>` / `DefaultSize` and clamped to ShellWidth x frame (frame =
+  runtime shell height from `PvHookSetShell`, `MaxHeight.<MOD>` if lower); fixed-layout windows
+  (class `#32770` main windows, `[PVMon] KeepSize` modules) keep their size. Owned windows are
+  placed *below* the owner when the column has room, else right of it inside the 640 column, else
+  centred; unowned `#32770`s of a task with a main window (WinOldAp's box) count as owned by it,
+  unowned `#32770`s of the shell's task (Exit Windows) are centred in the shell column.
+  `WM_GETMINMAXINFO`: maximised size/position = the frame at the top of the window's column (shell:
+  its column less ICON_ROW), so a zoomed window is real and the box toggles back (verified: Notepad
+  352x762 zoomed, restore 352x600). Fixed-layout windows keep their normal size on maximise; USER
+  sends this message dozens of times per window (also from CreateWindow with a degenerate rect:
+  Minesweeper came out 170x47 until degenerate rects were ignored). `WM_WINDOWPOSCHANGING` clamps
+  are in the code but USER 3.1 does not route that message through the hook (verified: never
+  fired), so programs that size themselves after creation (PIF Editor 592, Packager 516) are
+  clamped at `HCBT_ACTIVATE` in their own task, with PVMON's `park()` as the last resort. Pointers
+  to stack data in a `-zu` DLL must be FAR (the old hook's `in_list` compared garbage: 15 W112s).
+- **Hook-side publish.** On `HCBT_ACTIVATE` / `HCBT_SETFOCUS` / `HCBT_DESTROYWND` of a `#32770`
+  the hook emits the whole `PVB..PVE` list itself (slots read off the columns), so system-modal
+  boxes are composited and tappable while PVMON is starved. Verified: Alt+F4 on Program Manager ->
+  `PVO -1 0 306 370 150 ... Exit Windows` in the shell column (370 wide: 18 px clipped at the
+  right, both buttons visible); DOS box `CMD_CLOSE` -> `PVO 0 640 360 346 180 ... MS-DOS Prompt`
+  below the DOS window, Enter ends it, `PVB` resumes.
+- **PVMON v22**: `PVH <GetTickCount>` heartbeat every ~25 polls and after every host command
+  (1.37 s apart in the pane); zoomed windows left zoomed when inside the frame; unowned dialogs
+  adopt their task's main window as owner; only owner chains ending at Program Manager are
+  reflowed; `PVQ wide <MOD> "<title>" WxH` once per dialog wider than the column; icons placed in
+  `SM_CXICONSPACING` cells (3 per row, second row above) through `SetWindowPlacement` so labels stay
+  inside the column and follow the icon (verified 4 icons incl. the shell's).
+- **Image**: `PROGMAN.INI [Settings] Window=0 0 352 684 1` (the fifth field 0 *hides* Program
+  Manager: found the hard way), `[Windows Help] M_/H_WindowPosition` pre-written to the slot rect so
+  WinHelp's restore is a no-op (the tearing Josh saw was its multi-step restore),
+  `WINFILE.INI Window=0,0,352,600`. `CALENDAR.EXE` is not in the image (WinExec -> 2); WINCHAT shows
+  no window without NetDDE peers.
+
+Size table (pane, shell 352x762; phone shell height is lower and the frame follows it):
+
+| Module | Rule | Result |
+|---|---|---|
+| PROGMAN | shell column, arranged by PVMON | 352 x shellH-76 |
+| NOTEPAD WRITE CARDFILE WINFILE CONTROL CLIPBRD RECORDER MPLAYER WINHELP TERMINAL SYSEDIT | DefaultSize | 352x600 |
+| PBRUSH | Size 352x480, MaxHeight 480 | 352x480 |
+| CLOCK | Size 352x352 | 352x352 |
+| WINOA386 (DOS box) | Size 352x360 | 352x360 |
+| CALC | KeepSize | 293x349 |
+| WINMINE | KeepSize | 170x277 |
+| SOUNDREC | KeepSize | 407x241 (host scales 0.86) |
+| TASKMAN | dialog class | 370x264 (0.95) |
+| PACKAGER | KeepSize (re-sizes itself) | 516x600 (0.68) |
+| MSHEARTS | KeepSize | 540x480 (0.65) |
+| PIFEDIT | KeepSize (fixed dialog frame) | 592x600 (0.59) |
+| SOL | KeepSize | 593x471 (0.59) |
+| CHARMAP | KeepSize (dialog) | 640x278 (0.55) |
+| PRINTMAN (spooler off) | USER message box | 640x188 (0.55) |
+| WINVER | KeepSize | message box |
+
+Dialogs wider than 352 at the 20 px system font (host scales, `PVQ`): COMMDLG Open/Save 604x318
+(Notepad, Write), Hearts welcome 531x252, Paintbrush save prompt 429x208 (phone), Exit Windows
+370x150 (shell column, unowned: not reflowed). Fits: Terminal Default Serial Port 249x170.
+
+Open / host side: (a) right-hand non-client inset (Notepad scroll bar); (b) transient `T` layers
+are anchored through the `W` in their column, so a combo drop-down of a dialog placed *below* its
+owner lands relative to the owner window, not the dialog: anchor a `T` to the `O` layer whose guest
+rect contains its origin; (c) `PVO -1` owned by a `PVX` (no free slot: `MAX_SLOTS` is 3 and iconic
+windows keep their slot) is not drawn; (d) the 4-icons-across Program Manager group on the phone
+did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by `arrange_shell`).

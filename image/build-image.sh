@@ -44,9 +44,15 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 # A real large-font install widens it, so do the same here, for both DPI settings.
 # Mouse acceleration would break absolute pointing: the host turns a tap into relative motion
 # from the cursor position the driver reports, which only lands correctly at a 1:1 mickey ratio.
+# [PVMon] geometry: PVHOOK.DLL enforces one invariant (no top-level window wider than the shell
+# column or taller than it), so the per-app keys are exceptions only: Size.* for programs whose
+# natural size is not the frame, KeepSize for fixed-layout programs that must never be resized
+# (dialog-template main windows such as Task List are detected by class and need no key).
+W=$SHELLW; [ "$W" = 0 ] && W=352
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.MaxHeight.WINFILE=600 PVMon.Size.WINOA386=352x360 "PVMon.KeyboardApps=WINOA386 TERMINAL" PVMon.DefaultSize=352x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CLOCK CHARMAP PBRUSH" \
+  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.Size.PBRUSH=${W}x480 PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} "PVMon.KeyboardApps=WINOA386 TERMINAL" PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER" \
+  "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
   "windows.device=PDF Printer,$PRINTER,C:\\PRINT.PRN" \
   "devices.PDF Printer=$PRINTER,C:\\PRINT.PRN" \
@@ -58,8 +64,15 @@ python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitl
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
 # File Manager remembers its window from its last run, which on this image was a 1024x768 session;
 # opened in a 640-column slot that makes it a tall sliver scaled to nothing. Give it a sane default.
-printf '[Settings]\r\nWindow=0,0,640,560, ,0\r\nFace=MS Sans Serif\r\nSize=10\r\n' > $TMP/WINFILE.INI
+printf '[Settings]\r\nWindow=0,0,%s,600, ,0\r\nFace=MS Sans Serif\r\nSize=10\r\n' $W > $TMP/WINFILE.INI
 mcopy -o $M $TMP/WINFILE.INI ::/WINDOWS/WINFILE.INI
+# Programs that restore a saved window rectangle after creation (Program Manager, Windows Help
+# above) would be born in the slot and then move and resize in steps, each step captured by the
+# host as a torn frame; their saved rectangles are pre-written to the phone rect so the restore
+# is a no-op. PVMON still arranges the shell to the runtime column height.
+mcopy -n $M ::/WINDOWS/PROGMAN.INI $TMP/PROGMAN.INI
+python3 ../tools/winini.py $TMP/PROGMAN.INI "Settings.Window=0 0 $W $(( ${SHELLH:-760} - 76 )) 1"
+mcopy -o $M $TMP/PROGMAN.INI ::/WINDOWS/PROGMAN.INI
 rm -rf $TMP
 echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD live=$LIVE"
 # Immutable builds: a running session must never see its disk change underneath it (a snapshot

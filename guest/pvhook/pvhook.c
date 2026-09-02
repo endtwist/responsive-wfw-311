@@ -1,30 +1,47 @@
-/* PVHOOK.DLL - system-wide CBT hook for the responsive-wfw311 paravirtual desktop.
+/* PVHOOK.DLL - system-wide hooks for the responsive-wfw311 paravirtual desktop.
  *
- * PVMON parks application windows in their own 640-column slots and sizes them to the phone,
- * but it can only do so after a window exists and has been painted, and on a slow guest the
- * window (and its dialogs) are visible in the desktop column for a moment first. A CBT hook sees
- * HCBT_CREATEWND before the window is shown and can rewrite its position and size in the
- * CREATESTRUCT, so windows are born where they belong. System-wide hooks must live in a DLL.
+ * One geometry invariant, enforced here at every path a window's rectangle can change:
  *
- *   - top-level application windows: moved to the staging column (slot 0's column, x = 640) and,
- *     unless their module is listed in [PVMon] KeepSize, sized to [PVMon] DefaultSize
- *     (or Size.<MODULE>). PVMON assigns the real slot on its next poll; a move between slot
- *     columns is invisible since no view shows them directly.
- *   - owned windows (dialogs, message boxes): centred on their owner, which is already in a slot.
- *   - the shell, menus, and other transients are left alone.
+ *   No top-level window is ever larger than the phone frame (ShellWidth wide, at most the shell
+ *   column's height), and every window lives inside its column: the shell in the desktop column
+ *   (x = 0), applications in a 640-wide slot column to the right, owned windows (dialogs, message
+ *   boxes) in their owner's column, placed where they do not cover the owner when there is room.
+ *
+ * The paths:
+ *   - birth: HCBT_CREATEWND rewrites the CREATESTRUCT before the window exists, so it is born in
+ *     the staging column (x = 640), phone-sized ([PVMon] DefaultSize / Size.<MODULE>).
+ *   - maximise: WM_GETMINMAXINFO (a WH_CALLWNDPROC hook) sets the maximised size and position to
+ *     "fill the column", so a maximised window is a real, zoomed window that the maximise box
+ *     toggles back, and never the 2560-column screen.
+ *   - any resize, by the program or the user: WM_WINDOWPOSCHANGING clamps cx/cy; owned windows
+ *     are kept inside their owner's column.
+ *   - fixed-layout programs (dialog-template main windows such as Task List and Sound Recorder,
+ *     and the modules in [PVMon] KeepSize: the games, Calculator, Clock...) draw a layout of their
+ *     own size and are never resized, only kept inside the frame; maximise leaves them as they are.
+ *
+ * PVMON loads this DLL, installs the hooks, and tells it the shell column's runtime height
+ * (PvHookSetShell); it keeps its own poll-time parking as the fallback for anything created before
+ * the hooks were in. System-wide hooks must live in a DLL, and a DLL's data segment is shared by
+ * every task, so the tables here are visible from whichever program the hook runs in.
  *
  * Build: guest/pvhook/build.sh (Open Watcom, wlink system windows_dll).
  */
 #include <windows.h>
 #include <conio.h>
 
-#define SLOT_W 640
+#define SLOT_W   640
+#define ICON_ROW  76         /* rows at the bottom of the shell column kept free for minimised icons */
 
 static HINSTANCE g_hInst;
-static HHOOK g_hook;
+static HHOOK g_cbt, g_cwp;
 static BOOL g_installed;
+static int g_shellW, g_shellH;       /* the phone frame, from PVMON (runtime) or WIN.INI */
 
-static BOOL same_i(const char *a, const char *b, int n)
+/* The WH_CALLWNDPROC hook's lParam points at the message's parameters as SendMessage pushed
+   them (Windows 3.1 has no CWPSTRUCT typedef of its own). */
+typedef struct { LPARAM lParam; WPARAM wParam; UINT message; HWND hwnd; } CWP16;
+
+static BOOL same_i(const char FAR *a, const char FAR *b, int n)
 {
     int i;
     for (i = 0; i < n; i++) {
@@ -36,10 +53,9 @@ static BOOL same_i(const char *a, const char *b, int n)
     return TRUE;
 }
 
-static void module_base(HWND hwnd, char *out, int outlen)
+static void module_base_i(HINSTANCE inst, char FAR *out, int outlen)
 {
-    char path[128], *base, *p; int n;
-    HINSTANCE inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
+    char path[128]; char FAR *base; char FAR *p; int n;
     out[0] = 0;
     if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return;
     base = path;
@@ -47,13 +63,17 @@ static void module_base(HWND hwnd, char *out, int outlen)
     for (n = 0; base[n] && base[n] != '.' && n < outlen - 1; n++) out[n] = base[n];
     out[n] = 0;
 }
-
-static BOOL in_list(const char *key, const char *name)
+static void module_base(HWND hwnd, char FAR *out, int outlen)
 {
-    char list[160], *k;
+    module_base_i((HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE), out, outlen);
+}
+
+static BOOL in_list(const char FAR *key, const char FAR *name)
+{
+    char list[160]; char FAR *k;
     GetProfileString("PVMon", key, "", list, sizeof(list));
     for (k = list; *k; ) {
-        char *e = k; int n;
+        char FAR *e = k; int n;
         while (*e && *e != ' ' && *e != ',') e++;
         n = (int)(e - k);
         if (n == lstrlen(name) && same_i(k, name, n)) return TRUE;
@@ -62,9 +82,9 @@ static BOOL in_list(const char *key, const char *name)
     return FALSE;
 }
 
-static BOOL parse_size(const char *val, int *w, int *h)
+static BOOL parse_size(const char FAR *val, int FAR *w, int FAR *h)
 {
-    const char *p = val; *w = 0; *h = 0;
+    const char FAR *p = val; *w = 0; *h = 0;
     for (; *p >= '0' && *p <= '9'; p++) *w = *w * 10 + (*p - '0');
     if (*p != 'x') return FALSE;
     for (p++; *p >= '0' && *p <= '9'; p++) *h = *h * 10 + (*p - '0');
@@ -74,11 +94,212 @@ static BOOL parse_size(const char *val, int *w, int *h)
 #define PV_DISPI_INDEX 0x1CE
 #define PV_DISPI_DATA  0x1CF
 #define PV_REG_DEBUG   0x16
-static void pv_dbg(const char *s)
+static void pv_dbg(const char FAR *s)
 {
     outpw(PV_DISPI_INDEX, PV_REG_DEBUG);
     while (*s) outpw(PV_DISPI_DATA, (unsigned char)*s++);
     outpw(PV_DISPI_DATA, 10);
+}
+
+static int shell_w(void)
+{
+    if (!g_shellW) g_shellW = GetProfileInt("PVMon", "ShellWidth", 0);
+    return g_shellW;
+}
+static int shell_h(void)
+{
+    if (!g_shellH) g_shellH = GetProfileInt("PVMon", "ShellHeight", 0);
+    if (!g_shellH) g_shellH = GetSystemMetrics(SM_CYSCREEN);
+    return g_shellH;
+}
+
+/* Menus, drop-downs, the Alt+Tab switcher, icon titles: placed by Windows where they belong. */
+static BOOL transient_class(const char FAR *cls)
+{
+    return lstrcmp(cls, "#32768") == 0 || lstrcmp(cls, "#32771") == 0 || lstrcmp(cls, "#32772") == 0 ||
+           lstrcmp(cls, "ComboLBox") == 0 || lstrcmp(cls, "tooltips_class") == 0 ||
+           lstrcmp(cls, "PVMonitor") == 0;
+}
+
+/* What we know about a top-level window, learned at birth (or on first sight) so the
+   per-message hook never has to read WIN.INI. */
+typedef struct { HWND hwnd; BOOL fixed; int maxH; } WinInfo;
+#define MAX_INFO 24
+static WinInfo g_info[MAX_INFO];
+
+static WinInfo *learn(HWND hwnd, const char FAR *cls, HINSTANCE inst)
+{
+    char mod[16], key[32], line[80];
+    int i, free = -1, h;
+    WinInfo *wi;
+    static WinInfo tmp;
+    for (i = 0; i < MAX_INFO; i++) {
+        if (g_info[i].hwnd == hwnd) return &g_info[i];
+        if (free < 0 && (g_info[i].hwnd == NULL || !IsWindow(g_info[i].hwnd))) free = i;
+    }
+    if (free < 0) free = 0;
+    wi = &g_info[free];
+    if (!inst) inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
+    mod[0] = 0;
+    if (inst) module_base_i(inst, mod, sizeof(mod));
+    if (!mod[0]) {
+        /* Windows sends WM_GETMINMAXINFO from inside CreateWindow, before the window's instance
+           is known; do not remember an answer given without it (only the class is known) */
+        tmp.hwnd = NULL; tmp.fixed = lstrcmp(cls, "#32770") == 0; tmp.maxH = 0;
+        return &tmp;
+    }
+    wi->hwnd = hwnd;
+    /* A program whose main window is a dialog template (Task List, Sound Recorder, Character
+       Map, WinVer...) laid its controls out for one size and never re-lays them; so did the
+       modules listed in KeepSize (the games, Calculator, Clock, Paintbrush's toolbox...). */
+    wi->fixed = lstrcmp(cls, "#32770") == 0 || in_list("KeepSize", mod);
+    wsprintf(key, "MaxHeight.%s", (LPSTR)mod);
+    h = GetProfileInt("PVMon", key, 0);
+    wi->maxH = (h > 100) ? h : 0;
+    wsprintf(line, "pvhook: %s class %s %s", (LPSTR)mod, (LPSTR)cls, (LPSTR)(wi->fixed ? "fixed layout" : "resizable"));
+    pv_dbg(line);
+    return wi;
+}
+
+/* The frame a top-level window must fit: the shell column for the shell and anything owned by a
+   window in the desktop column, else the phone frame inside its 640-wide slot column. */
+static int frame_h_for(const WinInfo FAR *wi, BOOL isShell)
+{
+    int h = shell_h();
+    if (isShell) return h - ICON_ROW;
+    if (wi && wi->maxH && wi->maxH < h) return wi->maxH;
+    return h;
+}
+
+/* Program Manager's Exit Windows box (and any other dialog its task puts up without an owner) is
+   system modal: Windows centres it on the 2560-column screen and, while it is up, PVMON's timer
+   never fires, so PVMON cannot park it. It has to be kept in the shell column from inside the
+   shell's own task, which is where this hook runs. */
+static BOOL shell_task(HWND hwnd)
+{
+    HWND pm = FindWindow("Progman", NULL);
+    return pm && GetWindowTask(hwnd) == GetWindowTask(pm);
+}
+
+/* Keep the rectangle (x,y,w,h) inside a column; TRUE if it moved. */
+static BOOL clamp_into(int FAR *x, int FAR *y, int w, int h, int colX, int colR, int frameH)
+{
+    int ox = *x, oy = *y;
+    if (*x + w > colR) *x = colR - w;
+    if (*x < colX) *x = colX;
+    if (*y + h > frameH) *y = frameH - h;
+    if (*y < 0) *y = 0;
+    return *x != ox || *y != oy;
+}
+
+/* The window an unowned dialog "belongs" to: another visible top-level window of the same task
+   (WinOldAp's "Application still active" box is owned by nothing but belongs to the DOS window;
+   Task List's is a task of its own and has none). */
+static HWND task_main_window(HWND hwnd)
+{
+    HTASK t = GetWindowTask(hwnd);
+    HWND h;
+    char c[24];
+    for (h = GetWindow(GetDesktopWindow(), GW_CHILD); h; h = GetWindow(h, GW_HWNDNEXT)) {
+        if (h == hwnd || !IsWindowVisible(h) || GetWindowTask(h) != t) continue;
+        if (GetClassName(h, c, sizeof(c)) <= 0 || transient_class(c) || lstrcmp(c, "#32770") == 0) continue;
+        if (GetWindow(h, GW_OWNER)) continue;
+        return h;
+    }
+    return NULL;
+}
+
+/* PVMON publishes the layer list from its timer, but a system-modal box (Exit Windows, WinOldAp's
+   "Application still active") holds the task lock and PVMON's timer never fires while it is up.
+   The hook runs inside the locked task, so it publishes the list itself whenever a dialog window
+   is activated or destroyed. Same lines as PVMON's publish_layout; slots are read off the
+   columns PVMON parks windows in (slot n lives at x = 640 * (n + 1)). */
+static int col_slot(int x) { return x >= SLOT_W ? x / SLOT_W - 1 : -1; }
+static void describe(HWND hwnd, char FAR *line, const char FAR *tag, int slot)
+{
+    RECT wr, rc; POINT pt; char title[24];
+    GetWindowRect(hwnd, &wr);
+    GetClientRect(hwnd, &rc);
+    pt.x = rc.left; pt.y = rc.top;
+    ClientToScreen(hwnd, &pt);
+    title[0] = 0;
+    GetWindowText(hwnd, title, sizeof(title));
+    wsprintf(line, "%s %d %d %d %d %d %d %d %d %d %s", (LPSTR)tag, slot,
+             wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+             pt.x, pt.y, rc.right - rc.left, rc.bottom - rc.top, (LPSTR)title);
+}
+static HWND dialog_owner(HWND hwnd, const char FAR *cls)
+{
+    HWND o = GetWindow(hwnd, GW_OWNER);
+    if (!o && lstrcmp(cls, "#32770") == 0) o = task_main_window(hwnd);
+    return o;
+}
+static HWND g_force;      /* the window being activated: not yet marked visible, but on its way */
+static char hook_kind(HWND h, HWND skip, char FAR *cls, HWND FAR *owner)
+{
+    if (h == skip || (!IsWindowVisible(h) && h != g_force) || GetClassName(h, cls, 24) <= 0) return 0;
+    if (lstrcmp(cls, "PVMonitor") == 0 || lstrcmp(cls, "#32772") == 0) return 0;
+    if (transient_class(cls)) return 'T';
+    if (lstrcmp(cls, "Progman") == 0) return 'S';
+    *owner = dialog_owner(h, cls);
+    if (*owner && IsIconic(*owner)) return 0;
+    if (IsIconic(h)) return 'I';
+    if (*owner && IsWindow(*owner) && IsWindowVisible(*owner)) return 'O';
+    return 'A';
+}
+static void hook_publish(HWND skip)
+{
+    HWND h, first, owner = NULL; int n = 0; char line[128], cls[24], k;
+    RECT rc;
+    first = GetWindow(GetDesktopWindow(), GW_CHILD);
+    for (h = first; h; h = GetWindow(h, GW_HWNDNEXT)) if (hook_kind(h, skip, cls, &owner)) n++;
+    wsprintf(line, "PVB %d", n); pv_dbg(line);
+    for (h = first ? GetWindow(first, GW_HWNDLAST) : NULL; h; h = GetWindow(h, GW_HWNDPREV)) {
+        owner = NULL;
+        k = hook_kind(h, skip, cls, &owner);
+        if (!k) continue;
+        GetWindowRect(h, &rc);
+        switch (k) {
+        case 'S': describe(h, line, "PVS", -1); break;
+        case 'T': describe(h, line, "PVT", -1); { int m = lstrlen(line); if (m + lstrlen(cls) + 2 < 128) { line[m] = ' '; lstrcpy(line + m + 1, cls); } } break;
+        case 'O': { RECT orc; int hops; HWND o = owner;
+                    for (hops = 0; o && hops < 8 && GetWindow(o, GW_OWNER); hops++) o = GetWindow(o, GW_OWNER);
+                    GetWindowRect(o, &orc); describe(h, line, "PVO", col_slot(orc.left)); break; }
+        case 'A': describe(h, line, rc.left >= SLOT_W ? "PVW" : "PVX", col_slot(rc.left)); break;
+        case 'I': { char t[24]; t[0] = 0; GetWindowText(h, t, sizeof(t)); wsprintf(line, "PVI %d %s", -1, (LPSTR)t); break; }
+        }
+        pv_dbg(line);
+    }
+    pv_dbg("PVE");
+}
+
+/* Where an owned window goes so that it covers as little of its owner as possible: below the
+   owner if the column has room, else to its right inside the 640-wide slot, else centred on it.
+   The host draws owned windows as their own layers anchored over the owner, so the user sees one
+   dialog centred on its program; what this buys is that the owner's own client area, which the
+   host captures from the frame buffer, no longer contains the dialog too. Dialogs owned by the
+   shell stay inside the shell column, which the phone shows as the desktop. */
+static void place_owned(HWND owner, int w, int h, int FAR *px, int FAR *py)
+{
+    RECT orc;
+    int colX, colR, frameH, x, y;
+    GetWindowRect(owner, &orc);
+    if (IsIconic(owner)) { orc.left = 0; orc.top = 0; orc.right = shell_w(); orc.bottom = shell_h(); }
+    if (orc.left < SLOT_W) {                          /* the shell's, or something in the desktop column */
+        colX = 0; colR = shell_w(); frameH = shell_h();
+        x = (orc.left + orc.right - w) / 2;
+        y = (orc.top + orc.bottom - h) / 2;
+    } else {
+        colX = (orc.left / SLOT_W) * SLOT_W; colR = colX + SLOT_W; frameH = GetSystemMetrics(SM_CYSCREEN);
+        if (orc.bottom + h <= frameH)      { x = orc.left;  y = orc.bottom; }
+        else if (orc.right + w <= colR)    { x = orc.right; y = orc.top; }
+        else { x = (orc.left + orc.right - w) / 2; y = (orc.top + orc.bottom - h) / 2; }
+    }
+    if (x + w > colR) x = colR - w;
+    if (x < colX) x = colX;
+    if (y + h > frameH) y = frameH - h;
+    if (y < 0) y = 0;
+    *px = x; *py = y;
 }
 
 LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
@@ -96,72 +317,231 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             }
         }
     }
+    if (code == HCBT_ACTIVATE && shell_w()) {
+        HWND h = (HWND)wParam;
+        char cls[24];
+        if (h && !(GetWindowLong(h, GWL_STYLE) & WS_CHILD) && !IsIconic(h) && !IsZoomed(h) &&
+            !GetWindow(h, GW_OWNER) && GetClassName(h, cls, sizeof(cls)) > 0 &&
+            !transient_class(cls) && lstrcmp(cls, "Progman") != 0 && lstrcmp(cls, "#32770") != 0) {
+            WinInfo *wi = learn(h, cls, NULL);
+            if (!wi->fixed) {
+                RECT rc; int maxH = frame_h_for(wi, FALSE), w, ht;
+                GetWindowRect(h, &rc);
+                w = rc.right - rc.left; ht = rc.bottom - rc.top;
+                if (w > shell_w() || ht > maxH) {
+                    char line[80];
+                    wsprintf(line, "pvhook: %s sized itself %dx%d, clamped to %dx%d", (LPSTR)cls, w, ht,
+                             w > shell_w() ? shell_w() : w, ht > maxH ? maxH : ht);
+                    pv_dbg(line);
+                    SetWindowPos(h, NULL, rc.left, rc.top, w > shell_w() ? shell_w() : w, ht > maxH ? maxH : ht,
+                                 SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            }
+        }
+    }
+    if ((code == HCBT_ACTIVATE || code == HCBT_DESTROYWND || code == HCBT_SETFOCUS) && shell_w()) {
+        char cls[24];
+        HWND h = (HWND)wParam;
+        if (code == HCBT_SETFOCUS) {                      /* the focus lands in a dialog once it is up */
+            int hops;
+            for (hops = 0; h && hops < 8 && (GetWindowLong(h, GWL_STYLE) & WS_CHILD); hops++) h = GetParent(h);
+        }
+        if (h && GetClassName(h, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0 && !(GetWindowLong(h, GWL_STYLE) & WS_CHILD)) {
+            g_force = (code == HCBT_ACTIVATE) ? h : NULL;
+            hook_publish(code == HCBT_DESTROYWND ? h : NULL);
+            g_force = NULL;
+        }
+    }
     if (code == HCBT_CREATEWND) {
         HWND hwnd = (HWND)wParam;
         LPCBT_CREATEWND cbt = (LPCBT_CREATEWND)lParam;
         LPCREATESTRUCT cs = cbt->lpcs;
         char cls[24], mod[16], key[32], val[24];
         int w, h;
-        unsigned shellW = GetProfileInt("PVMon", "ShellWidth", 0);
-        if (!shellW) goto pass;                                   /* not the phone layout */
+        WinInfo *wi;
+        if (!shell_w()) goto pass;                                /* not the phone layout */
         if (cs->style & WS_CHILD) goto pass;
         if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) goto pass;
-        if (cls[0] == '#' || lstrcmp(cls, "Progman") == 0 || lstrcmp(cls, "ComboLBox") == 0 ||
-            lstrcmp(cls, "PVMonitor") == 0 || lstrcmp(cls, "tooltips_class") == 0) goto pass;
+        if (transient_class(cls) || lstrcmp(cls, "Progman") == 0) goto pass;
         if (cs->hwndParent && IsWindow(cs->hwndParent)) {
-            /* owned: centre on the owner (already in its slot); dialogs placed in screen
-               coordinates by their program would otherwise land in the desktop column */
-            RECT orc; int slotX;
-            GetWindowRect(cs->hwndParent, &orc);
+            /* owned: dialogs placed by Windows relative to their owner, or in screen coordinates
+               by their program, would otherwise land anywhere on the 2560-column screen */
             w = cs->cx; h = cs->cy;
             if (w <= 0 || h <= 0) goto pass;                      /* CW_USEDEFAULT: let Windows decide */
-            if (orc.left < (int)SLOT_W) {
-                /* owner is the shell: Windows would centre this on the 2560-wide screen, far off
-                   the desktop column; centre it in the column instead (PVMON reflows if too wide) */
-                slotX = 0;
-                cs->x = ((int)shellW - w) / 2;
-                cs->y = (orc.top + orc.bottom - h) / 2;
-                if (cs->x + w > (int)shellW) cs->x = (int)shellW - w;
-                if (cs->x < 0) cs->x = 0;
-                if (cs->y < 0) cs->y = 0;
-                goto pass;
-            }
-            slotX = (orc.left / SLOT_W) * SLOT_W;
-            cs->x = (orc.left + orc.right - w) / 2;
-            cs->y = (orc.top + orc.bottom - h) / 2;
-            if (cs->x + w > slotX + SLOT_W) cs->x = slotX + SLOT_W - w;
-            if (cs->x < slotX) cs->x = slotX;
+            place_owned(cs->hwndParent, w, h, &cs->x, &cs->y);
+            goto pass;
+        }
+        if (lstrcmp(cls, "#32770") == 0 && !shell_task(hwnd) && cs->cx > 0 && cs->cy > 0) {
+            HWND o = task_main_window(hwnd);            /* WinOldAp's box belongs to the DOS window */
+            if (o) { place_owned(o, cs->cx, cs->cy, &cs->x, &cs->y); goto pass; }
+        }
+        if (lstrcmp(cls, "#32770") == 0 && shell_task(hwnd) && cs->cx > 0 && cs->cy > 0) {
+            cs->x = (shell_w() - cs->cx) / 2; cs->y = (shell_h() - cs->cy) / 2;
+            if (cs->x < 0) cs->x = 0;
             if (cs->y < 0) cs->y = 0;
             goto pass;
         }
-        /* a top-level application window: born in the staging column, phone-sized */
-        module_base(hwnd, mod, sizeof(mod));
+        /* a top-level application window: born in the staging column, phone-sized unless it
+           draws a fixed layout */
+        wi = learn(hwnd, cls, cs->hInstance);
+        module_base_i(cs->hInstance, mod, sizeof(mod));
         wsprintf(key, "Size.%s", (LPSTR)mod);
         if (GetProfileString("PVMon", key, "", val, sizeof(val)) && parse_size(val, &w, &h)) {
             cs->cx = w; cs->cy = h;
-        } else if (!in_list("KeepSize", mod) &&
+        } else if (!wi->fixed &&
                    GetProfileString("PVMon", "DefaultSize", "", val, sizeof(val)) && parse_size(val, &w, &h)) {
             if (cs->cx == CW_USEDEFAULT || cs->cx > w) cs->cx = w;
             if (cs->cy == CW_USEDEFAULT || cs->cy > h) cs->cy = h;
         }
+        if (!wi->fixed && cs->cx != CW_USEDEFAULT) {              /* the invariant, at birth */
+            if (cs->cx > shell_w()) cs->cx = shell_w();
+            if (cs->cy > frame_h_for(wi, FALSE)) cs->cy = frame_h_for(wi, FALSE);
+        }
         cs->x = SLOT_W; cs->y = 0;
     }
 pass:
-    return CallNextHookEx(g_hook, code, wParam, lParam);
+    return CallNextHookEx(g_cbt, code, wParam, lParam);
+}
+
+/* Maximise means "fill the column": the window really is zoomed, so the maximise box turns into
+   the restore box and toggles back, but the zoomed rectangle is the phone frame at the top of the
+   window's own column, never the whole screen. Fixed-layout programs keep their size and are only
+   moved to the top of the column. */
+static void clamp_minmax(HWND hwnd, MINMAXINFO FAR *mmi)
+{
+    char cls[24];
+    BOOL isShell;
+    WinInfo *wi = NULL;
+    WINDOWPLACEMENT wp;
+    int colX = SLOT_W, w, h;
+    if (GetWindowLong(hwnd, GWL_STYLE) & WS_CHILD) return;
+    if (GetWindow(hwnd, GW_OWNER)) return;                       /* dialogs do not maximise */
+    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0 || transient_class(cls)) return;
+    isShell = lstrcmp(cls, "Progman") == 0;
+    if (!isShell) wi = learn(hwnd, cls, NULL);
+    wp.length = sizeof(wp);
+    if (!isShell && GetWindowPlacement(hwnd, &wp) && wp.rcNormalPosition.left >= SLOT_W)
+        colX = (wp.rcNormalPosition.left / SLOT_W) * SLOT_W;   /* the column it lives in, even when iconic */
+    if (isShell) { colX = 0; w = shell_w(); h = frame_h_for(NULL, TRUE); }
+    else if (wi->fixed) {
+        w = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+        h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+        if (w < 100 || h < 60) return;                 /* still being built (Minesweeper sizes itself later) */
+        if (w > SLOT_W) w = SLOT_W;
+        if (h > GetSystemMetrics(SM_CYSCREEN)) h = GetSystemMetrics(SM_CYSCREEN);
+    } else { w = shell_w(); h = frame_h_for(wi, FALSE); }
+    mmi->ptMaxSize.x = w; mmi->ptMaxSize.y = h;
+    mmi->ptMaxPosition.x = colX; mmi->ptMaxPosition.y = 0;
+    if (!isShell && wi->fixed) return;                           /* the user may still drag-size these */
+    mmi->ptMaxTrackSize.x = w; mmi->ptMaxTrackSize.y = h;
+}
+
+/* WM_WINDOWPOSCHANGING, when it reaches this hook: applications are clamped to the frame; owned
+   windows are kept inside their owner's column (the shell column for the shell's dialogs, which
+   is what the phone shows as the desktop: a Windows-centred message box would otherwise sit at
+   x = 1100). Observed: USER 3.1 sends WM_GETMINMAXINFO through a path this hook sees (dozens of
+   times per window) but its SetWindowPos-internal WM_WINDOWPOSCHANGING does not arrive here, so
+   the size invariant for programs that size themselves after creation (PIF Editor, Packager) is
+   enforced at HCBT_ACTIVATE above and by PVMON's park() instead; this stays as belt and braces. */
+static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
+{
+    char cls[24];
+    HWND owner;
+    if ((wp->flags & SWP_NOSIZE) && (wp->flags & SWP_NOMOVE)) return;
+    if (GetWindowLong(hwnd, GWL_STYLE) & WS_CHILD) return;
+    if (IsIconic(hwnd) || (wp->cx <= 64 && wp->cy <= 64 && !(wp->flags & SWP_NOSIZE))) return;  /* icons */
+    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0 || transient_class(cls)) return;
+    owner = GetWindow(hwnd, GW_OWNER);
+    if (!owner && lstrcmp(cls, "#32770") == 0 && !shell_task(hwnd)) owner = task_main_window(hwnd);
+    if (owner && IsWindow(owner)) {
+        RECT orc, rc; int colX, colR, frameH, x, y, w, h;
+        GetWindowRect(owner, &orc);
+        if (IsIconic(owner)) return;                             /* owner in the icon row: leave it */
+        GetWindowRect(hwnd, &rc);
+        w = (wp->flags & SWP_NOSIZE) ? rc.right - rc.left : wp->cx;
+        h = (wp->flags & SWP_NOSIZE) ? rc.bottom - rc.top : wp->cy;
+        x = (wp->flags & SWP_NOMOVE) ? rc.left : wp->x;
+        y = (wp->flags & SWP_NOMOVE) ? rc.top : wp->y;
+        if (orc.left < SLOT_W) { colX = 0; colR = shell_w(); frameH = shell_h(); }
+        else { colX = (orc.left / SLOT_W) * SLOT_W; colR = colX + SLOT_W; frameH = GetSystemMetrics(SM_CYSCREEN); }
+        if (x + w > colR) x = colR - w;
+        if (x < colX) x = colX;
+        if (y + h > frameH) y = frameH - h;
+        if (y < 0) y = 0;
+        if (x != ((wp->flags & SWP_NOMOVE) ? rc.left : wp->x) || y != ((wp->flags & SWP_NOMOVE) ? rc.top : wp->y)) {
+            wp->x = x; wp->y = y; wp->flags &= ~SWP_NOMOVE;
+        }
+        return;
+    }
+    if (lstrcmp(cls, "#32770") == 0 && shell_task(hwnd)) {
+        RECT rc; int x, y, w, h;
+        GetWindowRect(hwnd, &rc);
+        w = (wp->flags & SWP_NOSIZE) ? rc.right - rc.left : wp->cx;
+        h = (wp->flags & SWP_NOSIZE) ? rc.bottom - rc.top : wp->cy;
+        x = (wp->flags & SWP_NOMOVE) ? rc.left : wp->x;
+        y = (wp->flags & SWP_NOMOVE) ? rc.top : wp->y;
+        if (x >= SLOT_W) { x = (shell_w() - w) / 2; y = (shell_h() - h) / 2; }   /* centred on the screen by Windows */
+        if (clamp_into(&x, &y, w, h, 0, shell_w(), shell_h()) || x != ((wp->flags & SWP_NOMOVE) ? rc.left : wp->x) || y != ((wp->flags & SWP_NOMOVE) ? rc.top : wp->y)) {
+            wp->x = x; wp->y = y; wp->flags &= ~SWP_NOMOVE;
+        }
+        return;
+    }
+    if (wp->flags & SWP_NOSIZE) return;
+    if (lstrcmp(cls, "Progman") == 0) {
+        if (wp->cx > shell_w()) wp->cx = shell_w();
+        if (wp->cy > shell_h()) wp->cy = shell_h();
+        return;
+    }
+    {
+        WinInfo *wi = learn(hwnd, cls, NULL);
+        int maxH;
+        if (wi->fixed) return;                                   /* never resized, only kept in its column */
+        maxH = frame_h_for(wi, FALSE);
+        if (wp->cx > shell_w() || wp->cy > maxH) {
+            char line[80];
+            wsprintf(line, "pvhook: clamp %s %dx%d -> %dx%d", (LPSTR)cls, wp->cx, wp->cy,
+                     wp->cx > shell_w() ? shell_w() : wp->cx, wp->cy > maxH ? maxH : wp->cy);
+            pv_dbg(line);
+        }
+        if (wp->cx > shell_w()) wp->cx = shell_w();
+        if (wp->cy > maxH) wp->cy = maxH;
+    }
+}
+
+LRESULT CALLBACK __export PvCwpProc(int code, WPARAM wParam, LPARAM lParam)
+{
+    CWP16 FAR *m = (CWP16 FAR *)lParam;
+    if (code >= 0 && m && g_shellW) {
+        if (m->message == WM_GETMINMAXINFO && m->lParam) clamp_minmax(m->hwnd, (MINMAXINFO FAR *)m->lParam);
+        else if (m->message == WM_WINDOWPOSCHANGING && m->lParam) clamp_windowpos(m->hwnd, (WINDOWPOS FAR *)m->lParam);
+    }
+    return CallNextHookEx(g_cwp, code, wParam, lParam);
 }
 
 /* Install/remove, called by PVMON. */
 BOOL FAR PASCAL __export PvHookInstall(void)
 {
     if (g_installed) return TRUE;
-    g_hook = SetWindowsHookEx(WH_CBT, (HOOKPROC)PvCbtProc, g_hInst, NULL);
-    g_installed = g_hook != NULL;
+    shell_w(); shell_h();
+    g_cbt = SetWindowsHookEx(WH_CBT, (HOOKPROC)PvCbtProc, g_hInst, NULL);
+    g_cwp = SetWindowsHookEx(WH_CALLWNDPROC, (HOOKPROC)PvCwpProc, g_hInst, NULL);
+    g_installed = g_cbt != NULL;
+    if (!g_cwp) pv_dbg("pvhook: WH_CALLWNDPROC hook failed");
     return g_installed;
+}
+
+/* The shell column's runtime size (the host knows the real viewport; PVMON relays it). */
+void FAR PASCAL __export PvHookSetShell(int w, int h)
+{
+    if (w > 0) g_shellW = w;
+    if (h > 0) g_shellH = h;
 }
 
 void FAR PASCAL __export PvHookRemove(void)
 {
-    if (g_installed) UnhookWindowsHookEx(g_hook);
+    if (g_cbt) UnhookWindowsHookEx(g_cbt);
+    if (g_cwp) UnhookWindowsHookEx(g_cwp);
+    g_cbt = g_cwp = NULL;
     g_installed = FALSE;
 }
 
