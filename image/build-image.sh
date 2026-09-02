@@ -52,6 +52,7 @@ python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitl
   "PrinterPorts.PDF Printer=PSCRIPT,C:\\PRINT.PS,15,45" \
   "Ports.C:\\PRINT.PS=" \
   "PSCRIPT,C:\\PRINT.PS::device=HP LaserJet III PostScript" \
+  "PostScript,C:\\PRINT.PS::device=HP LaserJet III PostScript" \
   "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )"
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
 # File Manager remembers its window from its last run, which on this image was a 1024x768 session;
