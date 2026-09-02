@@ -1527,3 +1527,20 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   604 guest px -> 643 host px on a 375 px phone) and combo drop-downs longer than the column.
   Pane (375x812): Open box x 1 -> -268 (= 375-643, exact clamp) and back to 0, owner moved with it,
   tap on it clicked. File Manager's View menu at 375x400 shifts up to y=43 so its 357 px fit.
+- Follow-up 3 (same day): fixed-layout programs (no WS_THICKFRAME — Character Map, Solitaire,
+  Hearts, Object Packager, Task List, WINVER, Network Setup) are deliberately never resized by the
+  hook, so a frame wider than 352 or a host scale below 1:1 is reported for them as
+  `info:fixed:…`, not `fail`. Named by title / app-table `fixed:` until PVW carries the hook's flag.
+- Follow-up 4 (same day) — the real cause of the post-PRINTMAN cascade, found with the tour's own
+  diagnostics (`chan=cmd=5,str=11,pvh=0`): after Print Manager's "turned off" box (re-parked to slot 1
+  by PVMON while slot 0 still held the just-closed Control Panel) the tour's close fallback sent
+  CMD_ACTIVATE for slot 0 and then Alt+F4; PVMON stopped polling entirely — no PVH heartbeat, no
+  publish, CMD_RUN left unread in the register — until Ctrl+Esc opened Task List, when it resumed.
+  Consistent with PVMON blocked in an inter-task SendMessage (SetActiveWindow/BringWindowToTop on a
+  window whose task is exiting). Tour side: no CMD_ACTIVATE before Alt+F4 any more; before each
+  launch the tour waits for a heartbeat, nudges a silent PVMON with Ctrl+Esc/Esc, and marks the app
+  `launch=skip:pvmon-stalled` (`stall=pvmon:no-heartbeat,…` in the row) if it stays silent, so a
+  stalled guest costs seconds, not 15 s per remaining app. Timed-out rows are now posted to the log
+  too (they were only in the table before). Guest side (PVMON owner): CMD_ACTIVATE/CMD_CLOSE on a
+  slot whose window belongs to an exiting task should not block the poll — Print Manager with the
+  spooler off is the reproduction (`node tools/tour.mjs --apps CONTROL,PRINTMAN,CLIPBRD --log`).
