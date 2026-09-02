@@ -807,7 +807,7 @@ LRESULT CALLBACK __export PvMouseProc(int code, WPARAM wParam, LPARAM lParam)
             pv_dbg(b);
         }
     }
-    if (code == HC_ACTION && m && g_tapOpens > 0 && m->hwnd) {
+    if (code == HC_ACTION && m && g_tapOpens > 0 && !g_desktop && m->hwnd) {   /* phone layout only: a mouse double-clicks by itself */
         char cls[16];
         if (wParam == WM_LBUTTONDOWN || wParam == WM_NCLBUTTONDOWN) {
             g_tapWnd = m->hwnd; g_tapPt = m->pt; g_tapTick = GetTickCount();
