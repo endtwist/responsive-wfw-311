@@ -1382,8 +1382,10 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 /* Errors and a heartbeat go to the dev server: phones have no console to read. */
 let frames = 0, lastBeat = 0, lastIc = 0, lastBeatAt = 0;
 function report(kind, detail) {
-  try { fetch("/__log", { method: "POST", body: `${kind} ${detail}`, keepalive: true }); } catch (e) {}
+  if (logEndpointGone) return;                          // production has no dev server: stop after the first 404
+  try { fetch("/__log", { method: "POST", body: `${kind} ${detail}`, keepalive: true }).then(r => { if (r.status === 404) logEndpointGone = true; }).catch(() => {}); } catch (e) {}
 }
+let logEndpointGone = false;
 window.addEventListener("error", ev => report("error", `${ev.message} @${ev.filename}:${ev.lineno} ${ev.error && ev.error.stack}`));
 window.addEventListener("unhandledrejection", ev => report("rejection", String(ev.reason && (ev.reason.stack || ev.reason))));
 
