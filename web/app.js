@@ -833,6 +833,18 @@ function installTouch() {
      desktop speed) would fall seconds behind a 0.4 s drag and the next gesture would queue up
      behind it. Instead the latest finger position is kept and a single loop steers towards it,
      one guest round-trip at a time; the release waits for the loop to catch up. */
+  // Two fingers scroll whatever is under them (or zoom/pan a layer): each SCROLL_STEP of travel
+  // is a line message to the guest window under the midpoint.
+  const SCROLL_STEP = 24;
+  let twoFinger = null;
+  const mid = t => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const layerUnder = m => {
+    const r = c.getBoundingClientRect();
+    const h = hitTest(m.x - r.left, m.y - r.top);
+    return h.win && !h.win.transient && !h.win.shellCopy ? h.win : null;
+  };
+
   let g = null;                                  // the current gesture; tasks close over their own
   const follow = async (G) => {
     let steered = null;
