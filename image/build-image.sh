@@ -46,8 +46,12 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 # from the cursor position the driver reports, which only lands correctly at a 1:1 mickey ratio.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 \
+  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.MaxHeight.WINFILE=600 \
   "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )"
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
+# File Manager remembers its window from its last run, which on this image was a 1024x768 session;
+# opened in a 640-column slot that makes it a tall sliver scaled to nothing. Give it a sane default.
+printf '[Settings]\r\nWindow=0,0,640,560, ,0\r\nFace=MS Sans Serif\r\nSize=10\r\n' > $TMP/WINFILE.INI
+mcopy -o $M $TMP/WINFILE.INI ::/WINDOWS/WINFILE.INI
 rm -rf $TMP
 echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD live=$LIVE"

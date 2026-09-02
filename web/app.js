@@ -79,6 +79,7 @@ function computeMode() {
 }
 
 const initial = computeMode();
+if (narrow()) document.documentElement.classList.add("phone");
 // DPI is fixed for a session: Windows 3.x cannot change font metrics on the fly, and PVDPI.EXE
 // picks the matching SYSTEM.INI at each Windows start.
 const dpi = params.get("dpi") ? +params.get("dpi") : (viewport()[0] < 600 ? 120 : 96);
@@ -237,6 +238,7 @@ let dock = [];
 let desktopReady = false;
 let pendingLayers = null, pendingDock = null;
 const layerPos = {};                 // layer key -> host position, moved by dragging
+const layerZoom = {};                // layer key -> { z, px, py }: pinch zoom and pan of the client area
 
 const pvLog = [];
 window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, log: pvLog.slice(-40) });
@@ -248,12 +250,13 @@ emulator.bus.register("pv-debug", line => {
   if (m) { wantKeyboard = m[1] === "1"; syncKeyboard(); return; }
   if (/^PVA/.test(line)) {
     desktopReady = true;
+    shellHeightSent = 0;
     if (params.get("mkstate") && !restored) { uploadBootState(); return; }
     launchFromUrl();
     return;
   }
   if (/^PVB /.test(line)) { pendingLayers = []; pendingDock = []; return; }
-  m = /^PV([WOTX]) (-?\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
+  m = /^PV([WOTXS]) (-?\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
   if (m && pendingLayers) {
     pendingLayers.push({
       kind: m[1], slot: +m[2], wx: +m[3], wy: +m[4], ww: +m[5], wh: +m[6],
@@ -267,6 +270,7 @@ emulator.bus.register("pv-debug", line => {
     layers = pendingLayers; dock = pendingDock; pendingLayers = pendingDock = null;
     const live = new Set(layers.map(layerKey));
     for (const k of Object.keys(layerPos)) if (!live.has(k)) delete layerPos[k];
+    for (const k of Object.keys(layerZoom)) if (!live.has(k)) delete layerZoom[k];
   }
 });
 
@@ -305,6 +309,22 @@ function syncKeyboard() {
 }
 const CMD_SCROLL = 7;
 
+/* The shell column's height follows the visible viewport (browser toolbars come and go), so the
+   desktop fills the phone with no letterbox. PVMON re-arranges Program Manager on request. */
+const CMD_SHELLSIZE = 8;
+let shellHeightSent = 0, shellHeightPending = 0, shellHeightTimer = 0;
+function wantShellHeight(h) {
+  if (!h || !desktopReady) return;
+  h = Math.max(300, Math.min(SHELL_H, h & ~1));
+  if (Math.abs(h - shellHeightSent) < 8 || h === shellHeightPending) return;
+  shellHeightPending = h;
+  clearTimeout(shellHeightTimer);
+  shellHeightTimer = setTimeout(() => {
+    shellHeightSent = shellHeightPending;
+    sendCommand(CMD_SHELLSIZE, shellHeightSent);
+  }, 400);
+}
+
 function layerKey(L) { return L.kind === "W" ? "s" + L.slot : L.kind + ":" + L.title; }
 function sendCommand(cmd, slot) { emulator.bus.send("pv-command", [cmd, slot]); }
 const CMD_ACTIVATE = 1, CMD_RESTORE = 2, CMD_CLOSE = 3, CMD_MINIMIZE = 4, CMD_RUN = 5, CMD_REPUBLISH = 6;
@@ -323,7 +343,8 @@ function chooseView(src) {
      height would make everything tiny, so the desktop is scaled to show its top 480 rows (caption,
      menu, the program groups) and the rest is simply below the fold; application layers scale to
      the wide viewport on their own. */
-  const scale = vw > vh ? Math.min(vw / shell.w, vh / 480) : Math.min(vw / shell.w, vh / shell.h);
+  const scale = vw > vh ? Math.min(vw / shell.w, vh / 480) : vw / shell.w;
+  wantShellHeight(vw > vh ? 0 : Math.round(vh / scale));
   return { x: 0, y: 0, w: shell.w, h: shell.h, scale,
            ox: Math.round((vw - shell.w * scale) / 2) };
 }
@@ -352,6 +373,15 @@ function placeLayers(src) {
     // A dialog owned by the shell already shows in the desktop column at desktop scale, and
     // PVMON reflows it to fit there; a second copy as a layer would be a double image.
     if (L.kind === "O" && L.slot < 0) return;
+    if (L.kind === "S") {
+      /* The shell takes part in z-order: when Program Manager is in front it is drawn again, on
+         top of the applications, exactly where it already is in the desktop column. */
+      const x = Math.round(view.ox + L.wx * c), y = Math.round(L.wy * c);
+      const hw = Math.round(L.ww * c), hh = Math.round(L.wh * c);
+      out.push({ ...L, key, s: c, c, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
+                 inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, shellCopy: true });
+      return;
+    }
     if (L.kind === "T") {
       const hw = Math.round(L.ww * c), hh = Math.round(L.wh * c);
       let x, y;
@@ -396,7 +426,15 @@ function placeLayers(src) {
     // never so far that less than a thumb's width of it is left to grab.
     const x = hw <= vw ? Math.max(0, Math.min(vw - hw, p.x)) : Math.max(40 - hw, Math.min(vw - 40, p.x));
     const y = Math.max(0, Math.min(vh - Math.round(capRow * c), p.y));
-    const w = { ...L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb };
+    /* Pinch zoom: the frame keeps its fitted size and the client area inside it is shown at a
+       larger scale, panned. z = 1 is "fit". */
+    const zp = layerZoom[key] || { z: 1, px: 0, py: 0 };
+    const zs = s * zp.z;
+    const vis = { w: Math.min(L.gw, cw / zs), h: Math.min(L.gh, ch / zs) };   // guest px visible
+    zp.px = Math.max(0, Math.min(L.gw - vis.w, zp.px));
+    zp.py = Math.max(0, Math.min(L.gh - vis.h, zp.py));
+    const w = { ...L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb,
+                zs, px: zp.px, py: zp.py, vw: vis.w, vh: vis.h };
     if (L.kind === "W") bySlot[L.slot] = w;
     out.push(w);
   });
@@ -413,12 +451,14 @@ function hitTest(px, py) {
     if (px < w.x || px > w.x + w.hw) continue;
     if (py < w.y || py > w.y + w.hh) continue;
     const dx = px - w.x, dy = py - w.y;
+    if (w.shellCopy)
+      return { kind: "desktop", win: w, x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
     if (w.transient)
       return { kind: "chrome", win: w, x: Math.round(w.wx + dx / w.c), y: Math.round(w.wy + dy / w.c) };
     if (dy >= w.ht && dy < w.ht + w.ch && dx >= w.hl && dx < w.hl + w.cw) {
       return { kind: "client", win: w,
-               x: Math.round(w.gx + (dx - w.hl) / w.s),
-               y: Math.round(w.gy + (dy - w.ht) / w.s) };
+               x: Math.round(w.gx + w.px + (dx - w.hl) / w.zs),
+               y: Math.round(w.gy + w.py + (dy - w.ht) / w.zs) };
     }
     const capH = Math.round(w.capRow * w.c), boxW = Math.round(w.box * w.c);
     if (dy < capH) {                                  // caption row: boxes click, middle drags
@@ -440,9 +480,8 @@ function hitTest(px, py) {
 
 function drawWindow(g, src, w) {
   const c = w.c;
-  if (w.transient) {
-    g.imageSmoothingEnabled = false;
-    g.drawImage(src, w.wx, w.wy, w.ww, w.wh, w.x, w.y, w.hw, w.hh);
+  if (w.transient || w.shellCopy) {
+    blit(g, src, w.wx, w.wy, w.ww, w.wh, w.x, w.y, w.hw, w.hh);
     return;
   }
   const { inset, capRow, menuRow, box, hl, ht, hb } = w;
@@ -450,10 +489,8 @@ function drawWindow(g, src, w) {
   const cornerL = Math.round((inset.l + box) * c), cornerR = Math.round((inset.l + 2 * box) * c);
   const midSrcW = w.ww - 2 * inset.l - 3 * box;       // the caption strip between the boxes
   const midDstW = w.hw - cornerL - cornerR;
-
-  g.imageSmoothingEnabled = false;
-  g.drawImage(src, w.wx, w.wy, inset.l + box, capRow, w.x, w.y, cornerL, capH);
-  g.drawImage(src, w.wx + w.ww - inset.l - 2 * box, w.wy, inset.l + 2 * box, capRow,
+  blit(g, src, w.wx, w.wy, inset.l + box, capRow, w.x, w.y, cornerL, capH);
+  blit(g, src, w.wx + w.ww - inset.l - 2 * box, w.wy, inset.l + 2 * box, capRow,
               w.x + w.hw - cornerR, w.y, cornerR, capH);
   if (midSrcW > 0 && midDstW > 0) {
     const need = midDstW / c;                         // guest pixels that fit in the gap
@@ -461,32 +498,58 @@ function drawWindow(g, src, w) {
       /* Cropped rather than squeezed: equal slivers of empty caption come off each side and the
          title, which Windows centres, stays centred, at its own size and perfectly crisp. */
       const cut = Math.floor((midSrcW - need) / 2);
-      g.drawImage(src, w.wx + inset.l + box + cut, w.wy, Math.round(need), capRow,
+      blit(g, src, w.wx + inset.l + box + cut, w.wy, Math.round(need), capRow,
                   w.x + cornerL, w.y, midDstW, capH);
     } else {                                          // wider on the host: pad, do not stretch
       const midH = Math.round(midSrcW * c), pad = midDstW - midH;
-      g.drawImage(src, w.wx + inset.l + box, w.wy, 2, capRow, w.x + cornerL, w.y, pad, capH);
-      g.drawImage(src, w.wx + inset.l + box, w.wy, midSrcW, capRow, w.x + cornerL + pad, w.y, midH, capH);
+      blit(g, src, w.wx + inset.l + box, w.wy, 2, capRow, w.x + cornerL, w.y, pad, capH);
+      blit(g, src, w.wx + inset.l + box, w.wy, midSrcW, capRow, w.x + cornerL + pad, w.y, midH, capH);
     }
   }
   if (menuRow > 0 && menuH > 0) {
     const mwG = Math.min(w.ww, Math.round(w.hw / c)), mwH = Math.round(mwG * c);
-    g.drawImage(src, w.wx, w.wy + capRow, mwG, menuRow, w.x, w.y + capH, mwH, menuH);
+    blit(g, src, w.wx, w.wy + capRow, mwG, menuRow, w.x, w.y + capH, mwH, menuH);
     if (w.hw > mwH)                                   // pad with the menu bar's own background
-      g.drawImage(src, w.wx + mwG - 2, w.wy + capRow, 2, menuRow, w.x + mwH, w.y + capH, w.hw - mwH, menuH);
+      blit(g, src, w.wx + mwG - 2, w.wy + capRow, 2, menuRow, w.x + mwH, w.y + capH, w.hw - mwH, menuH);
   }
   if (hl > 0) {                                       // side borders, stretched only lengthways
-    g.drawImage(src, w.wx, w.gy, inset.l, w.gh, w.x, w.y + ht, hl, w.ch);
-    g.drawImage(src, w.gx + w.gw, w.gy, inset.l, w.gh, w.x + hl + w.cw, w.y + ht, hl, w.ch);
+    blit(g, src, w.wx, w.gy, inset.l, w.gh, w.x, w.y + ht, hl, w.ch);
+    blit(g, src, w.gx + w.gw, w.gy, inset.l, w.gh, w.x + hl + w.cw, w.y + ht, hl, w.ch);
   }
   if (hb > 0)
-    g.drawImage(src, w.wx, w.gy + w.gh, Math.min(w.ww, Math.round(w.hw / c)), inset.b,
-                w.x, w.y + ht + w.ch, w.hw, hb);
-  g.imageSmoothingEnabled = w.s < 1;                  // the client, at the scale that fits
-  g.drawImage(src, w.gx, w.gy, w.gw, w.gh, w.x + hl, w.y + ht, w.cw, w.ch);
+    blit(g, src, w.wx, w.gy + w.gh, Math.min(w.ww, Math.round(w.hw / c)), inset.b,
+                w.x, w.y + ht + w.ch, w.hw, hb);                  // the client, at the scale that fits
+  blit(g, src, w.gx + w.px, w.gy + w.py, w.vw, w.vh, w.x + hl, w.y + ht,
+       Math.round(w.vw * w.zs), Math.round(w.vh * w.zs));
 }
 
+/* Errors and a heartbeat go to the dev server: phones have no console to read. */
+let frames = 0, lastBeat = 0;
+function report(kind, detail) {
+  try { fetch("/__log", { method: "POST", body: `${kind} ${detail}`, keepalive: true }); } catch (e) {}
+}
+window.addEventListener("error", ev => report("error", `${ev.message} @${ev.filename}:${ev.lineno} ${ev.error && ev.error.stack}`));
+window.addEventListener("unhandledrejection", ev => report("rejection", String(ev.reason && (ev.reason.stack || ev.reason))));
+
 function present() {
+  try { presentOnce(); } catch (e) { report("present", e.stack || String(e)); }
+  frames++;
+  const now = performance.now();
+  if (now - lastBeat > 15000) {
+    lastBeat = now;
+    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} layers=${layers.length} ready=${desktopReady}`);
+  }
+  requestAnimationFrame(present);
+}
+
+/* drawImage throws on an empty source rectangle; a window can legitimately have one (a zero-size
+   client while it is being created), and one throw must never take the render loop down. */
+function blit(g, src, sx, sy, sw, sh, dx, dy, dw, dh) {
+  if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+  g.drawImage(src, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
+function presentOnce() {
   const src = document.querySelector("#screen_container canvas");
   const pres = $("pres");
   if (src && src.width && pres) {
@@ -512,12 +575,11 @@ function present() {
     }
     {
       const dw = view.w * view.scale, dh = view.h * view.scale;
-      g.drawImage(src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
+      blit(g, src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
       placed = narrow() ? placeLayers(src) : [];
       for (const w of placed) drawWindow(g, src, w);  // back to front
     }
   }
-  requestAnimationFrame(present);
 }
 requestAnimationFrame(present);
 window.pvPresent = present;
@@ -733,10 +795,11 @@ function installTouch() {
   const SCROLL_STEP = 24;
   let twoFinger = null;
   const mid = t => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
-  const scrollTargetSlot = m => {
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const layerUnder = m => {
     const r = c.getBoundingClientRect();
     const h = hitTest(m.x - r.left, m.y - r.top);
-    return h.win && h.win.kind === "W" ? h.win.slot : (h.win && h.win.slot >= 0 ? h.win.slot : -1);
+    return h.win && !h.win.transient && !h.win.shellCopy ? h.win : null;
   };
 
   c.addEventListener("touchstart", ev => {
@@ -744,7 +807,9 @@ function installTouch() {
       clearTimeout(pressTimer);
       if (dragging) { button(false, false); dragging = false; }
       const m = mid(ev.touches);
-      twoFinger = { last: m, accX: 0, accY: 0, slot: scrollTargetSlot(m) };
+      const win = layerUnder(m);
+      twoFinger = { last: m, accX: 0, accY: 0, dist: dist(ev.touches), win,
+                    slot: win && win.slot >= 0 ? win.slot : -1 };
       ev.preventDefault();
       return;
     }
@@ -755,6 +820,27 @@ function installTouch() {
     if (twoFinger && ev.touches.length === 2) {
       ev.preventDefault();
       const m = mid(ev.touches);
+      const d = dist(ev.touches);
+      if (twoFinger.win) {
+        const zp = layerZoom[twoFinger.win.key] || (layerZoom[twoFinger.win.key] = { z: 1, px: 0, py: 0 });
+        if (Math.abs(d - twoFinger.dist) > 2) {                     // pinch: zoom the client area
+          const maxZ = Math.max(1, (twoFinger.win.c * 1.5) / twoFinger.win.s);
+          const nz = Math.max(1, Math.min(maxZ, zp.z * d / twoFinger.dist));
+          // keep the guest pixel under the fingers where it is
+          const r = c.getBoundingClientRect();
+          const fx = (m.x - r.left - twoFinger.win.x - twoFinger.win.hl), fy = (m.y - r.top - twoFinger.win.y - twoFinger.win.ht);
+          const gxBefore = zp.px + fx / (twoFinger.win.s * zp.z), gyBefore = zp.py + fy / (twoFinger.win.s * zp.z);
+          zp.z = nz;
+          zp.px = gxBefore - fx / (twoFinger.win.s * nz); zp.py = gyBefore - fy / (twoFinger.win.s * nz);
+          twoFinger.dist = d;
+        }
+        if (zp.z > 1.01) {                                          // zoomed: two fingers pan
+          zp.px -= (m.x - twoFinger.last.x) / (twoFinger.win.s * zp.z);
+          zp.py -= (m.y - twoFinger.last.y) / (twoFinger.win.s * zp.z);
+          twoFinger.last = m;
+          return;
+        }
+      }
       twoFinger.accX += m.x - twoFinger.last.x; twoFinger.accY += m.y - twoFinger.last.y;
       twoFinger.last = m;
       const send = (dir, n) => { if (twoFinger.slot >= 0) sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); };

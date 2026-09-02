@@ -43,6 +43,17 @@ http.createServer((req, res) => {
     });
     return;
   }
+  // Diagnostics from phones: the page posts uncaught errors and a periodic heartbeat here.
+  if (url === "/__log" && req.method === "POST") {
+    const chunks = [];
+    req.on("data", c => chunks.push(c));
+    req.on("end", () => {
+      const line = `${new Date().toISOString()} ${req.socket.remoteAddress} ${Buffer.concat(chunks).toString().slice(0, 4000)}\n`;
+      fs.appendFileSync(path.join(root, "shots", "devicelog.txt"), line);
+      res.writeHead(204, { "Access-Control-Allow-Origin": "*" }); res.end();
+    });
+    return;
+  }
   if (url === "/__stats") {
     if (req.method === "DELETE") { stats.bytes = 0; stats.byPath = {}; }
     res.writeHead(200, { "Content-Type": "application/json" });

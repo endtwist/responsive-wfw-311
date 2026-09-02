@@ -637,7 +637,7 @@ static BOOL is_transient(HWND hwnd, char *cls, int len)
    A window keeps its slot for its whole life: the slot is not re-derived from z-order, or every
    activation would physically move windows about and force a repaint of each one. */
 #define MAX_WND 24
-typedef struct { HWND hwnd; char kind; HWND owner; } WndRec;   /* kind: A app, O owned, T transient, I iconic */
+typedef struct { HWND hwnd; char kind; HWND owner; } WndRec;   /* kind: A app, O owned, T transient, I iconic, S shell */
 static WndRec g_wnds[MAX_WND];
 static int g_nWnds;
 static HWND g_slotWnd[MAX_SLOTS];
@@ -653,7 +653,10 @@ BOOL CALLBACK __export FindApp(HWND hwnd, LPARAM lParam)
         r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->kind = 'T'; r->owner = NULL;
         return TRUE;
     }
-    if (lstrcmp(cls, "Progman") == 0) return TRUE;
+    if (lstrcmp(cls, "Progman") == 0) {                      /* the shell: published in z-order, never parked */
+        r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->kind = 'S'; r->owner = NULL;
+        return TRUE;
+    }
     if (lstrcmp(cls, "#32772") == 0) return TRUE;             /* icon title of a minimised window */
     {
         HWND o = GetWindow(hwnd, GW_OWNER);
@@ -710,20 +713,21 @@ static int max_height_for(HWND hwnd)
     char path[128], key[48], *base, *p;
     HINSTANCE inst = (HINSTANCE)GetWindowWord(hwnd, GWW_HINSTANCE);
     int h;
-    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return (int)g_shellH;
+    if (!inst || !GetModuleFileName(inst, path, sizeof(path))) return GetSystemMetrics(SM_CYSCREEN);
     base = path;
     for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
     for (p = base; *p && *p != '.'; p++) ;
     *p = 0;
     wsprintf(key, "MaxHeight.%s", (LPSTR)base);
     h = GetProfileInt("PVMon", key, 0);
-    return (h > 100 && h < (int)g_shellH) ? h : (int)g_shellH;
+    return (h > 100 && h < GetSystemMetrics(SM_CYSCREEN)) ? h : GetSystemMetrics(SM_CYSCREEN);
 }
 
 static void park(HWND hwnd, int slot)
 {
     RECT rc;
     int slotX = (int)SLOT_W * (slot + 1);         /* slot 0 sits right of the shell column */
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
     if (IsZoomed(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
         SetWindowPos(hwnd, NULL, slotX, 0, (int)SLOT_W, max_height_for(hwnd),
@@ -731,10 +735,10 @@ static void park(HWND hwnd, int slot)
         return;
     }
     GetWindowRect(hwnd, &rc);
-    if (rc.right - rc.left > (int)SLOT_W || rc.bottom - rc.top > (int)g_shellH) {
+    if (rc.right - rc.left > (int)SLOT_W || rc.bottom - rc.top > screenH) {
         SetWindowPos(hwnd, NULL, slotX, 0,
                      min(rc.right - rc.left, (int)SLOT_W),
-                     min(rc.bottom - rc.top, (int)g_shellH),
+                     min(rc.bottom - rc.top, screenH),
                      SWP_NOZORDER | SWP_NOACTIVATE);
     } else if (rc.left < slotX || rc.left >= slotX + (int)SLOT_W || rc.top < 0) {
         SetWindowPos(hwnd, NULL, slotX, 0, 0, 0,
@@ -838,6 +842,9 @@ static void publish_layout(void)
         case 'T':
             describe(g_wnds[i].hwnd, line, "PVT", -1);
             break;
+        case 'S':
+            describe(g_wnds[i].hwnd, line, "PVS", -1);
+            break;
         case 'I': {
             char title[24];
             title[0] = 0;
@@ -860,6 +867,7 @@ static void publish_layout(void)
 #define CMD_RUN      5     /* WinExec the string in R_CMDSTR (a command line) */
 #define CMD_REPUBLISH 6    /* host restored a snapshot: tell it everything again */
 #define CMD_SCROLL   7     /* arg: slot | direction << 8 (1 up, 2 down, 3 left, 4 right), lines in bits 12+ */
+#define CMD_SHELLSIZE 8    /* arg: shell column height; the host knows the real viewport, we do not */
 
 static void run_host_command(void)
 {
@@ -868,6 +876,17 @@ static void run_host_command(void)
     if (!cmd) return;
     arg = rd(R_CMDARG);
     wr(R_CMD, 0);
+    if (cmd == CMD_SHELLSIZE) {
+        /* The shell column is arranged to the height the host can actually show (browser
+           toolbars vary), so the desktop fills the phone edge to edge with no letterboxing. */
+        char b[64];
+        if (arg >= 300 && arg <= (unsigned)GetSystemMetrics(SM_CYSCREEN)) g_shellH = arg;
+        arrange_shell();
+        wsprintf(b, "PVD %u %u %d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION));
+        dbg(b);
+        g_lastPub[0] = 0;
+        return;
+    }
     if (cmd == CMD_REPUBLISH) {
         char b[64];
         wsprintf(b, "PVD %u %u %d", g_shellW, g_shellH, GetSystemMetrics(SM_CYCAPTION));

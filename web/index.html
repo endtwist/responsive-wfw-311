@@ -18,6 +18,9 @@
          z-index:2; font-size:11px; }
   #bar button { font:inherit; padding:4px 8px; }
   #kbd { position:fixed; left:-1000px; top:0; opacity:0; }
+/* On a phone the page shows nothing of its own: no toolbar, the desktop is the whole viewport. */
+.phone #bar { display: none; }
+.phone #pres { height: 100dvh; }
 </style>
 <canvas id="pres"></canvas>
 <div id="screen_container">
