@@ -749,11 +749,31 @@ static void publish_layout(void)
     collect_apps();
 
     /* First pass: assign slots and park applications, so the second pass reports where they
-       actually ended up. */
+       actually ended up. Owned windows go into their owner's column too: Windows usually centres
+       a dialog on its owner, but some applications place theirs in screen coordinates, and a
+       dialog left in the shell column would show through on the desktop. */
     for (i = 0; i < g_nWnds; i++)
         if (g_wnds[i].kind == 'A' || g_wnds[i].kind == 'I') {
             slot = slot_of(g_wnds[i].hwnd);
             if (slot >= 0 && g_wnds[i].kind == 'A') park(g_wnds[i].hwnd, slot);
+        }
+    for (i = 0; i < g_nWnds; i++)
+        if (g_wnds[i].kind == 'O') {
+            RECT rc, orc;
+            int slotX, w, h, x, y;
+            slot = owner_slot(g_wnds[i].owner);
+            if (slot < 0) continue;
+            slotX = (int)SLOT_W * (slot + 1);
+            GetWindowRect(g_wnds[i].hwnd, &rc);
+            if (rc.left >= slotX && rc.right <= slotX + (int)SLOT_W) continue;
+            w = rc.right - rc.left; h = rc.bottom - rc.top;
+            GetWindowRect(g_wnds[i].owner, &orc);
+            x = (orc.left + orc.right - w) / 2;  y = (orc.top + orc.bottom - h) / 2;
+            if (x + w > slotX + (int)SLOT_W) x = slotX + (int)SLOT_W - w;
+            if (x < slotX) x = slotX;
+            if (y + h > (int)g_shellH) y = (int)g_shellH - h;
+            if (y < 0) y = 0;
+            SetWindowPos(g_wnds[i].hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
         }
 
     /* A compact fingerprint of the layout, published only when it changes. */

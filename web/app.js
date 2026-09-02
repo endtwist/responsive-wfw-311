@@ -63,14 +63,14 @@ const SLOT_W = 640;              // width of each application column (must match
 const MAX_SLOTS = 3;             // application columns (must match pvmon.c)
 const WIN_MARGIN = 8;
 
-function narrow() { return viewport()[0] < 600; }
+/* A phone in either orientation. The guest layout is fixed (the boot snapshot bakes it in), so
+   turning the phone must never re-mode the guest: only the host layout changes. */
+function narrow() { const [vw, vh] = viewport(); return Math.min(vw, vh) < 600; }
+const SHELL_H = 970;             // shell column height, fixed so the boot snapshot always fits
 
 function computeMode() {
   const [vw, vh] = viewport();
-  if (narrow()) {
-    const shellH = Math.min(MAX_H, Math.round(vh * SHELL_W / vw) & ~1);
-    return { w: SLOT_W * (1 + MAX_SLOTS), h: shellH, zoom: 1, shellH };
-  }
+  if (narrow()) return { w: SLOT_W * (1 + MAX_SLOTS), h: SHELL_H, zoom: 1, shellH: SHELL_H };
   let scale = Math.max(1, MIN_W / vw, MIN_H / vh);
   scale = Math.min(scale, MAX_W / vw, MAX_H / vh);
   const w = Math.max(MIN_W, Math.min(MAX_W, Math.floor(vw * scale / 8) * 8));
@@ -370,7 +370,9 @@ function placeLayers(src) {
         ? { x: Math.round(owner.x + (owner.hw - hw) / 2), y: Math.round(owner.y + (owner.hh - hh) / 2) }
         : { x: Math.round((vw - hw) / 2) + i * 16, y: Math.round(vh * 0.12) + i * 16 };
     }
-    const x = Math.max(40 - hw, Math.min(vw - 40, p.x));
+    // A window that fits stays entirely on screen; one that does not may hang off the edges, but
+    // never so far that less than a thumb's width of it is left to grab.
+    const x = hw <= vw ? Math.max(0, Math.min(vw - hw, p.x)) : Math.max(40 - hw, Math.min(vw - 40, p.x));
     const y = Math.max(0, Math.min(vh - Math.round(capRow * c), p.y));
     const w = { ...L, key, s, c, cw, ch, hw, hh, x, y, inset, capRow, menuRow, box, hl, ht, hb };
     if (L.kind === "W") bySlot[L.slot] = w;
