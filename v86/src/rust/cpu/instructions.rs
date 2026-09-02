@@ -1433,9 +1433,13 @@ pub unsafe fn instr_CC() {
 //                   PV_IDLE_SPIN_LIMIT instructions ran since the previous yield
 pub static mut PV_IDLE_MODE: u32 = 2;
 pub static mut PV_IDLE_SPIN_LIMIT: u32 = 20_000;
+#[allow(non_upper_case_globals)]
 static mut pv_idle_last_ic: u32 = 0;
+#[allow(non_upper_case_globals)]
 static mut pv_idle_halted: u32 = 0;
+#[allow(non_upper_case_globals)]
 static mut pv_idle_passed: u32 = 0;
+#[allow(non_upper_case_globals)]
 static mut pv_idle_gap_hist: [u32; 32] = [0; 32];
 
 #[no_mangle]

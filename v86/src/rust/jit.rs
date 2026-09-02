@@ -25,14 +25,27 @@ impl Hasher for FastHasher {
 type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<FastHasher>>;
 type HashSet<K> = std::collections::HashSet<K, BuildHasherDefault<FastHasher>>;
 
-// responsive-wfw311: one bit per physical page, set when the page has compiled code or entry
-// points (i.e. ctx.pages or ctx.entry_points has it). do_page_walk asks this on every TLB miss;
-// it used to take the JIT mutex and do two hash lookups for the answer. Kept in sync by
+// responsive-wfw311: one bit per physical page, set when the page has compiled code or is being
+// compiled (ctx.pages or ctx.compiling has it). This is what TLB_HAS_CODE follows: writes to such
+// pages take the slow path so self-modifying code is caught. do_page_walk asks this on every TLB
+// miss; it used to take the JIT mutex and do two hash lookups for the answer. Kept in sync by
 // sync_page_has_code at every point where those maps change.
+//
+// Pages that merely have entry points (interpreted, not yet hot) are deliberately not tracked
+// any more (upstream tracked them and dropped the entry points on every write). Real-mode DOS
+// and 16-bit Windows keep code and data in the same 4K pages, so such pages were written every
+// few thousand instructions, lost their hotness each time and were interpreted forever, at a
+// rate of ~150k reset cycles a second in a DOS box. A stale entry point is only a hint: the
+// compiler decodes the bytes present at compile time, and compiled pages are write-tracked.
 static mut PAGE_HAS_CODE: [u32; 0x8000] = [0; 0x8000];
 
 fn sync_page_has_code(ctx: &JitState, page: Page) {
-    let has = ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page);
+    let compiling = match &ctx.compiling {
+        Some((_, CompilingPageState::Compiling { pages })) => pages.contains_key(&page),
+        Some((_, CompilingPageState::CompilingWritten { pages })) => pages.contains(&page),
+        None => false,
+    };
+    let has = compiling || ctx.pages.contains_key(&page);
     let p = page.to_u32() as usize;
     unsafe {
         if has {
@@ -171,15 +184,46 @@ struct PageInfo {
     code: Box<cpu::Code>,
 }
 
+// responsive-wfw311: Code.code_bytes marks which bytes of the page belong to compiled
+// instructions (of this module and of any older module still reachable through
+// hidden_wasm_table_indices). A write that misses them does not invalidate anything: real-mode
+// DOS and 16-bit Windows keep hot data in the same 4K pages as code, and one such page was being
+// compiled, written during the compile, discarded and interpreted again in a loop, at 1.6M
+// interpreted instructions/s.
+// responsive-wfw311 experiment switches (pv_set_flags): bit 0 = byte-granular SMC detection
+// (off: any write to a page with compiled code invalidates it, as upstream). Off by default:
+// with it on, every page that mixes code and hot data gets compiled and then every data write to
+// it takes the slow write path; measured 8% slower on the DOS-box workload than leaving such
+// pages interpreted (the volatile_pages backoff keeps their recompiles rare).
+pub static mut PV_FLAGS: u32 = 0;
+#[no_mangle]
+pub fn pv_set_flags(flags: u32) { unsafe { PV_FLAGS = flags } }
+
+pub fn code_bytes_overlap(bits: &[u64; 64], from: u32, to: u32) -> bool {
+    if unsafe { PV_FLAGS } & 1 == 0 {
+        return true;
+    }
+    let (mut a, to) = (from & 0xFFF, u32::min(to, 0x1000));
+    while a < to {
+        if bits[(a >> 6) as usize] & 1 << (a & 63) != 0 {
+            return true;
+        }
+        a += 1;
+    }
+    false
+}
+
 fn new_code(
     wasm_table_index: WasmTableIndex,
     state_flags: CachedStateFlags,
     entries: &[(u16, u16)],
+    code_bytes: [u64; 64],
 ) -> Box<cpu::Code> {
     let mut code = Box::new(cpu::Code {
         wasm_table_index,
         state_flags,
         state_table: [u16::MAX; 0x1000],
+        code_bytes,
     });
     for &(addr, state) in entries {
         dbg_assert!(state != u16::MAX);
@@ -203,7 +247,7 @@ fn clear_tlb_code_pointing_to(code: &cpu::Code) {
 
 enum CompilingPageState {
     Compiling { pages: HashMap<Page, PageInfo> },
-    CompilingWritten,
+    CompilingWritten { pages: Vec<Page> },
 }
 
 struct JitState {
@@ -215,6 +259,11 @@ struct JitState {
     // or HashSet<u32> rather than nested
     entry_points: HashMap<Page, (u32, HashSet<u16>)>,
     pages: HashMap<Page, PageInfo>,
+    // responsive-wfw311: how often a page's compiled code has been invalidated by a write. Pages
+    // that mix code and data (real-mode DOS, 16-bit Windows segments) would otherwise be
+    // recompiled every JIT_THRESHOLD interpreted instructions; the threshold doubles per
+    // invalidation, up to 64x.
+    volatile_pages: HashMap<Page, u8>,
     wasm_table_index_free_list: Vec<WasmTableIndex>,
     compiling: Option<(WasmTableIndex, CompilingPageState)>,
     #[cfg(debug_assertions)]
@@ -301,6 +350,7 @@ impl JitState {
 
             entry_points: HashMap::default(),
             pages: HashMap::default(),
+            volatile_pages: HashMap::default(),
 
             wasm_table_index_free_list: Vec::from_iter(wasm_table_indices),
             compiling: None,
@@ -1124,20 +1174,35 @@ fn jit_analyze_and_generate(
     dbg_assert!(!entries.is_empty());
 
     let mut page_entries: HashMap<Page, Vec<(u16, u16)>> = HashMap::default();
+    let mut page_code_bytes: HashMap<Page, Box<[u64; 64]>> = HashMap::default();
     for &p in &pages {
         page_entries.entry(p).or_insert_with(Vec::new);
+        page_code_bytes
+            .entry(p)
+            .or_insert_with(|| Box::new([0u64; 64]));
         ctx.entry_points
             .entry(p)
             .or_insert_with(|| (0, HashSet::default()));
-        sync_page_has_code(ctx, p);
     }
     for &(addr, state) in &entries {
         let e = page_entries.get_mut(&Page::page_of(addr)).unwrap();
         e.push((addr as u16 & 0xFFF, state));
     }
+    // the bytes every compiled basic block was decoded from
+    for b in basic_block_by_addr.values() {
+        let bits = page_code_bytes.get_mut(&Page::page_of(b.addr)).unwrap();
+        dbg_assert!(b.end_addr >= b.addr && b.end_addr - b.addr <= 0x1000);
+        let mut a = b.addr & 0xFFF;
+        let to = a + (b.end_addr - b.addr);
+        while a < to && a < 0x1000 {
+            bits[(a >> 6) as usize] |= 1 << (a & 63);
+            a += 1;
+        }
+    }
     let mut page_info = HashMap::default();
     for (p, entry_points) in page_entries {
-        let code = new_code(wasm_table_index, state_flags, &entry_points);
+        let code_bytes = page_code_bytes.remove(&p).unwrap();
+        let code = new_code(wasm_table_index, state_flags, &entry_points, *code_bytes);
         page_info.insert(
             p,
             PageInfo {
@@ -1164,6 +1229,9 @@ fn jit_analyze_and_generate(
         wasm_table_index,
         CompilingPageState::Compiling { pages: page_info },
     ));
+    for &p in &page_list {
+        sync_page_has_code(ctx, p);
+    }
 
     let phys_addr = page.to_address();
 
@@ -1199,11 +1267,25 @@ pub fn codegen_finalize_finished(
             dbg_assert!(false);
             return;
         },
-        Some((in_progress_wasm_table_index, CompilingPageState::CompilingWritten)) => {
+        Some((in_progress_wasm_table_index, CompilingPageState::CompilingWritten { pages })) => {
             dbg_assert!(wasm_table_index == in_progress_wasm_table_index);
 
             profiler::stat_increment(stat::INVALIDATE_MODULE_WRITTEN_WHILE_COMPILED);
             free_wasm_table_index(&mut ctx, wasm_table_index);
+            // the pages were write-tracked for the compile; those without compiled code no longer
+            // need to be
+            for p in pages {
+                sync_page_has_code(&ctx, p);
+                if !jit_page_has_code(p) {
+                    cpu::tlb_set_has_code(p, false);
+                }
+                // a page written while its code was being compiled mixes code and hot data;
+                // back off its next compile like an invalidated one
+                ctx.volatile_pages
+                    .entry(p)
+                    .and_modify(|n| *n = n.saturating_add(1))
+                    .or_insert(1);
+            }
             check_jit_state_invariants(&mut ctx);
             return;
         },
@@ -1242,6 +1324,11 @@ pub fn codegen_finalize_finished(
             info.hidden_wasm_table_indices
                 .push(old_entry.wasm_table_index);
             check_for_unused_wasm_table_index.insert(old_entry.wasm_table_index);
+            // the older module stays reachable through hidden_wasm_table_indices, so its bytes
+            // stay write-tracked
+            for i in 0..64 {
+                info.code.code_bytes[i] |= old_entry.code.code_bytes[i];
+            }
             // the loop above pointed every live TLB entry for this page at the new table; make
             // sure nothing still refers to the old one before it is freed
             clear_tlb_code_pointing_to(&old_entry.code);
@@ -2243,24 +2330,18 @@ pub fn jit_increase_hotness_and_maybe_compile(
     let mut ctx = get_jit_state();
     let is_compiling = ctx.compiling.is_some();
     let page = Page::page_of(phys_address);
-    let mut is_new_page = false;
+    let threshold = JIT_THRESHOLD << ctx.volatile_pages.get(&page).map_or(0, |&n| n.min(6));
     let (hotness, entry_points) = ctx.entry_points.entry(page).or_insert_with(|| {
-        cpu::tlb_set_has_code(page, true);
         profiler::stat_increment(stat::RUN_INTERPRETED_NEW_PAGE);
-        is_new_page = true;
         (0, HashSet::default())
     });
-    if is_new_page {
-        let p = page.to_u32() as usize;
-        unsafe { PAGE_HAS_CODE[p >> 5] |= 1 << (p & 31) };
-    }
 
     if !is_near_end_of_page(phys_address) {
         entry_points.insert(phys_address as u16 & 0xFFF);
     }
 
     *hotness += heat;
-    if *hotness >= JIT_THRESHOLD {
+    if *hotness >= threshold {
         if is_compiling {
             return;
         }
@@ -2326,6 +2407,7 @@ fn free_wasm_table_index(ctx: &mut JitState, wasm_table_index: WasmTableIndex) {
 /// Register a write in this page: Delete all present code
 fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
     let mut did_have_code = false;
+    let mut had_compiled_code = false;
 
     if let Some(PageInfo {
         wasm_table_index,
@@ -2337,6 +2419,11 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
     {
         profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_CODE);
         did_have_code = true;
+        had_compiled_code = true;
+        ctx.volatile_pages
+            .entry(page)
+            .and_modify(|n| *n = n.saturating_add(1))
+            .or_insert(1);
 
         // TLB entries may still point at this page's table; the TLB scan in free() catches them
         // (same wasm_table_index), but be explicit since `code` is dropped at the end of this
@@ -2419,7 +2506,12 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
             match &ctx.compiling {
                 Some((index, CompilingPageState::Compiling { pages })) => {
                     if pages.contains_key(&page) {
-                        ctx.compiling = Some((*index, CompilingPageState::CompilingWritten));
+                        ctx.compiling = Some((
+                            *index,
+                            CompilingPageState::CompilingWritten {
+                                pages: pages.keys().copied().collect(),
+                            },
+                        ));
                     }
                 },
                 _ => {},
@@ -2439,7 +2531,9 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
     dbg_assert!(!jit_page_has_code_ctx(ctx, page));
     sync_page_has_code(ctx, page);
 
-    if did_have_code {
+    // only pages with compiled code had TLB_HAS_CODE set (a page being compiled keeps it until
+    // codegen_finalize_finished discards the module)
+    if had_compiled_code {
         cpu::tlb_set_has_code(page, false);
     }
 
@@ -2463,28 +2557,56 @@ pub fn jit_dirty_cache(start_addr: u32, end_addr: u32) {
 #[no_mangle]
 pub fn jit_dirty_page(page: Page) { jit_dirty_page_ctx(&mut get_jit_state(), page) }
 
-/// dirty pages in the range of start_addr and end_addr, which must span at most two pages
-pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
-    dbg_assert!(start_addr < end_addr);
-
-    let start_page = Page::page_of(start_addr);
-    let end_page = Page::page_of(end_addr - 1);
-
+/// responsive-wfw311: a write of `len` bytes at physical `start`. Compiled code in the touched
+/// page(s) is invalidated only if the write hits bytes it was decoded from; a page being compiled
+/// is marked written on the same condition. Returns whether anything was invalidated. Pages that
+/// merely have entry points are left alone (see PAGE_HAS_CODE).
+pub fn jit_dirty_range(start: u32, len: u32) -> bool {
     let mut ctx = get_jit_state();
-    jit_dirty_page_ctx(&mut ctx, start_page);
+    let mut dirtied = false;
+    let mut addr = start;
+    let end = start + len;
+    while addr < end {
+        let page = Page::page_of(addr);
+        let page_end = page.to_address() + 0x1000;
+        let to = u32::min(end, page_end);
+        let (from_off, to_off) = (addr & 0xFFF, to - page.to_address());
 
-    // Note: This can't happen when paging is enabled, as writes across
-    //       boundaries are split up on two pages
-    if start_page != end_page {
-        dbg_assert!(start_page.to_u32() + 1 == end_page.to_u32());
-        jit_dirty_page_ctx(&mut ctx, end_page);
+        let hit_module = match ctx.pages.get(&page) {
+            Some(info) => code_bytes_overlap(&info.code.code_bytes, from_off, to_off),
+            None => false,
+        };
+        if hit_module {
+            jit_dirty_page_ctx(&mut ctx, page);
+            dirtied = true;
+        }
+        else {
+            match &ctx.compiling {
+                Some((index, CompilingPageState::Compiling { pages })) => {
+                    if let Some(info) = pages.get(&page) {
+                        if code_bytes_overlap(&info.code.code_bytes, from_off, to_off) {
+                            ctx.compiling = Some((
+                                *index,
+                                CompilingPageState::CompilingWritten {
+                                    pages: pages.keys().copied().collect(),
+                                },
+                            ));
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+        addr = to;
     }
+    dirtied
 }
 
 #[no_mangle]
 pub fn jit_clear_cache_js() { jit_clear_cache(&mut get_jit_state()) }
 
 fn jit_clear_cache(ctx: &mut JitState) {
+    ctx.volatile_pages.clear();
     let mut pages_with_code = HashSet::default();
 
     for &p in ctx.entry_points.keys() {
@@ -2496,6 +2618,25 @@ fn jit_clear_cache(ctx: &mut JitState) {
 
     for page in pages_with_code {
         jit_dirty_page_ctx(ctx, page);
+    }
+}
+
+/// Diagnostics: what=0 hotness, 1 number of entry points, 2 has a module (bit 0) with its state
+/// flags in bits 1.., 3 invalidation count (volatile_pages), 4 number of module entry points
+#[no_mangle]
+pub fn pv_dbg_page_info(page: u32, what: u32) -> u32 {
+    let ctx = get_jit_state();
+    let page = Page::of_u32(page);
+    match what {
+        0 => ctx.entry_points.get(&page).map_or(0, |e| e.0),
+        1 => ctx.entry_points.get(&page).map_or(0, |e| e.1.len() as u32),
+        2 => ctx
+            .pages
+            .get(&page)
+            .map_or(0, |p| 1 | p.state_flags.to_u32() << 1),
+        3 => ctx.volatile_pages.get(&page).map_or(0, |&n| n as u32),
+        4 => ctx.pages.get(&page).map_or(0, |p| p.entry_points.len() as u32),
+        _ => 0,
     }
 }
 
