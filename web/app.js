@@ -529,7 +529,17 @@ function buildKeybar() {
       if (typeof k[1] === "string") { sticky[k[1]] = (sticky[k[1]] + 1) % 3; updateKeybar(); }
       else keybarPress(k[1]);
     };
-    b.addEventListener("touchstart", act, { passive: false });
+    // A key fires on the release of a tap, not on touchstart: a finger that moves is panning the
+    // bar (it is wider than the screen), and preventDefault on touchstart would kill that pan.
+    let t0 = null;
+    b.addEventListener("touchstart", ev => { const t = ev.touches[0]; t0 = { x: t.clientX, y: t.clientY }; }, { passive: true });
+    b.addEventListener("touchend", ev => {
+      const t = ev.changedTouches[0];
+      const moved = !t0 || Math.abs(t.clientX - t0.x) > 8 || Math.abs(t.clientY - t0.y) > 8;
+      t0 = null;
+      if (moved) return;                                   // a pan: let it scroll, keep focus untouched
+      act(ev);
+    }, { passive: false });
     b.addEventListener("mousedown", ev => { if (!("ontouchstart" in window)) act(ev); else ev.preventDefault(); });
     bar.appendChild(b);
   }
@@ -589,7 +599,9 @@ function keyboardUp() {
 /* With the keyboard up, the layer that has the focus is shifted so it sits above it. */
 function keyboardShift() {
   if (!keyboardUp()) return 0;
-  const vh = window.visualViewport.height - safe.t;
+  const bar = $("keybar");
+  const barH = bar && bar.classList.contains("show") ? bar.offsetHeight : 0;
+  const vh = window.visualViewport.height - safe.t - barH;   // the accessory bar covers the bottom of the visible part
   const focused = placed.filter(w => w.kind === "W" || w.kind === "O").slice(-1)[0];
   if (!focused) return 0;
   const bottom = focused.y + focused.hh;
@@ -1608,6 +1620,10 @@ function installTouch() {
 
   c.addEventListener("touchstart", ev => {
     unlockAudio("touchstart");
+    // The user dismissed the keyboard with the keyboard's own key: the input is still focused but
+    // nothing shows, and iOS ignores focus() on an already-focused element. Blur now so the focus
+    // on this tap's release is a fresh one and brings the keyboard back.
+    { const k = $("kbd"); if (k && document.activeElement === k && !softKeyboardShowing()) { k.blur(); kbdLog("touchstart: blur stale focus"); } }
     setGuestCursor(false);
     if (ev.touches.length === 2) {
       noteInput("two-finger start");
