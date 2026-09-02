@@ -1745,7 +1745,7 @@ function installTouch() {
           diag(`scroll start slot=${oneScroll.slot} ${oneScroll.title}`);
         }
       }
-      if (oneScroll.scrolling) {
+      if (oneScroll && oneScroll.scrolling) {
         oneScroll.accX += px - oneScroll.lastX; oneScroll.accY += py - oneScroll.lastY;
         const ny = Math.trunc(oneScroll.accY / SCROLL_STEP), nx = Math.trunc(oneScroll.accX / SCROLL_STEP);
         const send = (dir, n) => { if (oneScroll.slot >= 0) sendCommand(CMD_SCROLL, oneScroll.slot | dir << 8 | Math.min(15, n) << 12); noteInput(`scroll ${dir} ${n}`); };
