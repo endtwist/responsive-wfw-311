@@ -1008,6 +1008,7 @@ function placeLayers(src) {
   const screenW = src.width;
   const c = view.scale;                              // chrome scale: same as the desktop's
   layers.forEach((L, i) => {
+    let holeCentre = null;
     const key = layerKey(L);
     // A dialog owned by the shell already shows in the desktop column at desktop scale, and
     // PVMON reflows it to fit there; a second copy as a layer would be a double image.
@@ -1059,7 +1060,10 @@ function placeLayers(src) {
       if (owner) {
         const ox0 = owner.gx + owner.px, oy0 = owner.gy + owner.py;
         const overlaps = L.wx < ox0 + owner.vw && L.wx + L.ww > ox0 && L.wy < oy0 + owner.vh && L.wy + L.wh > oy0;
-        if (overlaps) {
+        // Coincident only when the owner is shown near 1:1; a dialog inside a 0.3x-scaled owner
+        // (Paintbrush's save prompt in a 1280-wide window) would be unreadable, so it is drawn as
+        // its own layer centred on its copy instead; the owner's clip hole stays under it.
+        if (overlaps && owner.zs >= 0.8) {
           const zs = owner.zs;
           const hw = Math.round(L.ww * zs), hh = Math.round(L.wh * zs);
           const x = Math.round(owner.x + owner.hl + (L.wx - ox0) * zs);
@@ -1067,6 +1071,11 @@ function placeLayers(src) {
           out.push({ ...L, key, s: zs, c: zs, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
                      inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, transient: true, coincident: true });
           return;
+        }
+        if (overlaps) {
+          // centre of the dialog's copy inside the scaled owner, in host pixels
+          holeCentre = { x: owner.x + owner.hl + (L.wx + L.ww / 2 - ox0) * owner.zs,
+                         y: owner.y + owner.ht + (L.wy + L.wh / 2 - oy0) * owner.zs };
         }
       }
     }
@@ -1094,7 +1103,10 @@ function placeLayers(src) {
          so Program Manager's caption stays reachable behind it; a layer taller than that room is
          top-aligned. The user can still drag it anywhere, including off the edges. */
       const capStrip = Math.round(shell.cap * c) + Math.round(inset.l * c);
-      if (owner) {
+      if (owner && holeCentre) {
+        p = layerPos[key] = { x: Math.max(0, Math.min(vw - hw, Math.round(holeCentre.x - hw / 2))),
+                              y: Math.max(0, Math.min(vh - hh, Math.round(holeCentre.y - hh / 2))) };
+      } else if (owner) {
         // A dialog the guest placed clear of its owner goes below the owner here too, when there is
         // room, so the owner stays visible (a Save prompt with its document, an Open box with the
         // recorder); otherwise centred on the owner.
