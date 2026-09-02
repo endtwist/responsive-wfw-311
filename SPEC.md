@@ -1702,3 +1702,21 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   build-image.sh (SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER) plus
   message-box-only launches (PRINTMAN with the spooler off). PVW carries no fixed-layout flag yet,
   so the set is hardcoded; a trailing token on PVW/PVO would replace it.
+### 2026-09-02 — launch timeouts after a close: recycled window handles (PVMON v27)
+- The pane tour's `CONTROL` (after `WINFILE`) and `MPLAYER` (after `SOUNDREC`) launch timeouts: Win16
+  recycles window handles quickly, so the new program's main window got the handle the hook had just
+  marked dead (`HCBT_DESTROYWND`), PVMON skipped it and never published it. `HCBT_CREATEWND` now clears
+  the mark for that handle.
+- The hook's own publish (dialog came or went) now sets a dirty flag (`PvHookTakeDirty`); PVMON
+  publishes again on its next poll even when its fingerprint is unchanged, so the host never keeps
+  the hook's snapshot as the last word (Recorder/DOS box "still published" after closing).
+- Self-centred dialog programs (Task List) are moved to the top of their column at `HCBT_ACTIVATE`
+  before the first report (the check no longer requires the window to be visible yet): tour `slot`
+  passes.
+- Headless tour `WINFILE,CONTROL,SOUNDREC,MPLAYER,RECORDER,TASKMAN,PRINTMAN,DOSPRMPT`: pass=45; the
+  `fit` failures are the documented fixed-layout programs; `DOSPRMPT close` fails because the tour
+  answers every post-close dialog with **N**, and WinOldAp's "Application still active. Choose OK to
+  end it." needs **Enter** (the box is dismissed, the DOS window stays) — a selftest.js change.
+- PRINTMAN `scale=0.793` on the pane: the guest reports the re-laid box as 352x225 with a 342x175
+  client (dialog frame 5 px); host-side scale for a 342-wide client at c=1.065 should be >1, so the
+  scaling is a compositor question (margins/insets for dialog frames), not a rect mismatch.

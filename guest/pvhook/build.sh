@@ -6,6 +6,6 @@ W=$(cd ../.. && pwd)/tools/watcom.sh
 ( cd build && $W wcc -bt=windows -bd -ms -zW -zu -zc -ox -zq -i=/watcom/h -i=/watcom/h/win pvhook.c \
   && { [ -f pvhook.o ] && mv pvhook.o pvhook.obj || true; } \
   && $W wlink system windows_dll name PVHOOK.DLL option heapsize=1024 file pvhook.obj \
-       export PvCbtProc,PvCwpProc,PvMouseProc,PvHookInstall,PvHookRemove,PvHookSetShell,PvHookIsDead,WEP \
+       export PvCbtProc,PvCwpProc,PvMouseProc,PvHookInstall,PvHookRemove,PvHookSetShell,PvHookIsDead,PvHookTakeDirty,WEP \
        library /watcom/lib286/win/windows.lib libpath /watcom/lib286 libpath /watcom/lib286/win )
 ls -la build/PVHOOK.DLL
