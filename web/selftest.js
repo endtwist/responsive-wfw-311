@@ -239,7 +239,9 @@ export async function tour(env, opts = {}) {
       row.tLaunch = Math.round(performance.now() - ta);
       if (!L) {
         const x = st.layers.find(l => l.kind === "X");
-        row.launch = x ? "fail:noslot" : "fail:timeout";
+        // "pvmon: run FOO.EXE -> N": WinExec's return, below 32 is an error (2 = file not found)
+        const we = /-> (\d+)$/.exec(st.runs[st.runs.length - 1] || "");
+        row.launch = x ? "fail:noslot" : we && +we[1] < 32 ? `fail:winexec=${we[1]}` : "fail:timeout";
         row.alive = (await alive()) ? "pass" : "fail";
         if (row.alive === "fail") dead = true;
         // whatever did appear is closed so the next app starts clean
