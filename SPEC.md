@@ -1142,3 +1142,6 @@ iOS keyboard (needs a gesture map or a hardware keyboard).
 ### 2026-09-02 — keyboard accessory bar verified
 - `/notepad?keybar=1` in the pane: `#keybar` shown, docked at `bottom:0` of the visual viewport; Alt+F opened Notepad's File menu (`T:#32768` layer present), a synthetic `touchstart` on the bar's **Esc** button closed it (layer list back to `S`,`W`). The `#kbd` input keeps focus because the button handlers `preventDefault` on touchstart.
 - TTY.DRV (Generic/Text "PDF Printer") staged in `image/changes/system/`.
+
+### 2026-09-02 — DOS-VM speed merged (v86 rust)
+- Merged worktree branch `worktree-agent-a23863c66d4768c09` (adaptive idle `pv_idle_set(mode,limit)` default 2/20000; flat-compatible JIT modules; `PAGE_HAS_CODE` bitmap + FastHasher on TLB miss; mixed code/data page hotness kept + volatile backoff; byte-granular SMC off by default). Headless: DOS box 29 → 66 MIPS throughput, idle DOS box halts. Conflict in `instructions.rs` resolved in favour of the adaptive version (it keeps the IF=1 guard). 43/43 banked-vga checks pass; DOS box launches from the snapshot in the pane and `pv_idle_stat` shows the idle box mostly halted.
