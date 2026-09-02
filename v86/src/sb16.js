@@ -192,6 +192,10 @@ export function SB16(cpu, bus)
     this.dsp_version_major = undefined;
     this.dsp_version_minor = undefined;
     bus.register("sb16-dsp-version", function(v) { this.dsp_version_major = v[0]; this.dsp_version_minor = v[1]; }, this);
+    // responsive-wfw311: guest-visible DSP/IRQ trace on the console (bus "sb16-trace" true/false),
+    // for watching a driver's detection sequence in a release build where dbg_log is compiled out.
+    this.trace = false;
+    bus.register("sb16-trace", function(v) { this.trace = !!v; }, this);
 
     // IO Ports.
     // http://homepages.cae.wisc.edu/~brodskye/sb16doc/sb16doc.html#DSPPorts
@@ -502,6 +506,7 @@ SB16.prototype.port2xA_read = function()
     {
         this.read_buffer_lastvalue = this.read_buffer.shift();
     }
+    if(this.trace) console.log("[sb16] 2xA read -> " + h(this.read_buffer_lastvalue));
     dbg_log(" <- " + this.read_buffer_lastvalue + " " + h(this.read_buffer_lastvalue) + " '" + String.fromCharCode(this.read_buffer_lastvalue) + "'", LOG_SB16);
     return this.read_buffer_lastvalue;
 };
@@ -535,6 +540,7 @@ SB16.prototype.port2xE_read = function()
     dbg_log("22E read: read-buffer status / irq 8bit ack.", LOG_SB16);
     if(this.irq_triggered[SB_IRQ_8BIT])
     {
+        if(this.trace) console.log("[sb16] 2xE read: 8-bit irq acknowledged");
         this.lower_irq(SB_IRQ_8BIT);
     }
     var ready = this.read_buffer.length && !this.dsp_highspeed;
@@ -607,6 +613,7 @@ SB16.prototype.port2x5_write = function(value)
 SB16.prototype.port2x6_write = function(yesplease)
 {
     dbg_log("226 write: reset = " + h(yesplease), LOG_SB16);
+    if(this.trace) console.log("[sb16] 2x6 write (reset) = " + h(yesplease));
 
     if(this.dsp_highspeed)
     {
@@ -659,6 +666,7 @@ SB16.prototype.port2xC_write = function(value)
     {
         // New command.
         dbg_log("22C write: command = " + h(value), LOG_SB16);
+        if(this.trace) console.log("[sb16] 2xC command " + h(value));
         this.command = value;
         this.write_buffer.clear();
         this.command_size = DSP_COMMAND_SIZES[value];
@@ -667,6 +675,7 @@ SB16.prototype.port2xC_write = function(value)
     {
         // More data for current command.
         dbg_log("22C write: data: " + h(value), LOG_SB16);
+        if(this.trace) console.log("[sb16] 2xC data " + h(value) + " (cmd " + h(this.command) + ")");
         this.write_buffer.push(value);
     }
 
@@ -1742,6 +1751,9 @@ SB16.prototype.dma_transfer_start = function()
 
     this.dma_bytes_count = this.dma_sample_count * this.bytes_per_sample;
     this.dma_bytes_block = SB_DMA_BLOCK_SAMPLES * this.bytes_per_sample;
+    if(this.trace) console.log("[sb16] dma start: ch " + this.dma_channel + " samples " + this.dma_sample_count +
+        " rate " + this.sampling_rate + " autoinit " + this.dma_autoinit + " 16bit " + this.dsp_16bit +
+        " stereo " + this.dsp_stereo + " masked " + this.dma.channel_mask[this.dma_channel]);
 
     // Ensure block size is small enough but not too small, and is divisible by 4
     var max_bytes_block = Math.max(this.dma_bytes_count >> 2 & ~0x3, 32);
@@ -1857,6 +1869,7 @@ SB16.prototype.dac_send = function()
 SB16.prototype.raise_irq = function(type)
 {
     dbg_log("raise irq", LOG_SB16);
+    if(this.trace) console.log("[sb16] raise irq " + this.irq + " type " + type);
     this.irq_triggered[type] = 1;
     this.cpu.device_raise_irq(this.irq);
 };
@@ -1864,6 +1877,7 @@ SB16.prototype.raise_irq = function(type)
 SB16.prototype.lower_irq = function(type)
 {
     dbg_log("lower irq", LOG_SB16);
+    if(this.trace && this.irq_triggered[type]) console.log("[sb16] lower irq " + this.irq + " type " + type);
     this.irq_triggered[type] = 0;
     this.cpu.device_lower_irq(this.irq);
 };
