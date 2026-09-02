@@ -10,8 +10,9 @@
  * server to send `Service-Worker-Allowed: /` for this file; the dev server does. Only installed
  * over https, never on localhost or the LAN (see app.js).
  */
-const CACHE = "responsive-wfw311-v4";
+const CACHE = "responsive-wfw311-v5";
 const PRECACHE = ["/web/index.html", "/web/app.js", "/web/manifest.webmanifest", "/web/icon-192.png",
+                  "/web/apple-touch-icon.png", "/web/favicon.png",
                   "/v86/build/v86.wasm", "/v86/bios/seabios.bin", "/v86/bios/vgabios.bin"];
 
 self.addEventListener("install", e => {

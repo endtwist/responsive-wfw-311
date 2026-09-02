@@ -64,7 +64,9 @@ python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitl
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
 # File Manager remembers its window from its last run, which on this image was a 1024x768 session;
 # opened in a 640-column slot that makes it a tall sliver scaled to nothing. Give it a sane default.
-printf '[Settings]\r\nWindow=0,0,%s,600, ,0\r\nFace=MS Sans Serif\r\nSize=10\r\n' $W > $TMP/WINFILE.INI
+# Window= x,y,w,h, , ,showcmd; dir1= x,y,w,h,split,-1,showcmd(3 = maximised),0,view,sort,attr,path
+# (format read back from a WINFILE.INI the guest itself saved after maximising the directory window)
+printf '[Settings]\r\nWindow=640,0,%s,600, , ,1\r\nFace=MS Sans Serif\r\nSize=10\r\ndir1=0,0,%s,400,-1,-1,3,0,201,1905,71,C:\\*.*\r\n' $W $(( W - 8 )) > $TMP/WINFILE.INI
 mcopy -o $M $TMP/WINFILE.INI ::/WINDOWS/WINFILE.INI
 # Programs that restore a saved window rectangle after creation (Program Manager, Windows Help
 # above) would be born in the slot and then move and resize in steps, each step captured by the

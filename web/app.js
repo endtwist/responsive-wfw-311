@@ -483,11 +483,12 @@ async function finishPrintJob(b64) {
    sticky for one key. The bar is only visible while the soft keyboard is up, docked to its top
    edge (the visual viewport's bottom), and it never takes the focus away from the hidden input. */
 const KEYBAR = [
-  ["⌄", "hide"], null,
-  ["Esc", [0x01]], ["Tab", [0x0F]], ["Ctrl", "ctrl"], ["Alt", "alt"], null,
-  ["←", [0xE0, 0x4B]], ["↑", [0xE0, 0x48]], ["↓", [0xE0, 0x50]], ["→", [0xE0, 0x4D]], null,
-  ["Home", [0xE0, 0x47]], ["End", [0xE0, 0x4F]], ["PgUp", [0xE0, 0x49]], ["PgDn", [0xE0, 0x51]], ["Ins", [0xE0, 0x52]], ["Del", [0xE0, 0x53]], null,
-  ["F1", [0x3B]], ["F2", [0x3C]], ["F3", [0x3D]], ["F4", [0x3E]], ["F5", [0x3F]], ["F6", [0x40]], ["F7", [0x41]], ["F8", [0x42]], ["F9", [0x43]], ["F10", [0x44]],
+  ["Esc", [0x01]], ["Tab", [0x0F]],
+  ["←", [0xE0, 0x4B], "arrow"], ["↑", [0xE0, 0x48], "arrow"], ["↓", [0xE0, 0x50], "arrow"], ["→", [0xE0, 0x4D], "arrow"],
+  ["Ctrl", "ctrl"], ["Alt", "alt"], ["Del", [0xE0, 0x53]], null,
+  ["F1", [0x3B]], ["F2", [0x3C]], ["F3", [0x3D]], ["F4", [0x3E]], ["F5", [0x3F]], ["F6", [0x40]], ["F7", [0x41]], ["F8", [0x42]], ["F9", [0x43]], ["F10", [0x44]], null,
+  ["Home", [0xE0, 0x47]], ["End", [0xE0, 0x4F]], ["PgUp", [0xE0, 0x49]], ["PgDn", [0xE0, 0x51]], ["Ins", [0xE0, 0x52]],
+  ["⌄", "hide"],
 ];
 /* Modifier state: 0 off, 1 armed for the next key (one tap), 2 locked (a second tap; stays until
    tapped again). Shown on the bar as `.on` and `.lock`. */
@@ -526,9 +527,10 @@ function buildKeybar() {
     const b = document.createElement("button");
     b.textContent = k[0]; b.dataset.key = k[0];
     if (k[1] === "hide") b.className = "hide";
+    if (k[2]) b.className = k[2];
     const act = ev => {
       ev.preventDefault();                                 // keep the hidden input focused
-      if (k[1] === "hide") { hideKeyboard("bar"); return; }
+      if (k[1] === "hide") { keybarOpen = false; hideKeyboard("bar"); return; }
       if (typeof k[1] === "string") { sticky[k[1]] = (sticky[k[1]] + 1) % 3; updateKeybar(); }
       else keybarPress(k[1]);
     };
@@ -565,14 +567,33 @@ function updateKeybar() {
     b.classList.toggle("on", st === 1); b.classList.toggle("lock", st === 2);
   }
   const up = keyboardUp();
-  bar.classList.toggle("show", up);
+  // Folded by default: with the keyboard up only a small tab shows; tapping it opens the bar.
+  const tab = $("keybartab");
+  bar.classList.toggle("show", up && keybarOpen);
+  if (tab) { tab.classList.toggle("show", up); tab.classList.toggle("open", keybarOpen); }
   if (up) {
     const vv = window.visualViewport;
-    // dock to the bottom of the visible viewport, i.e. the top edge of the keyboard
+    // dock to the bottom of the visible viewport, i.e. the top edge of the keyboard (on Chrome for
+    // iOS that is the top of its own accessory row: it is part of the keyboard's height)
+    const bottom = window.innerHeight - (vv.offsetTop + vv.height);
     bar.style.top = "auto";
-    bar.style.bottom = (window.innerHeight - (vv.offsetTop + vv.height)) + "px";
-  }
+    bar.style.bottom = bottom + "px";
+    if (tab) tab.style.bottom = (bottom + (keybarOpen ? bar.offsetHeight : 0)) + "px";
+    const r = bar.getBoundingClientRect();
+    const line = `bar=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} vv=${Math.round(vv.offsetTop)}+${Math.round(vv.height)}/${innerHeight} scale=${vv.scale} shift=${keyboardShift()} guestRoom=${Math.round(r.top - safe.t)}px mode=${KBD_MODE}`;
+    if (line !== keybarLogged) { keybarLogged = line; diag("keybar " + line); }
+  } else keybarLogged = "";
 }
+let keybarLogged = "";
+let keybarOpen = false;
+let lateTapUntil = 0;
+(function installKeybarTab() {
+  const tab = $("keybartab");
+  if (!tab) return;
+  const flip = ev => { ev.preventDefault(); keybarOpen = !keybarOpen; updateKeybar(); pump && pump(); };
+  tab.addEventListener("touchend", flip, { passive: false });
+  tab.addEventListener("mousedown", ev => { if (!("ontouchstart" in window)) flip(ev); else ev.preventDefault(); });
+})();
 if (window.visualViewport) { window.visualViewport.addEventListener("resize", updateKeybar); window.visualViewport.addEventListener("scroll", updateKeybar); }
 document.addEventListener("focusin", () => setTimeout(updateKeybar, 50));
 document.addEventListener("focusout", () => setTimeout(updateKeybar, 50));
@@ -584,6 +605,38 @@ setInterval(updateKeybar, 1000);                       // belt and braces: keybo
    end of a tap, by which time PVMON has usually reported the new focus. */
 let wantKeyboard = false, keyboardHeld = false;
 let kbdBlurTimer = 0, kbdSuppressedUntil = 0;
+/* The element that summons the keyboard. Chrome for iOS stacks its own autofill accessory row
+   (passwords, cards, location, dismiss) on top of any focused form field, about 70 px that we
+   cannot draw over; Safari has its own ‹ › Done row. Which element kinds avoid it is a per-browser
+   question, so the kind is selectable (?kbd=) and logged, and the default is the one most likely
+   to be treated as "not a form field": a contenteditable element.
+     ce      <div contenteditable>            (default)
+     input   <input type=text autocomplete=off>
+     otc     <input type=text autocomplete=one-time-code>   (hides password suggestions in Chrome)
+     search  <input type=search inputmode=text>
+     url     <input type=url inputmode=text>
+     none    <input inputmode=none>           (no soft keyboard at all: hardware keyboards only)
+   All of them raise input/beforeinput/keydown, so the typed-character path reads either .value or
+   .textContent (kbdRead/kbdClear). */
+const KBD_MODE = (params.get("kbd") || "ce").toLowerCase();
+function kbdRead(el) { return el.isContentEditable ? el.textContent : (el.value || ""); }
+function kbdClear(el) { if (el.isContentEditable) el.textContent = ""; else el.value = ""; }
+(function makeKeyboardElement() {
+  const old = document.getElementById("kbd");
+  if (!old) return;
+  let el;
+  if (KBD_MODE === "ce") { el = document.createElement("div"); el.contentEditable = "true"; el.setAttribute("role", "textbox"); }
+  else {
+    el = document.createElement("input");
+    el.type = KBD_MODE === "search" || KBD_MODE === "url" ? KBD_MODE : "text";
+    el.setAttribute("autocomplete", KBD_MODE === "otc" ? "one-time-code" : "off");
+  }
+  el.setAttribute("inputmode", KBD_MODE === "none" ? "none" : "text");
+  el.id = "kbd";
+  for (const [k, v] of [["autocorrect", "off"], ["autocapitalize", "off"], ["spellcheck", "false"], ["enterkeyhint", "enter"], ["aria-label", "keyboard input"], ["data-mode", KBD_MODE]]) el.setAttribute(k, v);
+  old.replaceWith(el);                                    // name-less on purpose: not an autofill target
+  report("kbd", `mode=${KBD_MODE} tag=${el.tagName} ua=${navigator.userAgent}`);
+})();
 const kbdTrace = [];
 function kbdLog(msg) {
   const vv = window.visualViewport;
@@ -603,12 +656,17 @@ function keyboardUp() {
 function keyboardShift() {
   if (!keyboardUp()) return 0;
   const bar = $("keybar");
-  const barH = bar && bar.classList.contains("show") ? bar.offsetHeight : 0;
-  const vh = window.visualViewport.height - safe.t - barH;   // the accessory bar covers the bottom of the visible part
+  const vv = window.visualViewport;
+  // The room above our bar, in layout coordinates: the bar sits at the bottom of the visual
+  // viewport (on top of the browser's own accessory row, which is inside the keyboard's height).
+  const barTop = bar && bar.classList.contains("show") ? bar.getBoundingClientRect().top : vv.offsetTop + vv.height;
+  const vh = Math.max(120, barTop - safe.t);
   const focused = placed.filter(w => w.kind === "W" || w.kind === "O").slice(-1)[0];
   if (!focused) return 0;
+  // The host does not know where the caret is; the window's bottom edge (where a DOS box or a
+  // Notepad file being typed into ends) is placed just above the bar, never past its own caption.
   const bottom = focused.y + focused.hh;
-  return bottom > vh ? Math.min(focused.y, bottom - vh + 8) : 0;
+  return bottom > vh ? Math.min(focused.y, bottom - vh + 4) : 0;
 }
 /* Focus the hidden input. Only works on iOS inside a touch gesture handler (touchend of the tap),
    so the touch code calls this synchronously; calls from elsewhere are harmless no-ops there and
@@ -620,7 +678,7 @@ function focusKeyboard(reason) {
   clearTimeout(kbdBlurTimer);
   const wasActive = document.activeElement === inp;
   if (wasActive && !keyboardUp() && touchDevice) inp.blur();
-  inp.value = "";
+  kbdClear(inp);
   try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
   kbdLog(`focus try (${reason}) wasActive=${wasActive}`);
   setTimeout(() => kbdLog(`focus result (${reason})`), 350);
@@ -636,6 +694,7 @@ function guestWantsKeyboard(want) {
     clearTimeout(kbdBlurTimer);
     if (performance.now() < kbdSuppressedUntil) { kbdLog("PVK 1 (suppressed after hide)"); return; }
     kbdLog("PVK 1");
+    if (performance.now() < lateTapUntil && document.activeElement !== $("kbd")) { lateTapUntil = 0; focusKeyboard("late"); return; }
     syncKeyboard();
   } else {
     wantKeyboard = false;
@@ -659,7 +718,7 @@ function speculativeRelease() {
 function syncKeyboard() {
   const inp = $("kbd");
   if (!inp) return;
-  if ((wantKeyboard || keyboardHeld) && document.activeElement !== inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
+  if ((wantKeyboard || keyboardHeld) && document.activeElement !== inp) { kbdClear(inp); inp.focus({ preventScroll: true }); }
   else if (!wantKeyboard && !keyboardHeld && document.activeElement === inp) { inp.blur(); kbdLog("blur"); }
   setTimeout(updateKeybar, 100);
 }
@@ -863,9 +922,18 @@ function placeLayers(src) {
           ? Math.round(owner.y + (L.wy - owner.wy) * c)                   // hangs off the chrome
           : Math.round(owner.y + owner.ht + (L.wy - owner.gy) * owner.s);
       } else { x = Math.round(view.ox + L.wx * c); y = Math.round(L.wy * c); }
-      x = Math.max(0, Math.min(vw - hw, x));
-      y = Math.max(0, Math.min(vh - hh, y));
-      out.push({ ...L, key, s: c, c, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
+      /* Shown as far as possible: anchored where it popped up, shifted up/left so the whole of it
+         fits when it can. A popup taller or wider than the viewport (a long View menu, a combo
+         drop-down) cannot scroll in the guest, so the user pans it instead: layerPos holds the pan,
+         clamped so the layer's far edge can be brought into view and no further (never a gap). */
+      x = hw > vw ? 0 : Math.max(0, Math.min(vw - hw, x));        // too wide: start at its left edge
+      y = hh > vh ? 0 : Math.max(0, Math.min(vh - hh, y));        // too tall: start at its top, pan for the rest
+      const pan = layerPos[key];
+      if (pan) {
+        x = hw > vw ? Math.max(vw - hw, Math.min(0, x + pan.dx)) : x;
+        y = hh > vh ? Math.max(vh - hh, Math.min(0, y + pan.dy)) : y;
+      }
+      out.push({ ...L, key, s: c, c, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0, ax: x - (pan ? pan.dx : 0), ay: y - (pan ? pan.dy : 0),
                  inset: { l: 0, t: 0, b: 0 }, capRow: 0, menuRow: 0, box: 0, transient: true });
       return;
     }
@@ -929,7 +997,9 @@ function placeLayers(src) {
     // A window that fits stays entirely on screen; one that does not may hang off the edges, but
     // never so far that less than a thumb's width of it is left to grab.
     const x = Math.max(40 - hw, Math.min(vw - 40, p.x));   // at least a thumb's width stays on screen
-    const y = Math.max(0, Math.min(vh - Math.round(capRow * c), p.y));
+    // a window taller than the viewport (a dialog on a short landscape screen) may be panned up
+    // until its bottom edge shows, since the guest cannot scroll it; a shorter one keeps its caption on screen
+    const y = Math.max(Math.min(0, vh - hh), Math.min(vh - Math.round(capRow * c), p.y));
     /* Pinch zoom: the frame keeps its fitted size and the client area inside it is shown at a
        larger scale, panned. z = 1 is "fit". */
     const zp = layerZoom[key] || { z: 1, px: 0, py: 0 };
@@ -1458,6 +1528,34 @@ function pressStart(ev) {
     }, 600);
     return "drag";
   }
+  /* A transient (menu, drop-down, switcher) or a dialog that does not fit the viewport is panned by
+     one finger anywhere on it: the guest cannot scroll it, so the layer is moved instead, clamped
+     in placeLayers so its clipped edge can be brought into view and no further. A finger that does
+     not travel is still a click at the pixel under it. */
+  const w = h.win;
+  if (w && (w.transient || w.kind === "O") && !w.shellCopy) {
+    const [vw, vh] = viewport();
+    if (w.hw > vw || w.hh > vh) {
+      const common = { startX: px, startY: py, moved: false, guest: mapThrough(w, px, py), timer: 0, toggled: false, fitW: w.hw <= vw, fitH: w.hh <= vh };
+      if (w.coincident) {
+        /* A dialog drawn coincident with its copy inside the owner's capture must stay coincident, so
+           the owner layer is what pans, bounded so the dialog's clipped edge comes into view and no
+           further (a wide Open box on a portrait phone). */
+        const owner = placed.find(o => o.kind === "W" && o.slot === w.slot && !o.transient);
+        if (!owner) return null;
+        const offX = w.x - owner.x, offY = w.y - owner.y;
+        chromeDrag = { ...common, key: owner.key, pan: "O", base: { x: owner.x, y: owner.y },
+                       bounds: { minX: vw - w.hw - offX, maxX: -offX, minY: vh - w.hh - offY, maxY: -offY } };
+      } else if (w.transient) {
+        chromeDrag = { ...common, key: w.key, pan: "T", base: { ...(layerPos[w.key] || { dx: 0, dy: 0 }) } };
+      } else {
+        chromeDrag = { ...common, key: w.key, pan: "O", base: { x: w.x, y: w.y },
+                       bounds: { minX: vw - w.hw, maxX: 0, minY: vh - w.hh, maxY: 0 } };
+      }
+      diag(`pan start ${w.kind}${w.coincident ? " (owner pans)" : ""} ${w.title} ${w.hw}x${w.hh} in ${vw}x${vh}`);
+      return "drag";
+    }
+  }
   return null;
 }
 
@@ -1465,7 +1563,17 @@ function dragMove(ev) {
   if (!chromeDrag) return false;
   const { px, py } = hostPoint(ev);
   if (Math.hypot(px - chromeDrag.startX, py - chromeDrag.startY) > 6) chromeDrag.moved = true;
-  if (chromeDrag.moved) layerPos[chromeDrag.key] = { x: Math.round(px - chromeDrag.dx), y: Math.round(py - chromeDrag.dy) };
+  if (!chromeDrag.moved) return true;
+  const mx = chromeDrag.fitW ? 0 : Math.round(px - chromeDrag.startX), my = chromeDrag.fitH ? 0 : Math.round(py - chromeDrag.startY);
+  if (chromeDrag.pan === "T") layerPos[chromeDrag.key] = { dx: chromeDrag.base.dx + mx, dy: chromeDrag.base.dy + my };
+  else if (chromeDrag.pan === "O") {
+    const b = chromeDrag.bounds;
+    let x = chromeDrag.base.x + mx, y = chromeDrag.base.y + my;
+    if (!chromeDrag.fitW) x = Math.max(b.minX, Math.min(b.maxX, x)); else x = chromeDrag.base.x;
+    if (!chromeDrag.fitH) y = Math.max(b.minY, Math.min(b.maxY, y)); else y = chromeDrag.base.y;
+    layerPos[chromeDrag.key] = { x: Math.round(x), y: Math.round(y) };
+  }
+  else layerPos[chromeDrag.key] = { x: Math.round(px - chromeDrag.dx), y: Math.round(py - chromeDrag.dy) };
   return true;
 }
 
@@ -1596,7 +1704,15 @@ function installTouch() {
     else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
     else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
     else if (hit && hit.win && KEYBOARD_TITLES.test(title)) why = "title";
-    else if (hit && (hit.kind === "client" || hit.kind === "desktop")) why = "speculative";
+    else if (hit && (hit.kind === "client" || hit.kind === "desktop")) {
+      /* No speculative focus: it flashed the keyboard up and down on every dialog tap. Instead the
+         tap is remembered for a second; if the guest reports PVK 1 in that window (the click landed
+         in an Edit), focus is tried then. iOS may refuse a focus outside the gesture — the result is
+         logged so the phone tells us whether "late" focus works; if it does not, the next tap does. */
+      lateTapUntil = performance.now() + 1000;
+      kbdLog(`tap: deferred (${hit.kind} "${title.slice(0, 20)}")`);
+      return;
+    }
     if (!why) {
       // a tap on a program that does not want text while the keyboard is up: let the guest's PVK 0
       // (focus moved) take it down; nothing to do here
@@ -1605,7 +1721,7 @@ function installTouch() {
     }
     if (performance.now() < kbdSuppressedUntil && why !== "kbtest") { kbdLog("tap: suppressed after hide"); return; }
     focusKeyboard(`${why} "${title.slice(0, 20)}"`);
-    if (why === "speculative" || why === "title") speculativeRelease();
+    if (why === "title") speculativeRelease();
   };
   const up = (ev) => {
     window.pvPhase = "up";
@@ -1727,11 +1843,15 @@ function installTouch() {
 function installKeyboard() {
   const inp = $("kbd");
   buildKeybar(); updateKeybar();
-  $("kbdbtn").onclick = () => { inp.value = ""; inp.focus(); };
-  inp.addEventListener("input", () => {
-    for (const ch of inp.value) emulator.keyboard_send_text(ch);
-    inp.value = "";
+  $("kbdbtn").onclick = () => { kbdClear(inp); inp.focus(); };
+  inp.addEventListener("input", ev => {
+    if (ev.isComposing) return;                          // wait for the composition to end
+    const text = kbdRead(inp);
+    for (const ch of text) if (ch !== "\n" && ch !== "\r") emulator.keyboard_send_text(ch);
+    if (inp.isContentEditable && /\n/.test(text)) emulator.keyboard_send_text("\n");   // Enter in a contenteditable arrives as a newline
+    kbdClear(inp);
   });
+  inp.addEventListener("compositionend", () => { const t = kbdRead(inp); for (const ch of t) emulator.keyboard_send_text(ch); kbdClear(inp); });
   inp.addEventListener("keydown", ev => {
     if (ev.key === "Enter") { emulator.keyboard_send_text("\n"); ev.preventDefault(); }
     if (ev.key === "Backspace") { emulator.bus.send("keyboard-code", 0x0E); emulator.bus.send("keyboard-code", 0x8E); ev.preventDefault(); }

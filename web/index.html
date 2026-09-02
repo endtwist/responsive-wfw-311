@@ -3,14 +3,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#000">
-<!-- Installable: standalone, portrait, full-screen on an iOS home screen. The icon is the Windows
-     logo drawn as guest-style pixels (tools/mkicon.mjs). -->
+<!-- Installable: standalone, portrait, full-screen on an iOS home screen. The icon is the guest's
+     own Windows flag: PROGMAN.EXE RT_ICON 18 (32x32, 16 colours), extracted with tools/ne-icons.py
+     and scaled nearest-neighbour; the touch icon sits on desktop grey since iOS drops alpha. -->
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Windows 3.11">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <title>Responsive Windows for Workgroups 3.11</title>
 <style>
@@ -41,20 +43,30 @@
 /* Keyboard accessory bar: the one piece of host chrome, docked to the top of the soft keyboard
    for the keys iOS does not have (Esc, Tab, arrows, F-keys, Ctrl/Alt). Hidden otherwise. */
 #keybar { position:fixed; left:0; right:0; z-index:3; display:none; background:rgba(28,28,30,.96);
-  border-top:1px solid #3a3a3c; padding:6px 6px calc(6px + env(safe-area-inset-bottom)); overflow-x:auto; white-space:nowrap;
-  -webkit-overflow-scrolling:touch; scrollbar-width:none; font:15px -apple-system, system-ui, sans-serif; user-select:none; -webkit-user-select:none; touch-action:pan-x; }
+  border-top:1px solid #3a3a3c; padding:2px 3px calc(2px + env(safe-area-inset-bottom)); overflow-x:auto; overflow-y:hidden; white-space:nowrap;
+  -webkit-overflow-scrolling:touch; scrollbar-width:none; font:14px -apple-system, system-ui, sans-serif; user-select:none; -webkit-user-select:none; touch-action:pan-x;
+  gap:2px; align-items:center; }
 #keybar::-webkit-scrollbar { display:none; }
-#keybar.show { display:block; }
-#keybar button { display:inline-block; min-width:42px; height:40px; margin:0 3px; padding:0 10px; border:0; border-radius:6px;
-  background:#636366; color:#fff; font:inherit; font-weight:600; vertical-align:middle; }
+#keybartab { position:fixed; right:8px; z-index:3; display:none; height:26px; padding:0 10px; border:0; border-radius:6px 6px 0 0;
+  background:rgba(28,28,30,.92); color:#fff; font:12px -apple-system, system-ui, sans-serif; user-select:none; -webkit-user-select:none; }
+#keybartab.show { display:block; }
+#keybartab.open { background:#0a84ff; }
+#keybar.show { display:flex; }
+/* Dense: 34 px keys, 2 px gaps, no vertical padding beyond the safe area. Esc Tab arrows Ctrl Alt
+   Del come first; the rest is behind the horizontal scroll. The hide key stays pinned at the right. */
+#keybar button { flex:0 0 auto; min-width:34px; height:34px; margin:0; padding:0 7px; border:0; border-radius:5px;
+  background:#636366; color:#fff; font:inherit; font-weight:600; line-height:34px; }
+#keybar button.arrow { min-width:30px; padding:0 4px; }
 #keybar button.on { background:#0a84ff; }
 #keybar button.lock { background:#0a84ff; box-shadow: inset 0 0 0 2px #fff; }
-#keybar button.hide { float:right; background:#3a3a3c; }
+#keybar button.hide { position:sticky; right:0; margin-left:auto; background:#3a3a3c; box-shadow:-6px 0 6px rgba(28,28,30,.96); }
 #keybar button:active { background:#8e8e93; }
-#keybar .gap { display:inline-block; width:10px; }
+#keybar .gap { flex:0 0 6px; }
 </style>
 <canvas id="pres"></canvas>
 <div id="keybar"></div>
+<!-- The bar is folded away by default: this small tab on top of the keyboard opens it. -->
+<button id="keybartab" aria-label="extra keys">⌨ keys</button>
 <div id="screen_container">
   <div style="white-space:pre; font:14px monospace"></div>
   <canvas style="display:none"></canvas>

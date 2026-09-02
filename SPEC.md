@@ -1322,8 +1322,8 @@ in `shots/devicelog.txt`); "phone" items below are what still needs the real dev
   the pre-PVA paint itself could not be caught because the hidden pane has no rAF and the local
   restore completes in ~3 s — phone item (the page should open on the last desktop, not black).
 - **PWA.** `web/manifest.webmanifest` (standalone/fullscreen, portrait, start_url `/`),
-  `apple-mobile-web-app-*` meta, icons `web/icon-192.png`/`icon-512.png` from `tools/mkicon.mjs`
-  (the four-pane flag as VGA pixel art). The service worker is registered only over https and not
+  `apple-mobile-web-app-*` meta, icons `web/icon-192.png`/`icon-512.png` (originally hand-drawn by
+  `tools/mkicon.mjs`; since 2026-09-02 the guest's own flag icon, see below). The service worker is registered only over https and not
   on localhost, with scope `/` (the dev server sends `Service-Worker-Allowed: /` for `/web/sw.js`;
   the https deploy must too, or serve sw.js from the root — the registration falls back to the
   default scope otherwise). `sw.js`: network-first, per-asset precache that tolerates 404s, never
@@ -1456,3 +1456,74 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   `launch=fail:blocked-by=<layers>` and the desktop is cleared before the next app, so one stuck box
   costs one row, not the rest of the run. `close` also checks that no window with the program's
   title is still published anywhere (`fail:still-published`).
+
+### 2026-09-02 — keyboard bar: density, Chrome-iOS autofill row, pan above the bar
+- Phone (Chrome iOS) showed three stacked rows: our bar (~56 px), Chrome's autofill accessory
+  (~70 px), the keyboard; ~380 px of guest left. Bar is now 34 px keys, 2 px gaps, 2 px vertical
+  padding + safe-area inset (39 px total, measured `bar=0,773 375x39` in the pane), flex row with
+  Esc Tab ←↑↓→ Ctrl Alt Del first, F-keys and Home/End/PgUp/PgDn/Ins behind the horizontal scroll,
+  the hide key sticky at the right.
+- The browser's own row cannot be drawn over; whether it appears depends on what kind of element
+  has the focus, which only the device can tell. The element kind is selectable with `?kbd=` and
+  logged (`kbd mode=… tag=… ua=…`): `ce` (contenteditable div, **default** — the candidate most
+  likely to be treated as "not a form field" by Chrome's autofill), `input` (text, autocomplete=off,
+  the old one), `otc` (autocomplete=one-time-code, hides password suggestions in Chrome), `search`,
+  `url` (with inputmode=text), `none` (inputmode=none: no soft keyboard at all). All are name-less.
+  The typed-character path reads `.value` or `.textContent` (`kbdRead`/`kbdClear`), ignores
+  `isComposing` input events and flushes on `compositionend`; Enter in the contenteditable arrives
+  as a newline and is sent as one. Pane: `ab`, `x⏎` -> `a b x \n`. **Phone item:** try
+  `?kbd=ce`, `otc`, `search`, `input` in Chrome iOS and Safari and note which show the autofill row;
+  the winner becomes the default.
+- `keyboardShift()` now pans the focused window's bottom edge to 4 px above *our* bar's real top
+  (`getBoundingClientRect`), which sits at the bottom of the visual viewport, i.e. on top of the
+  browser's row. `updateKeybar` logs `keybar bar=x,y WxH vv=offset+height/innerHeight scale shift
+  guestRoom=<px above the bar> mode=` whenever the geometry changes, for the parked phone.
+### 2026-09-02 — PWA icons are the guest's own Windows flag
+- The hand-drawn pixel-art flag (`tools/mkicon.mjs`, removed) is replaced by the genuine 32x32
+  16-colour Windows logo icon from the disk image: `C:\WINDOWS\PROGMAN.EXE` RT_ICON **18** (the
+  16-colour member of RT_GROUP_ICON 31944, first entry — the "Microsoft Windows" flag in Program
+  Manager's icon browser). `USER.EXE` RT_ICON 3 (group 32647) and `WINVER.EXE` RT_ICON 2 are
+  byte-identical copies. `SHELL.DLL` RT_BITMAP 130 is the opaque 64x64 About-box logo (not used).
+- `tools/ne-icons.py`: lists NE resources; extracts RT_ICON (DIB fragment + AND mask → RGBA PNG)
+  and RT_BITMAP (incl. BI_RLE4/RLE8); `icon` writes one id with `--scale N` (nearest-neighbour
+  integer), `--pad W H`, `--bg RRGGBB`. PNGs are written by hand (zlib), no Pillow needed.
+- Outputs, all integer scales so the pixels stay crisp: `web/icon-192.png` (x6, transparent),
+  `web/icon-512.png` (x16, transparent), `web/icon-512-maskable.png` (x12 centred on desktop grey
+  `#C0C0C0`, inside the 80 % safe zone), `web/apple-touch-icon.png` 180x180 (x5 + 10 px pad on
+  `#C0C0C0`; iOS ignores alpha), `web/favicon.png` 32x32 (the icon as-is). `index.html` links
+  the touch icon and both favicons; the manifest's maskable entry points at the grey variant;
+  `sw.js` precache bumped to v5 with the new files.
+- Reproduce: `mcopy -i image/wfw311-base.img@@16384 ::/WINDOWS/PROGMAN.EXE .` then
+  `python3 tools/ne-icons.py icon PROGMAN.EXE 18 web/icon-512.png --scale 16`.
+### 2026-09-02 — message boxes wrapped natively, File Manager directory window maximised
+- **Print Manager with spooler off** shows only a MessageBox (924 wide on the phone, 629 in the
+  pane): it escaped the clamp because message boxes are fixed-layout dialogs. The hook now re-lays
+  USER's message boxes at `HCBT_ACTIVATE` (before they paint): the text Static is narrowed to the
+  column and its wrapped height measured with `DrawText(DT_CALCRECT|DT_WORDBREAK)`, the buttons
+  move down by the growth and are re-centred, the box becomes ShellWidth wide and taller
+  (`pvhook: message box 629x208 -> 352x225 (text +17)`). Applies to every MessageBox (module USER),
+  e.g. Paintbrush's save prompt; programs' own dialogs are untouched. Spooler stays off.
+- **WINFILE.INI**: format read back from a file the guest saved after maximising its directory
+  window: `Window=x,y,w,h, , ,showcmd` and `dir1=x,y,w,h,split,-1,showcmd,0,view,sort,attr,path`;
+  the image now writes `dir1=0,0,344,400,-1,-1,3,...,C:\*.*` (3 = SW_MAXIMIZE), so File Manager
+  opens with the tree and list filling its 352-wide client ("File Manager - [C:\*.*]").
+- File Manager's seven menus wrap to two rows at the 20 px system font: menus use the system font
+  in 3.1 and there is no per-menu font, so the only native lever is a narrower system font (which
+  would shrink every caption too). Left as is.
+- `node tools/tour.mjs --apps PRINTMAN,WINFILE`: pass=12 fail=0 (PRINTMAN rect 640,0,352,225).
+
+### 2026-09-02 — oversized popups and dialogs pan
+- Win3.1 never scrolls a popup menu, a drop-down or the switcher, and a dialog cannot scroll either;
+  on a phone whatever does not fit was simply clipped. A `T` layer, an owned dialog, or a dialog
+  drawn coincident with its owner that is wider or taller than the viewport is now panned by one
+  finger anywhere on it (`pressStart` -> `chromeDrag.pan`), clamped so the clipped edge can be
+  brought exactly into view and no further; an axis that fits does not move; a finger that does not
+  travel is still a click at the pixel under it (`chromeDrag.guest`). Coincident dialogs pan their
+  *owner* layer (bounded by the dialog's edges) so the dialog and its copy in the owner's capture
+  stay one image. Initial placement: anchored where it popped up, shifted up/left so the whole
+  popup fits when it can; when it cannot, it starts at its top/left edge. Trace: `pan start …`.
+- Geometry note: at chrome scale `c <= min(vw/352, vh/480)` a menu up to 480 guest rows always
+  fits, so the case that occurs on the phone is the wide coincident dialog (Notepad's Open box,
+  604 guest px -> 643 host px on a 375 px phone) and combo drop-downs longer than the column.
+  Pane (375x812): Open box x 1 -> -268 (= 375-643, exact clamp) and back to 0, owner moved with it,
+  tap on it clicked. File Manager's View menu at 375x400 shifts up to y=43 so its 357 px fit.
