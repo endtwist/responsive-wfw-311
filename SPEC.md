@@ -1102,3 +1102,10 @@ emulator to ~3 MIPS (5 s in the pane at 55 MIPS), i.e. the DOS VM speed item.
   class "tty".
 - Sound: WfW's SNDBLST2.DRV refuses v86's SB16 even at DSP 2.1 (agent investigating); off by
   default. DOS VM speed: agent investigating v86's V86-mode/JIT path.
+
+**2026-09-02 — printing status.** A file port must be named `*.PRN` (WIN.INI's own comment);
+with `C:\PRINT.PS` CreateDC failed in Notepad ("Not enough memory to print") and Write hung the
+system after spooling. Now `C:\PRINT.PRN`. Remaining: printing from Write opens its Print dialog,
+then the guest spins at ~150-1400 MIPS in a ring-3 16-bit segment (CS 0x437, linear ~0x36000)
+with PVMON starved and the dialog never painted. Not yet identified; the host side (PVP transfer,
+Ghostscript wasm, download) is in place but untested end to end.

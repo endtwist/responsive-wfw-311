@@ -1438,7 +1438,8 @@ pub unsafe fn instr_CD(imm8: i32) {
         ax == 0x1680 || ax == 0x1689
     };
     call_interrupt_vector(imm8, true, None);
-    if idle_call && *cpl == 0 || idle_call && *flags & FLAG_INTERRUPT != 0 {
+    // only with interrupts enabled: a halt with IF clear could never be woken
+    if idle_call && *flags & FLAG_INTERRUPT != 0 {
         *in_hlt = true;
     }
 }
