@@ -826,21 +826,21 @@ function installTouch() {
   // still moving would drag whatever is under it.
   let chain = Promise.resolve();
   const queue = fn => (chain = chain.then(fn).catch(() => {}));
-  let pressTimer = 0, longFired = false, dragging = false, consumed = null, pressActive = false;
+  let consumed = null, pressActive = false;
 
   /* One press = one pipeline: place the pointer, (maybe) press, follow the finger, release.
      Moves are never queued one by one: a slow guest (a phone runs the emulator at a fraction of
      desktop speed) would fall seconds behind a 0.4 s drag and the next gesture would queue up
      behind it. Instead the latest finger position is kept and a single loop steers towards it,
      one guest round-trip at a time; the release waits for the loop to catch up. */
-  let latest = null, followLoop = null;
-  const follow = async () => {
+  let g = null;                                  // the current gesture; tasks close over their own
+  const follow = async (G) => {
     let steered = null;
-    while (pressActive || (latest && (!steered || steered.x !== latest.x || steered.y !== latest.y))) {
-      const t = latest;
-      if (t && (!steered || steered.x !== t.x || steered.y !== t.y)) { await steerTo(t); steered = t; }
-      else await sleep(16);
-      if (!pressActive && steered && latest && steered.x === latest.x && steered.y === latest.y) break;
+    for (;;) {
+      const t = G.latest;
+      if (t && (!steered || steered.x !== t.x || steered.y !== t.y)) { await steerTo(t); steered = t; continue; }
+      if (!G.active) break;
+      await sleep(16);
     }
   };
 
@@ -850,13 +850,14 @@ function installTouch() {
     if (consumed) { diag(`down consumed=${consumed}`); return; }
     const pt = canvasPoint(ev, true);
     { const { px, py } = hostPoint(ev); const h = hitTest(px, py); diag(`down host=${Math.round(px)},${Math.round(py)} hit=${h.kind} guest=${pt.x},${pt.y} win=${h.win && h.win.title}`); }
-    longFired = false; dragging = false; pressActive = true; latest = null;
+    const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0 };
+    pressActive = true;
     queue(async () => {
       await placePointer(pt);
-      if (!pressActive || dragging) return;
-      pressTimer = setTimeout(() => queue(async () => {     // long press is the right button
-        if (!pressActive || dragging) return;
-        longFired = true;
+      if (!G.active || G.dragging) return;
+      G.timer = setTimeout(() => queue(async () => {          // long press is the right button
+        if (!G.active || G.dragging) return;
+        G.longFired = true;
         button(true, true); await sleep(60); button(false, true);
       }), LONG_PRESS_MS);
     });
@@ -864,27 +865,29 @@ function installTouch() {
   const move = ev => {
     window.pvPhase = "move";
     if (dragMove(ev)) return;
-    if (consumed || longFired) return;
-    clearTimeout(pressTimer);
-    latest = canvasPoint(ev);
-    if (!dragging) {
-      dragging = true;
+    const G = g;
+    if (consumed || !G || G.longFired) return;
+    clearTimeout(G.timer);
+    G.latest = canvasPoint(ev);
+    if (!G.dragging) {
+      G.dragging = true;
       queue(async () => {                       // after the pointer has been placed: press, then follow
         button(true, false); await sleep(30);
-        followLoop = follow();
-        await followLoop;
+        await follow(G);
       });
     }
   };
   const up = () => {
     window.pvPhase = "up";
     pressActive = false;
-    diag(`up dragging=${dragging} longFired=${longFired} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
-    clearTimeout(pressTimer);
+    const G = g;
+    diag(`up dragging=${G && G.dragging} longFired=${G && G.longFired} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
+    if (G) { G.active = false; clearTimeout(G.timer); }
     if (consumed) { consumed = null; chromeDrag = null; return; }
+    if (!G) return;
     queue(async () => {
-      if (dragging) { button(false, false); dragging = false; diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
-      if (longFired) { longFired = false; return; }
+      if (G.dragging) { button(false, false); diag(`drag released at ${JSON.stringify(guestCursor)}`); return; }
+      if (G.longFired) return;
       button(true, false); await sleep(60); button(false, false);   // tap is a left click
     });
   };
