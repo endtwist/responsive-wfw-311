@@ -1770,3 +1770,7 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   should accept a window spanning slot n and n+1 when both are its own.
 - Tour after this batch: TERMINAL launch/close/kbd pass, WINFILE pass; CHARMAP `fit`/`slot` are the
   fixed-layout/double-slot cases above.
+- Follow-up 7 (same day, PVMON v31): a fixed-layout window wider than a column spans two adjacent
+  slots (Character Map 785 wide at x=640), which the `slot` check accepts for fixed-layout apps.
+  Hearts' welcome box: OK is the default button but a no-op with an empty name, so the tour types a
+  letter, then Enter.

@@ -341,7 +341,8 @@ export async function tour(env, opts = {}) {
       const soft = fixed ? "info:fixed" : "fail";
       row.fit = born.ww <= SHELL_W && born.wh <= st.shell.h ? "pass" : `${soft}:${born.ww}x${born.wh}>${SHELL_W}x${st.shell.h}`;
       const sx = SLOT_W * (born.slot + 1);
-      row.slot = born.wx >= sx && born.wx + born.ww <= sx + SLOT_W && born.wy >= 0 && born.wy + born.wh <= Math.max(st.shell.h, 970)
+      // fixed-layout windows wider than a column span two adjacent slots (PVMON v31: Character Map 785 wide)
+      row.slot = born.wx >= sx && born.wx + born.ww <= sx + SLOT_W * (fixed && born.ww > SLOT_W ? 2 : 1) && born.wy >= 0 && born.wy + born.wh <= Math.max(st.shell.h, 970)
         ? "pass" : `fail:slot${born.slot}@${born.wx},${born.wy}`;
       /* the host's layer: never scaled below 1:1 */
       if (env.dom) {
@@ -382,7 +383,8 @@ export async function tour(env, opts = {}) {
         row.dlgclose = (await until(() => !dialogsOf(L.slot).length, 5000)) ? "pass" : "fail";
       } else if (app.dialog === "launch") {
         if (!launchDlg.length) launchDlg = await until(() => dialogsOf(L.slot).length ? dialogsOf(L.slot) : null, 6000) || [];
-        if (launchDlg.length) { checkDialog(row, L); await press(SC.enter); }
+        // Hearts: OK is the default button but does nothing while the name field is empty: a letter first
+        if (launchDlg.length) { checkDialog(row, L); await press(0x1E); await sleep(200); await press(SC.enter); }
         else row.dlg = "fail:timeout";
         row.dlgclose = (await until(() => !dialogsOf(L.slot).length, 5000)) ? "pass" : "fail";
       }
