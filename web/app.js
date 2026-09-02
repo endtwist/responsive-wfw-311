@@ -1768,6 +1768,14 @@ function installTouch() {
      focus only there). The guest's last word (PVK) or a manual hold wins; otherwise the input is
      focused speculatively and released again if the guest does not ask within speculativeRelease's
      window. Programs that never take text are left alone; ?kbtest=1 focuses on every tap. */
+  /* Write's (and others') scrollbars are child controls inside the reported client rect, so a
+     scrollbar tap looks like a client tap; the strip along the client's right and bottom edges,
+     one scrollbar wide (SM_CXVSCROLL at 120 dpi is about 20 px), is treated as chrome here. */
+  const onScrollbar = (hit) => {
+    const w = hit.win;
+    if (!w || w.gw == null) return false;
+    return hit.x >= w.gx + w.gw - 24 || hit.y >= w.gy + w.gh - 24;
+  };
   const tapKeyboard = (hit) => {
     const title = hit && hit.win ? hit.win.title || "" : "";
     const kbtest = params.get("kbtest") === "1";
@@ -1776,7 +1784,7 @@ function installTouch() {
     else if (wantKeyboard || keyboardHeld) why = "want";
     else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
     else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
-    else if (hit && hit.win && hit.kind === "client" && KEYBOARD_TITLES.test(title)) why = "title";   // client only: scrollbar arrows, caption, menus never summon it
+    else if (hit && hit.win && hit.kind === "client" && KEYBOARD_TITLES.test(title) && !onScrollbar(hit)) why = "title";   // client only, and not on a scrollbar
     else if (hit && (hit.kind === "client" || hit.kind === "desktop")) {
       /* No speculative focus: it flashed the keyboard up and down on every dialog tap. Instead the
          tap is remembered for a second; if the guest reports PVK 1 in that window (the click landed
