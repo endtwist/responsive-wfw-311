@@ -29,24 +29,26 @@ const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, f: 0x21, 
    resizes it), so a frame wider than the phone and a host scale below 1:1 are reported as
    information, not failures. Until PVW carries the hook's own flag these are named by title;
    WINVER and Network Setup are fixed too but not toured. */
-const FIXED_TITLES = /^(Character Map|Solitaire|The Microsoft Hearts|Object Packager|Task List|About |Network Setup)/;
+/* [PVMon] KeepSize in build-image.sh: SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER
+   (kept in step by hand; the same set as the `fixed:` marks above plus the untoured WINVER/PIFEDIT). */
+const FIXED_TITLES = /^(Character Map|Solitaire|The Microsoft Hearts|Minesweeper|Calculator|Sound Recorder|Object Packager|Task List|About |PIF Editor|Network Setup|Print Manager)/;
 export const APPS = [
   { name: "NOTEPAD",  cmd: "NOTEPAD.EXE",  title: /^Notepad/,        text: true,  dialog: "alt-f-o" },
   { name: "WRITE",    cmd: "WRITE.EXE",    title: /^Write/,          dialog: "alt-f-o" },
-  { name: "CALC",     cmd: "CALC.EXE",     title: /^Calculator/ },
+  { name: "CALC",     cmd: "CALC.EXE",     title: /^Calculator/, fixed: true },
   { name: "CLOCK",    cmd: "CLOCK.EXE",    title: /^Clock/ },
   { name: "CHARMAP",  cmd: "CHARMAP.EXE",  title: /^Character Map/, fixed: true },
   { name: "CARDFILE", cmd: "CARDFILE.EXE", title: /^Cardfile/,       text: true },
   { name: "CALENDAR", cmd: "CALENDAR.EXE", title: /^Calendar/ },
   { name: "PBRUSH",   cmd: "PBRUSH.EXE",   title: /^Paintbrush/,     dialog: "pbrush" },
   { name: "SOL",      cmd: "SOL.EXE",      title: /^Solitaire/, fixed: true },
-  { name: "WINMINE",  cmd: "WINMINE.EXE",  title: /^Minesweeper/ },
+  { name: "WINMINE",  cmd: "WINMINE.EXE",  title: /^Minesweeper/, fixed: true },
   { name: "MSHEARTS", cmd: "MSHEARTS.EXE", title: /Hearts/,          dialog: "launch", fixed: true },
   { name: "WINFILE",  cmd: "WINFILE.EXE",  title: /^File Manager/ },
   { name: "CONTROL",  cmd: "CONTROL.EXE",  title: /^Control Panel/ },
-  { name: "PRINTMAN", cmd: "PRINTMAN.EXE", title: /^Print Manager/ },
+  { name: "PRINTMAN", cmd: "PRINTMAN.EXE", title: /^Print Manager/, fixed: true },   // spooler off: only its message box appears
   { name: "CLIPBRD",  cmd: "CLIPBRD.EXE",  title: /^Clip[Bb]o/ },
-  { name: "SOUNDREC", cmd: "SOUNDREC.EXE", title: /^Sound Recorder/ },
+  { name: "SOUNDREC", cmd: "SOUNDREC.EXE", title: /^Sound Recorder/, fixed: true },
   { name: "MPLAYER",  cmd: "MPLAYER.EXE",  title: /^Media Player/ },
   { name: "RECORDER", cmd: "RECORDER.EXE", title: /^Recorder/ },
   { name: "TERMINAL", cmd: "TERMINAL.EXE", title: /^Terminal/,       text: true },
