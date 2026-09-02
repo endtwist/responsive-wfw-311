@@ -21,7 +21,8 @@ static unsigned rd(unsigned idx) { outpw(DISPI_INDEX, idx); return inpw(DISPI_DA
 
 static int copy_file(const char *src, const char *dst)
 {
-    FILE *in, *out; char buf[4096]; size_t n;
+    FILE *in, *out; size_t n;
+    static char buf[4096];   /* off the stack: a 4 KB auto buffer overran the small-model stack and truncated the copied file tail */
     in = fopen(src, "rb");
     if (!in) return 0;
     out = fopen(dst, "wb");

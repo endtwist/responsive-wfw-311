@@ -1145,3 +1145,10 @@ iOS keyboard (needs a gesture map or a hardware keyboard).
 
 ### 2026-09-02 — DOS-VM speed merged (v86 rust)
 - Merged worktree branch `worktree-agent-a23863c66d4768c09` (adaptive idle `pv_idle_set(mode,limit)` default 2/20000; flat-compatible JIT modules; `PAGE_HAS_CODE` bitmap + FastHasher on TLB miss; mixed code/data page hotness kept + volatile backoff; byte-granular SMC off by default). Headless: DOS box 29 → 66 MIPS throughput, idle DOS box halts. Conflict in `instructions.rs` resolved in favour of the adaptive version (it keeps the IF=1 guard). 43/43 banked-vga checks pass; DOS box launches from the snapshot in the pane and `pv_idle_stat` shows the idle box mostly halted.
+
+### 2026-09-02 — sound unblocked: PVDPI was truncating SYSTEM.INI
+- Sound agent: v86's SB16 already satisfies SNDBLST2.DRV (DSP 2.1 spoof); the "configuration or hardware problem" box was `ConfigGetPortBase()` reading a SYSTEM.INI whose tail (`[network drivers]`, `[sndblst.drv]`) had been destroyed by PVDPI's `copy_file()`: a 4 KB auto buffer in a small-model DOS program overran the stack. Fixed by making the buffer `static` (guest/pvdpi/pvdpi.c), rebuilt PVDPI.EXE, image rebuilt with `sound=1` (work-phone-20260902-104044), cold boot in the pane shows no error box; new boot snapshot posted.
+- `v86/src/sb16.js`: optional `sb16-trace` bus toggle (default off) merged from the agent.
+- Microphone: v86 SB16 has no record path (DSP 0x24/0x2C unhandled) — follow-up agent implementing DMA input + getUserMedia.
+- `web/app.js`: `?wasm=<file>` picks a wasm under v86/build for A/B tests.
+- Found: launching the DOS box paints a 4-row desktop-coloured band (index 247) across the shell column at y=60..63 (guest VRAM, not compositor). Reproduces with the pre-merge wasm too; Notepad launch does not do it. Being investigated.

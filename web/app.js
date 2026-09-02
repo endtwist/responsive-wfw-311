@@ -195,7 +195,7 @@ async function clearState() {
 
 /* ----------------------------------------------------------------------------------- boot */
 const emulator = new V86({
-  wasm_path: "../v86/build/v86.wasm",
+  wasm_path: "../v86/build/" + (params.get("wasm") || "v86.wasm"),   // ?wasm=v86-base.wasm for A/B
   memory_size: 32 * 1024 * 1024,
   vga_memory_size: 8 * 1024 * 1024,
   screen_container: $("screen_container"),
