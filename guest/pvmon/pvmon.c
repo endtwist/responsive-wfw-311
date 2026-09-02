@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 18     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 19     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -66,6 +66,25 @@ static void dbgnum(const char *s, unsigned a, unsigned b)
 static BOOL is_transient(HWND hwnd, char *cls, int len);
 
 static HINSTANCE g_hInst;
+static HINSTANCE g_hookDll;
+typedef BOOL (FAR PASCAL *HOOKINSTALL)(void);
+typedef void (FAR PASCAL *HOOKREMOVE)(void);
+static void install_hook(void)
+{
+    HOOKINSTALL inst;
+    g_hookDll = LoadLibrary("PVHOOK.DLL");
+    if ((UINT)g_hookDll < 32) { g_hookDll = NULL; dbg("pvmon: PVHOOK.DLL not found"); return; }
+    inst = (HOOKINSTALL)GetProcAddress(g_hookDll, "PvHookInstall");
+    dbg(inst && inst() ? "pvmon: CBT hook installed (windows are born in their slots)" : "pvmon: CBT hook failed");
+}
+static void remove_hook(void)
+{
+    HOOKREMOVE rem;
+    if (!g_hookDll) return;
+    rem = (HOOKREMOVE)GetProcAddress(g_hookDll, "PvHookRemove");
+    if (rem) rem();
+    FreeLibrary(g_hookDll); g_hookDll = NULL;
+}
 /* The screen is deliberately taller than anything the host displays at once. The shell lives in
    the top ShellWidth x ShellHeight corner, which is the only part shown as "the desktop"; every
    application window is parked below that, in screen space the host never draws directly. The
@@ -832,7 +851,7 @@ static void report_focus(void)
     char cls[24];
     int want = 0;
     if (f && GetClassName(f, cls, sizeof(cls)) > 0) {
-        if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0) want = 1;
+        if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0 || lstrcmpi(cls, "tty") == 0) want = 1;
         else {                             /* a combo box's edit child reports as Edit already */
             char pcls[24]; HWND parent = GetParent(f);
             if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) want = 1;
@@ -939,6 +958,40 @@ static void publish_layout(void)
         dbg(line);
     }
     dbg("PVE");
+}
+
+/* Printing. WIN.INI names C:\PRINT.PS as the PDF Printer's port, so the PostScript driver and
+   Print Manager write each job there. Once the file can be opened exclusively (the spooler is
+   done) it is sent to the host through the debug channel, base64 in short lines, and deleted;
+   the host turns it into a PDF and offers the download. */
+#define PRINT_FILE "C:\\PRINT.PS"
+static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static void ship_print_job(void)
+{
+    OFSTRUCT of;
+    HFILE f;
+    static unsigned char buf[72];
+    char line[8 + 96 + 1];
+    long size; int n, i, o;
+    if (OpenFile(PRINT_FILE, &of, OF_EXIST) == HFILE_ERROR) return;
+    f = OpenFile(PRINT_FILE, &of, OF_READ | OF_SHARE_EXCLUSIVE);
+    if (f == HFILE_ERROR) return;                       /* still being written */
+    size = _llseek(f, 0L, 2); _llseek(f, 0L, 0);
+    if (size <= 0) { _lclose(f); return; }
+    wsprintf(line, "PVP-BEGIN %ld", size); dbg(line);
+    while ((n = _lread(f, buf, sizeof(buf))) > 0) {
+        lstrcpy(line, "PVP ");
+        for (i = 0, o = 4; i < n; i += 3) {
+            unsigned long v = ((unsigned long)buf[i] << 16) | ((i + 1 < n ? buf[i + 1] : 0) << 8) | (i + 2 < n ? buf[i + 2] : 0);
+            line[o++] = b64[(v >> 18) & 63]; line[o++] = b64[(v >> 12) & 63];
+            line[o++] = i + 1 < n ? b64[(v >> 6) & 63] : '=';
+            line[o++] = i + 2 < n ? b64[v & 63] : '=';
+        }
+        line[o] = 0; dbg(line);
+    }
+    _lclose(f);
+    dbg("PVP-END");
+    OpenFile(PRINT_FILE, &of, OF_DELETE);
 }
 
 /* Commands from the host: it writes a command and argument into two adapter registers and we
@@ -1171,6 +1224,7 @@ static void poll(HWND hwnd)
         static unsigned n;
         run_host_command();
         if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); enforce_cursor(); }
+        if (n % 25 == 0) ship_print_job();              /* about once a second */
     }
     curW = GetSystemMetrics(SM_CXSCREEN);
     curH = GetSystemMetrics(SM_CYSCREEN);
@@ -1222,6 +1276,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             dbg(b);
         }
         if (g_live) { dbg("pvmon: live re-mode enabled"); find_user_state(); }
+        if (g_shellW) install_hook();
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);
         dbgnum("pvmon: up, screen", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
@@ -1259,6 +1314,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (wParam) KillTimer(hwnd, IDT_POLL);
         return 0;
     case WM_DESTROY:
+        remove_hook();
         KillTimer(hwnd, IDT_ARRANGE);
         KillTimer(hwnd, IDT_POLL);
         PostQuitMessage(0);

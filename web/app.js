@@ -266,8 +266,11 @@ emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
   let m = /^PVD (\d+) (\d+)(?: (\d+))?(?: v(\d+))?/.exec(line);
   if (m) { shell = { w: +m[1], h: +m[2], cap: +m[3] || 18, ver: m[4] ? +m[4] : 0 }; return; }
+  if (/^PVP-BEGIN /.test(line)) { printJob = []; return; }
+  if (/^PVP /.test(line)) { if (printJob) printJob.push(line.slice(4)); return; }
+  if (/^PVP-END/.test(line)) { if (printJob) finishPrintJob(printJob.join("")); printJob = null; return; }
   m = /^PVK (\d)/.exec(line);
-  if (m) { wantKeyboard = m[1] === "1"; syncKeyboard(); return; }
+  if (m) { if (m[1] === "1") { wantKeyboard = true; syncKeyboard(); } else if (!keyboardHeld) { wantKeyboard = false; syncKeyboard(); } return; }
   if (/^PVA/.test(line)) {
     desktopReady = true;
     shellHeightSent = 0;
@@ -317,11 +320,53 @@ function launchFromUrl() {
   if (cmd) emulator.bus.send("pv-command-string", [CMD_RUN, cmd]);
 }
 
+/* Printing: the guest's PostScript driver prints to a file, PVMON ships it here base64-encoded,
+   and Ghostscript (WebAssembly, loaded on first use) turns it into a PDF the browser downloads.
+   Nothing is drawn for this: the browser's own download UI is the only thing the user sees. */
+let printJob = null, gsModule = null;
+async function loadGhostscript() {
+  if (gsModule) return gsModule;
+  const mod = await import("https://cdn.jsdelivr.net/npm/@jspawn/ghostscript-wasm@0.0.2/gs.mjs");
+  gsModule = mod.default;
+  return gsModule;
+}
+async function psToPdf(psBytes) {
+  const createModule = await loadGhostscript();
+  return new Promise((resolve, reject) => {
+    let out = null;
+    createModule({
+      arguments: ["-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-sDEVICE=pdfwrite", "-sOutputFile=/out.pdf", "/in.ps"],
+      preRun: [m => { m.FS.writeFile("/in.ps", psBytes); }],
+      postRun: [m => { try { out = m.FS.readFile("/out.pdf"); } catch (e) { reject(e); return; } resolve(out); }],
+      print: () => {}, printErr: t => report("gs", t),
+    }).catch(reject);
+  });
+}
+function offerDownload(bytes, name, type) {
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.style.display = "none";
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 60000);
+}
+async function finishPrintJob(b64) {
+  try {
+    const bin = atob(b64); const ps = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) ps[i] = bin.charCodeAt(i);
+    report("print", `job ${ps.length} bytes of PostScript`);
+    let pdf = null;
+    try { pdf = await psToPdf(ps); } catch (e) { report("print", "ghostscript failed: " + (e && e.message || e)); }
+    const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 16);
+    if (pdf) offerDownload(pdf, `windows-${stamp}.pdf`, "application/pdf");
+    else offerDownload(ps, `windows-${stamp}.ps`, "application/postscript");
+  } catch (e) { report("print", "failed: " + e.message); }
+}
+
 /* The soft keyboard follows the guest: when an edit control takes the focus the hidden input is
    focused, which summons the platform keyboard, and it is blurred when the focus leaves. iOS only
    lets a page focus an input inside a user gesture, so the touch handlers also call this at the
    end of a tap, by which time PVMON has usually reported the new focus. */
-let wantKeyboard = false;
+let wantKeyboard = false, keyboardHeld = false;
 function syncKeyboard() {
   const inp = $("kbd");
   if (!inp) return;
@@ -831,7 +876,12 @@ function pressStart(ev) {
   if (h.kind === "drag") {
     const p = layerPos[h.win.key];
     chromeDrag = { key: h.win.key, dx: px - p.x, dy: py - p.y, startX: px, startY: py, moved: false,
-                   guest: mapThrough(h.win, px, py) };
+                   guest: mapThrough(h.win, px, py), timer: 0, toggled: false };
+    // holding a caption still toggles the soft keyboard: a gesture, since the guest cannot always
+    // tell us it wants text (Paintbrush's text tool, a DOS box)
+    chromeDrag.timer = setTimeout(() => {
+      if (chromeDrag && !chromeDrag.moved) { chromeDrag.toggled = true; wantKeyboard = !wantKeyboard; keyboardHeld = wantKeyboard; syncKeyboard(); }
+    }, 600);
     return "drag";
   }
   return null;
@@ -939,7 +989,8 @@ function installTouch() {
     if (G) { G.active = false; clearTimeout(G.timer); }
     if (consumed) {
       // a caption tap that did not turn into a drag is a click on the caption: it activates
-      if (consumed === "drag" && chromeDrag && !chromeDrag.moved) {
+      if (chromeDrag) clearTimeout(chromeDrag.timer);
+      if (consumed === "drag" && chromeDrag && !chromeDrag.moved && !chromeDrag.toggled) {
         const pt = chromeDrag.guest;
         queue(async () => { await placePointer(pt); button(true, false); await sleep(60); button(false, false); });
       }
