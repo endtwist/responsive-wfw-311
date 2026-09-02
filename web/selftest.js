@@ -289,7 +289,7 @@ export async function tour(env, opts = {}) {
          resumed when Task List was opened, so that is the nudge; without a heartbeat afterwards the
          app is skipped at once instead of waiting 15 s for nothing. */
       const beat = async ms => { const h = st.hb; await until(() => st.hb !== h, ms, 100); return st.hb !== h; };
-      if (!app.keys && !(await beat(2500))) {
+      if (!(await beat(2500))) {                    // Ctrl+Esc apps need PVMON too: it publishes the window
         await chord(SC.ctrl, SC.esc); await sleep(1500); await press(SC.esc); await sleep(500);
         const ok = await beat(3000);
         row.stall = "pvmon:no-heartbeat," + (ok ? "recovered-by-ctrl-esc" : "still-silent");
@@ -513,6 +513,7 @@ export async function run(opts = {}) {
   const p = new URLSearchParams(location.search);
   if (p.get("apps") && !opts.apps) opts.apps = p.get("apps").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
   if (p.get("pixels") && opts.pixels === undefined) opts.pixels = true;
+  if (p.get("skip") && !opts.skip) opts.skip = p.get("skip").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
   if (p.get("lenient") && opts.strictDialogs === undefined) opts.strictDialogs = false;
   const t0 = performance.now();
   while (!window.emulator || !window.emulator.v86) { if (performance.now() - t0 > 60000) throw new Error("no emulator"); await new Promise(r => setTimeout(r, 200)); }
