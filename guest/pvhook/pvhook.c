@@ -302,6 +302,73 @@ static void place_owned(HWND owner, int w, int h, int FAR *px, int FAR *py)
     *px = x; *py = y;
 }
 
+/* A MessageBox wider than the phone (Print Manager's "has been turned off" is 924 wide at the
+   20 px font): USER lays its text out on one or two long lines. The box is a plain dialog with
+   Static and Button children, so it can be re-laid natively: the text control is narrowed to the
+   phone and its wrapped height measured with DrawText, the buttons move down by the growth and are
+   re-centred, and the box itself becomes ShellWidth wide and that much taller. Done at
+   HCBT_ACTIVATE, before the box has painted. Only USER's own dialogs (message boxes) qualify;
+   programs' dialogs are laid out by their templates and are left alone (reported by PVQ). */
+static void fix_msgbox(HWND dlg)
+{
+    RECT dr, cr, r; HWND h, txt = NULL, btn[8];
+    char cls[16], text[512];
+    int w, frameW, newClientW, availW, oldH, newH, delta, i, n = 0, left = 0x7fff, right = -0x7fff, shift, x, colX, colR;
+    GetWindowRect(dlg, &dr); w = dr.right - dr.left;
+    if (w <= shell_w()) return;
+    GetClientRect(dlg, &cr);
+    frameW = w - cr.right;
+    newClientW = shell_w() - frameW;
+    for (h = GetWindow(dlg, GW_CHILD); h; h = GetWindow(h, GW_HWNDNEXT)) {
+        if (GetClassName(h, cls, sizeof(cls)) <= 0) continue;
+        if (lstrcmpi(cls, "Static") == 0) {
+            if ((GetWindowLong(h, GWL_STYLE) & 0x0F) == SS_ICON) continue;
+            if (GetWindowTextLength(h) > 0) txt = h;
+        } else if (lstrcmpi(cls, "Button") == 0 && n < 8) btn[n++] = h;
+    }
+    if (!txt || !n) return;
+    GetWindowRect(txt, &r);
+    ScreenToClient(dlg, (POINT FAR *)&r); ScreenToClient(dlg, (POINT FAR *)&r.right);
+    availW = newClientW - r.left - 8;
+    if (availW < 60) return;
+    oldH = r.bottom - r.top;
+    {
+        HDC hdc = GetDC(txt);
+        HFONT f = (HFONT)SendMessage(txt, WM_GETFONT, 0, 0L), old = NULL;
+        RECT m;
+        if (!hdc) return;
+        if (f) old = SelectObject(hdc, f);
+        GetWindowText(txt, text, sizeof(text));
+        m.left = 0; m.top = 0; m.right = availW; m.bottom = 0;
+        DrawText(hdc, text, -1, &m, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS);
+        newH = m.bottom;
+        if (old) SelectObject(hdc, old);
+        ReleaseDC(txt, hdc);
+    }
+    delta = newH > oldH ? newH - oldH : 0;
+    SetWindowPos(txt, NULL, r.left, r.top, availW, newH, SWP_NOZORDER | SWP_NOACTIVATE);
+    for (i = 0; i < n; i++) {
+        GetWindowRect(btn[i], &r);
+        ScreenToClient(dlg, (POINT FAR *)&r); ScreenToClient(dlg, (POINT FAR *)&r.right);
+        if (r.left < left) left = r.left;
+        if (r.right > right) right = r.right;
+    }
+    shift = (newClientW - (right - left)) / 2 - left;
+    for (i = 0; i < n; i++) {
+        GetWindowRect(btn[i], &r);
+        ScreenToClient(dlg, (POINT FAR *)&r);
+        SetWindowPos(btn[i], NULL, r.left + shift, r.top + delta, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    }
+    if (dr.left < SLOT_W) { colX = 0; colR = shell_w(); }
+    else { colX = (dr.left / SLOT_W) * SLOT_W; colR = colX + SLOT_W; }
+    x = dr.left;
+    if (x + shell_w() > colR) x = colR - shell_w();
+    if (x < colX) x = colX;
+    SetWindowPos(dlg, NULL, x, dr.top, shell_w(), dr.bottom - dr.top + delta, SWP_NOZORDER | SWP_NOACTIVATE);
+    wsprintf(text, "pvhook: message box %dx%d -> %dx%d (text +%d)", w, dr.bottom - dr.top, shell_w(), dr.bottom - dr.top + delta, delta);
+    pv_dbg(text);
+}
+
 LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HCBT_SETFOCUS) {
@@ -337,6 +404,14 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
                                  SWP_NOZORDER | SWP_NOACTIVATE);
                 }
             }
+        }
+    }
+    if (code == HCBT_ACTIVATE && shell_w()) {
+        HWND h = (HWND)wParam;
+        char cls[24], mod[16];
+        if (h && GetClassName(h, cls, sizeof(cls)) > 0 && lstrcmp(cls, "#32770") == 0 && !(GetWindowLong(h, GWL_STYLE) & WS_CHILD)) {
+            module_base(h, mod, sizeof(mod));
+            if (lstrcmpi(mod, "USER") == 0) fix_msgbox(h);        /* a MessageBox */
         }
     }
     if ((code == HCBT_ACTIVATE || code == HCBT_DESTROYWND || code == HCBT_SETFOCUS) && shell_w()) {
