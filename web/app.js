@@ -904,9 +904,12 @@ function installTouch() {
   }, { passive: false });
   const end = ev => {
     ev.preventDefault();
-    if (twoFinger) { if (ev.touches.length === 0) twoFinger = null; return; }
-    up();
-    setTimeout(syncKeyboard, 350);          // PVMON polls at 100 ms; still inside iOS's gesture grace
+    if (ev.touches.length > 0) return;      // a finger is still down: nothing ends yet
+    const wasTwo = !!twoFinger;
+    twoFinger = null;
+    // A two-finger gesture that began as a single-finger press must still release that press.
+    if (!wasTwo || pressActive) up();
+    setTimeout(syncKeyboard, 350);          // still inside iOS's gesture grace period
   };
   c.addEventListener("touchend", end, { passive: false });
   c.addEventListener("touchcancel", end, { passive: false });
