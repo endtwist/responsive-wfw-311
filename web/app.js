@@ -559,7 +559,7 @@ function present() {
     let ic = 0; try { ic = emulator.get_instruction_counter() >>> 0; } catch (e) {}
     const mips = lastIc ? ((ic - lastIc) >>> 0) / (now - lastBeatAt) / 1000 : 0;
     lastIc = ic; lastBeatAt = now;
-    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} layers=${layers.length} ready=${desktopReady} mips=${mips.toFixed(1)} pvmon=${shell.ver || "?"}`);
+    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} layers=${layers.map(l => l.kind + ":" + (l.title || "").slice(0, 14)).join("|")} ready=${desktopReady} mips=${mips.toFixed(1)} pvmon=${shell.ver || "?"}`);
   }
   requestAnimationFrame(present);
 }
@@ -756,7 +756,7 @@ async function placePointer(pt) {
   if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) { diag(`place: bad target ${JSON.stringify(pt)}`); return; }
   const seq = cursorSeq, t0 = performance.now();
   emulator.bus.send("pv-command-string", [CMD_SETPOS, `${Math.round(pt.x)},${Math.round(pt.y)}`]);
-  while (cursorSeq === seq && performance.now() - t0 < 1200) await sleep(8);
+  while (cursorSeq === seq && performance.now() - t0 < 800) await sleep(8);   // PVMON reports directly now
   const reported = cursorSeq !== seq;
   diag(`place ${pt.x},${pt.y} reported=${reported} after ${Math.round(performance.now() - t0)}ms cursor=${JSON.stringify(guestCursor)}`);
   // No report yet (nothing has moved the pointer since the restore) or off target: steer.

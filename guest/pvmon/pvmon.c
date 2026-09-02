@@ -26,6 +26,8 @@
 #define R_HOST_DPI  0x12
 #define R_STATUS    0x13
 #define R_DEBUG     0x16
+#define R_CURSOR_X  0x14
+#define R_CURSOR_Y  0x15
 #define R_GEN       0x17
 #define R_CMD       0x1A   /* host -> guest command, 0 = none; guest writes 0 to acknowledge */
 #define R_CMDARG    0x1B
@@ -44,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 13     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 14     /* reported in PVD so the host log shows which build a snapshot holds */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
@@ -952,6 +954,15 @@ static void run_host_command(void)
         for (n = 0; buf[n] && buf[n] != ','; n++) x = x * 10 + (buf[n] - '0');
         if (buf[n] == ',') for (n++; buf[n]; n++) y = y * 10 + (buf[n] - '0');
         SetCursorPos(x, y);
+        /* Report the new position ourselves. With a 386 enhanced DOS session running, USER only
+           calls the display driver's MoveCursor on the next mouse interrupt, so the host would
+           otherwise wait a second for confirmation of a move that has already happened. */
+        {
+            POINT pt;
+            GetCursorPos(&pt);
+            wr(R_CURSOR_X, (unsigned)pt.x);
+            wr(R_CURSOR_Y, (unsigned)pt.y);     /* writing Y is what the host sees as a report */
+        }
         return;
     }
     if (cmd == CMD_RUN) {
