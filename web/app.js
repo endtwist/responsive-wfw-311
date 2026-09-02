@@ -586,6 +586,7 @@ function updateKeybar() {
 }
 let keybarLogged = "";
 let keybarOpen = false;
+let lateTapUntil = 0;
 (function installKeybarTab() {
   const tab = $("keybartab");
   if (!tab) return;
@@ -693,6 +694,7 @@ function guestWantsKeyboard(want) {
     clearTimeout(kbdBlurTimer);
     if (performance.now() < kbdSuppressedUntil) { kbdLog("PVK 1 (suppressed after hide)"); return; }
     kbdLog("PVK 1");
+    if (performance.now() < lateTapUntil && document.activeElement !== $("kbd")) { lateTapUntil = 0; focusKeyboard("late"); return; }
     syncKeyboard();
   } else {
     wantKeyboard = false;
@@ -1653,7 +1655,15 @@ function installTouch() {
     else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
     else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
     else if (hit && hit.win && KEYBOARD_TITLES.test(title)) why = "title";
-    else if (hit && (hit.kind === "client" || hit.kind === "desktop")) why = "speculative";
+    else if (hit && (hit.kind === "client" || hit.kind === "desktop")) {
+      /* No speculative focus: it flashed the keyboard up and down on every dialog tap. Instead the
+         tap is remembered for a second; if the guest reports PVK 1 in that window (the click landed
+         in an Edit), focus is tried then. iOS may refuse a focus outside the gesture — the result is
+         logged so the phone tells us whether "late" focus works; if it does not, the next tap does. */
+      lateTapUntil = performance.now() + 1000;
+      kbdLog(`tap: deferred (${hit.kind} "${title.slice(0, 20)}")`);
+      return;
+    }
     if (!why) {
       // a tap on a program that does not want text while the keyboard is up: let the guest's PVK 0
       // (focus moved) take it down; nothing to do here
@@ -1662,7 +1672,7 @@ function installTouch() {
     }
     if (performance.now() < kbdSuppressedUntil && why !== "kbtest") { kbdLog("tap: suppressed after hide"); return; }
     focusKeyboard(`${why} "${title.slice(0, 20)}"`);
-    if (why === "speculative" || why === "title") speculativeRelease();
+    if (why === "title") speculativeRelease();
   };
   const up = (ev) => {
     window.pvPhase = "up";
