@@ -1776,7 +1776,7 @@ function installTouch() {
     else if (wantKeyboard || keyboardHeld) why = "want";
     else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
     else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
-    else if (hit && hit.win && KEYBOARD_TITLES.test(title)) why = "title";
+    else if (hit && hit.win && hit.kind === "client" && KEYBOARD_TITLES.test(title)) why = "title";   // client only: scrollbar arrows, caption, menus never summon it
     else if (hit && (hit.kind === "client" || hit.kind === "desktop")) {
       /* No speculative focus: it flashed the keyboard up and down on every dialog tap. Instead the
          tap is remembered for a second; if the guest reports PVK 1 in that window (the click landed
