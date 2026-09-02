@@ -18,6 +18,15 @@
  *   png:x,y,w,h,file        the rectangle as a PNG (8 bpp through the DAC palette)
  *   cursor:1000,500         absolute pointer to x,y and print where the guest says it landed
  *   tap                     tap the middle of the current window's client area (absolute pointer)
+ *   down[:ms] / up[:ms]     left button (then wait ms, default 40)
+ *   hide / show             CMD_CURSOR 0 / 1 (the host hides the pointer during touch)
+ *   delta:dx,dy             one relative PS/2 packet, print the report
+ *   sine:x0,y0,x1,y1,n,amp[,pace]   n absolute placements along the segment displaced by amp*sin (a
+ *                           freehand stroke, like web/app.js follow()); line:... is amp 0; pace = ms per point
+ *   check:x0,y0,x1,y1,amp   how many samples along that sine (and along the straight chord) are painted
+ *   probe[:1]               PVMON CMD_PROBE: metrics, cursor clip, pointer, capture, children of the window
+ *                           under the pointer; :1 = the ClipCursor experiment
+ *   beats                   PVMON heartbeat (PVH) gaps so far
  *   close                   CMD_CLOSE the current slot, wait for it to go (N to a save box)
  *   shellsize:700           CMD_SHELLSIZE
  *   republish               CMD_REPUBLISH
@@ -71,6 +80,10 @@ const emulator = new V86({
 const st = trackGuest(emulator);
 const log = flag("--log");
 emulator.bus.register("pv-debug", line => { if (log || /^(pvmon|pvhook):/.test(line)) if (!/^PVH /.test(line)) console.log("[guest] " + line); });
+/* PVMON heartbeat cadence (PVH about once a second): the gaps tell a stalled PVMON from a busy one */
+const beats = [];
+emulator.bus.register("pv-debug", line => { if (/^PVH /.test(line)) beats.push(performance.now()); });
+const beatGaps = () => { const g = []; for (let i = 1; i < beats.length; i++) g.push(Math.round(beats[i] - beats[i - 1])); return g; };
 let cursor = null, cursorSeq = 0;
 emulator.bus.register("pv-cursor", xy => { cursor = { x: xy[0], y: xy[1] }; cursorSeq++; });
 
@@ -160,6 +173,45 @@ for (const s of steps) {
   }
   else if (op === "dump") { console.log(`${ts()} layers:`); dump(); }
   else if (op === "cursor") { const [x, y] = arg.split(",").map(Number); const c = await place(x, y); console.log(`${ts()} cursor asked ${x},${y} -> ${c ? c.x + "," + c.y : "no report"}`); }
+  /* gesture pieces, for driving a program the way web/app.js does (absolute placement per point) */
+  else if (op === "hide") { emulator.bus.send("pv-command", [10, 0]); await sleep(300); console.log(`${ts()} cursor hidden (CMD_CURSOR 0)`); }
+  else if (op === "show") { emulator.bus.send("pv-command", [10, 1]); await sleep(300); console.log(`${ts()} cursor shown (CMD_CURSOR 1)`); }
+  else if (op === "down" || op === "up") { await click(op === "down"); await sleep(+arg || 40); console.log(`${ts()} button ${op}`); }
+  else if (op === "delta") { const [dx, dy] = arg.split(",").map(Number); const seq = cursorSeq; emulator.bus.send("mouse-delta", [dx, -dy]); await until(() => cursorSeq !== seq, 900, 5); console.log(`${ts()} delta ${dx},${dy} -> ${cursorSeq !== seq ? cursor.x + "," + cursor.y : "no report"}`); }
+  else if (op === "sine" || op === "line") {
+    /* x0,y0,x1,y1,n[,amp]: n absolute placements along the segment, displaced by amp*sin along the way */
+    const [x0, y0, x1, y1, n, amp, pace] = arg.split(",").map(Number);
+    const L = Math.hypot(x1 - x0, y1 - y0), nx = -(y1 - y0) / L, ny = (x1 - x0) / L;
+    const reps = [];
+    for (let i = 1; i <= n; i++) {
+      const t = i / n, s = op === "sine" ? (amp || 0) * Math.sin(2 * Math.PI * t) : 0;
+      const x = Math.round(x0 + (x1 - x0) * t + nx * s), y = Math.round(y0 + (y1 - y0) * t + ny * s);
+      const c = await place(x, y);
+      reps.push(c ? (c.x === x && c.y === y ? "ok" : `${c.x},${c.y}`) : "none");
+      if (pace) await sleep(pace);            // ms between points (a finger moves at ~60 points/s)
+    }
+    console.log(`${ts()} ${op} ${n} points: reports ${reps.join(" ")}`);
+  }
+  else if (op === "check") {
+    /* x0,y0,x1,y1,amp[,step]: how much of the sine path (and of the straight chord) is painted,
+       i.e. differs from the canvas colour sampled at the segment's start corner; prints both */
+    const [x0, y0, x1, y1, amp, step] = arg.split(",").map(Number);
+    const v = emulator.v86.cpu.devices.vga, pitch = v.svga_pitch_px(), mem = v.svga_mem ? v.svga_mem() : v.svga_memory, off = v.svga_offset || 0;
+    const px = (x, y) => mem[off + y * pitch + x];
+    const L = Math.hypot(x1 - x0, y1 - y0), nx = -(y1 - y0) / L, ny = (x1 - x0) / L;
+    const bg = px(x0 + Math.round(nx * amp * 2), y0 + Math.round(ny * amp * 2));   // off the curve: the canvas
+    const painted = (x, y, r = 2) => { for (let j = -r; j <= r; j++) for (let i = -r; i <= r; i++) if (px(x + i, y + j) !== bg) return true; return false; };
+    let onCurve = 0, onChord = 0, N = 0;
+    for (let d = 0; d <= L; d += step || 4) {
+      const t = d / L, s = amp * Math.sin(2 * Math.PI * t);
+      if (painted(Math.round(x0 + (x1 - x0) * t + nx * s), Math.round(y0 + (y1 - y0) * t + ny * s))) onCurve++;
+      if (painted(Math.round(x0 + (x1 - x0) * t), Math.round(y0 + (y1 - y0) * t))) onChord++;
+      N++;
+    }
+    console.log(`${ts()} check: ${onCurve}/${N} samples painted along the sine, ${onChord}/${N} along the straight chord (bg colour ${bg})`);
+  }
+  else if (op === "probe") { emulator.bus.send("pv-command", [12, +arg || 0]); await sleep(400); }   // PVMON CMD_PROBE: metrics, clip, pointer, capture, children (printed as pvmon: lines)
+  else if (op === "beats") { const g = beatGaps(); console.log(`${ts()} heartbeat gaps (ms): ${g.slice(-40).join(" ")}${g.length ? ` max ${Math.max(...g)}` : " none"}`); }
   else if (op === "tap") { const L = curWin() || cur; if (!L) { console.log("tap: no window"); continue; } const x = Math.round(L.gx + L.gw / 2), y = Math.round(L.gy + L.gh / 2); const c = await place(x, y); await click(true); await sleep(60); await click(false); await sleep(400); console.log(`${ts()} tap ${x},${y} -> ${c ? c.x + "," + c.y : "no report"}`); }
   else if (op === "close") {
     if (!cur) continue;

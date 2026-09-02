@@ -40,6 +40,7 @@
 static HINSTANCE g_hInst;
 static HHOOK g_cbt, g_cwp, g_mouse;
 static int g_tapOpens = -1;          /* [PVMon] TapOpens: a single tap opens Program Manager items */
+static int g_traceClip = 0;          /* [PVMon] TraceClip=1: log cursor clip changes from the mouse hook (diagnostic) */
 static BOOL g_installed;
 static int g_shellW, g_shellH;       /* the phone frame, from PVMON (runtime) or WIN.INI */
 /* [PVMon] HookClamp=0 switches the size clamps off (WM_GETMINMAXINFO, WM_WINDOWPOSCHANGING, the
@@ -767,15 +768,61 @@ LRESULT CALLBACK __export PvCwpProc(int code, WPARAM wParam, LPARAM lParam)
    caption click would maximise the group). A click on a minimised group's icon (an iconic PMGroup,
    hit-tested as caption) gets a non-client double-click, which is how Windows restores an icon.
    WH_MOUSE sees the message as the task retrieves it; HC_NOREMOVE (a PeekMessage look) is skipped
-   so one click is converted once. */
+   so one click is converted once.
+   Only a click is converted: the button must have gone down in the same group window, within the
+   double-click distance (SM_CX/CYDOUBLECLK) and time of the release. A hold-to-drag on a group
+   (down, moves, up somewhere else: an icon dragged, a selection) used to get a WM_LBUTTONDBLCLK
+   at its release point, which, on a group's client, Program Manager took as a double-click on
+   whatever was under the finger. */
+static HWND g_tapWnd; static POINT g_tapPt; static DWORD g_tapTick;
 LRESULT CALLBACK __export PvMouseProc(int code, WPARAM wParam, LPARAM lParam)
 {
     MOUSEHOOKSTRUCT FAR *m = (MOUSEHOOKSTRUCT FAR *)lParam;
+    if (code == HC_ACTION && m && !g_desktop) {
+        /* FakeScreen casualty (SPEC 2026-09-02): Paintbrush confines the pointer to the visible
+           image while a tool is down, ClipCursor(image rect INTERSECT screen rect), and takes the
+           screen from GetSystemMetrics -- the phone frame, which its window at x=640 is outside
+           of. USER gets an empty rectangle, pins the pointer at (-1,-1) and reports it hidden, and
+           every stroke became a straight line from the press to the image's corner. The hook runs
+           in the painting task on the first mouse message after the press: undo the empty clip
+           (NULL = the real desktop rectangle) and put the pointer back where the press was; a
+           move USER generated at the pinned position (off the real screen) is swallowed. */
+        RECT rc; GetClipCursor(&rc);
+        if (rc.right <= rc.left || rc.bottom <= rc.top) {
+            char b[96];
+            ClipCursor(NULL);
+            if (g_tapWnd == m->hwnd || m->hwnd == GetCapture()) SetCursorPos(g_tapPt.x, g_tapPt.y);
+            wsprintf(b, "pvhook: empty cursor clip undone at msg %04X, pointer back to %d,%d", wParam, g_tapPt.x, g_tapPt.y);
+            pv_dbg(b);
+        }
+        if (wParam == WM_MOUSEMOVE && (m->pt.x < 0 || m->pt.y < 0)) return 1;   /* the pinned position: not a movement */
+    }
+    if (code == HC_ACTION && m && g_traceClip) {
+        /* [PVMon] TraceClip=1: log the cursor clip rectangle whenever a mouse message finds it changed
+           (the hook runs in the receiving task, so it sees a clip PVMON's poll cannot) */
+        static RECT last; RECT rc; GetClipCursor(&rc);
+        if (rc.left != last.left || rc.top != last.top || rc.right != last.right || rc.bottom != last.bottom) {
+            char b[120], cls[16]; last = rc; cls[0] = 0; GetClassName(m->hwnd, cls, sizeof(cls));
+            wsprintf(b, "pvhook: clip %d,%d-%d,%d at msg %04X %s pt %d,%d", rc.left, rc.top, rc.right, rc.bottom, wParam, (LPSTR)cls, m->pt.x, m->pt.y);
+            pv_dbg(b);
+        }
+    }
     if (code == HC_ACTION && m && g_tapOpens > 0 && m->hwnd) {
         char cls[16];
-        if ((wParam == WM_LBUTTONUP || wParam == WM_NCLBUTTONUP) &&
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_NCLBUTTONDOWN) {
+            g_tapWnd = m->hwnd; g_tapPt = m->pt; g_tapTick = GetTickCount();
+        } else if (wParam == WM_MOUSEMOVE && g_tapWnd == m->hwnd) {
+            int dx = m->pt.x - g_tapPt.x, dy = m->pt.y - g_tapPt.y;
+            if (dx < 0) dx = -dx; if (dy < 0) dy = -dy;
+            if (dx > GetSystemMetrics(SM_CXDOUBLECLK) / 2 || dy > GetSystemMetrics(SM_CYDOUBLECLK) / 2) g_tapWnd = NULL;   /* moved: a drag, not a tap */
+        } else if ((wParam == WM_LBUTTONUP || wParam == WM_NCLBUTTONUP) &&
+            g_tapWnd == m->hwnd && GetTickCount() - g_tapTick < GetDoubleClickTime() * 2 &&
             GetClassName(m->hwnd, cls, sizeof(cls)) > 0 && lstrcmp(cls, "PMGroup") == 0) {
-            if (wParam == WM_LBUTTONUP && !IsIconic(m->hwnd)) {
+            int dx = m->pt.x - g_tapPt.x, dy = m->pt.y - g_tapPt.y;
+            if (dx < 0) dx = -dx; if (dy < 0) dy = -dy;
+            g_tapWnd = NULL;
+            if (dx > GetSystemMetrics(SM_CXDOUBLECLK) / 2 || dy > GetSystemMetrics(SM_CYDOUBLECLK) / 2) { /* a drag ended here: leave it */ }
+            else if (wParam == WM_LBUTTONUP && !IsIconic(m->hwnd)) {
                 POINT pt = m->pt;
                 ScreenToClient(m->hwnd, &pt);
                 PostMessage(m->hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELONG(pt.x, pt.y));
@@ -795,6 +842,7 @@ BOOL FAR PASCAL __export PvHookInstall(void)
     g_cbt = SetWindowsHookEx(WH_CBT, (HOOKPROC)PvCbtProc, g_hInst, NULL);
     g_cwp = SetWindowsHookEx(WH_CALLWNDPROC, (HOOKPROC)PvCwpProc, g_hInst, NULL);
     g_tapOpens = GetProfileInt("PVMon", "TapOpens", 1);
+    g_traceClip = GetProfileInt("PVMon", "TraceClip", g_traceClip);
     g_hookClamp = GetProfileInt("PVMon", "HookClamp", 1);
     if (!g_hookClamp) pv_dbg("pvhook: HookClamp=0, size clamps off (measuring)");
     g_mouse = g_tapOpens > 0 ? SetWindowsHookEx(WH_MOUSE, (HOOKPROC)PvMouseProc, g_hInst, NULL) : NULL;

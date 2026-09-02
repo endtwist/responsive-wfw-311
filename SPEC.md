@@ -2202,3 +2202,80 @@ Remaining, and risks:
 - `log.js` defaults `globalThis.DEBUG = true` and the page never sets it, so every `dbg_assert`
   and every `dbg_log` argument expression runs on the phone. Measured no effect on the planar
   path (the Proxy dominated), but a cheap global candidate; not changed here.
+### 2026-09-02 — Paintbrush strokes were straight lines, a hold-drag on Program Manager resized it (PVMON v35, PVHOOK, host)
+Phone report (Josh): "Paintbrush is super broken now — drawing is wacky and it's doing weird things
+to the other windows"; plus a slow hold-drag on Program Manager's group left the shell at
+`175,320 177x352`. Both reproduced headless with `tools/probe.mjs` (new gesture steps: `down`/`up`,
+`hide`/`show`, `delta`, `sine`/`line` = absolute placements along a path like `follow()`, `check` =
+how much of the path is painted, `probe` = PVMON's new `CMD_PROBE` diagnostics, `beats` = PVH
+gaps). Neither is a redraw-merge regression: the pre-redraw image `work-phone-20260902-171524`
+behaves the same (`shots/pb-old.png`).
+
+**A. Root cause, guest: FakeScreen breaks Paintbrush's cursor clip.** When a tool goes down on
+its canvas (`pbPaint`) Paintbrush confines the pointer to the visible image with
+`ClipCursor(image rect ∩ screen rect)`, taking the screen from `GetSystemMetrics` — under
+FakeScreen the phone frame `352x760`, which the Paintbrush window at x=640 lies entirely outside
+of. USER receives an **empty rectangle** (the hook's trace: `pvhook: clip 0,0-0,0 at msg 0200
+pbPaint pt 760,200`), pins the pointer at (-1,-1) and calls the display driver's
+`MoveCursor(-1,-1)` — that is the `{x:65535,y:65535}` in every report while the button is down
+(`CURSOR.ASM`'s atomic write is correct: the value is what USER passes; `GetCursorPos` says 0,0,
+`GetCapture` is NULL — Paintbrush clips instead of capturing). Every WM_MOUSEMOVE of the stroke
+carries the pinned point, which Paintbrush clamps to the image's top-left corner, so a brush
+stroke is one straight line from the press to `(708,86)` and the Line tool ends there
+(`shots/pb-linetool.png`). At the release Paintbrush's `ClipCursor(NULL)` restores the real
+desktop rectangle and reports are exact again. USER's `ClipCursor` itself is fine with rectangles
+outside the fake screen (`probe:1`: `ClipCursor(706,86-1058,381)` is kept as given and
+`SetCursorPos(800,200)` under it lands); the empty rectangle is Paintbrush's own intersection.
+It only happens in Paintbrush's *narrow* layout (image 352 wide, one scroll bar, `pbPaint`
+`706,86-1091,381`), which is what a launch shortly after a snapshot restore gives on this image;
+when the image is wider than the view (both scroll bars) Paintbrush does not clip at all and
+strokes were always right — which is why it looked intermittent. PVMON's `keep_cursor_free()`
+could not help: its poll is starved during a stroke (heartbeat gap 3.9 s in `beats`) and the clip
+is gone again by the release.
+Fix (PVHOOK `PvMouseProc`, in the painting task on the first mouse message after the press):
+an empty clip rectangle is undone (`ClipCursor(NULL)`), the pointer is put back on the press point
+and a WM_MOUSEMOVE at the pinned position (x or y < 0) is swallowed (`pvhook: empty cursor clip
+undone at msg 0200, pointer back to 760,200`). Verified: sine stroke 24 points, pointer hidden,
+narrow layout: `check: 101/101 samples painted along the sine, 33/101 along the straight chord`,
+reports exact (`shots/pb-fixed.png`); Line tool ends at the release point. `[PVMon] TraceClip=1`
+logs clip changes from the hook for the next such case.
+
+**A. Root cause, host: the (-1,-1) report was "corrected".** `placePointer()` compared the report
+with the target and, off by more than a pixel, called `steerTo()`: relative-mouse mode, 64 PS/2
+packets of -100 per round, four rounds, each waiting up to 900 ms for a report. With every
+placement of a stroke reported as 65535 the pointer was slammed to (0,0) with the button held and
+the queue drained one finger point per ~900 ms (the phone log's `steered -> {"x":959,"y":0}`
+lines and the 3-4 s late taps); anything under (0,0) — Program Manager's top-left size corner —
+was then pressed and dragged by the next gesture. **B is the same bug**: replayed headless
+(`hide cursor:760,200 down delta:-100,100… up cursor:0,0 down cursor:175,320 up`) the shell ends at
+`175,320 177x352`, exactly the phone's picture; `pvmon: capture now 1168 Progman` is the size loop.
+The plain hold-drag on a group (down, four moves a second apart, up) does nothing to the shell
+before or after the fix. Fix (`web/app.js`): a report ends a placement wherever the pointer was
+put (USER clamps to the screen and to ClipCursor; (-1,-1) = no cursor to show, `hiddenReport()`);
+relative steering only when nothing reports at all (an image without the PV mouse driver);
+targets are clamped to the screen (a finger path point of `959,-39` used to be "missed" too).
+`sleep()` off the worker tick is not the delay: the tick is ~1-4 ms; the 900 ms was steering.
+
+**TapOpens hardened** (PVHOOK): the single-tap → WM_LBUTTONDBLCLK conversion now requires the
+button to have gone down in the same group window within half the double-click distance and
+twice the double-click time; a drag released on a group is left alone. Verified: one tap on the
+File Manager icon still opens it (`PVW 0 … File Manager`), the hold-drag opens nothing.
+
+**PVMON v35**: `CMD_PROBE` (12; arg 1 = the ClipCursor experiment) and a change trace of the cursor
+clip rectangle and the capture window in `poll()` (`pvmon: clip now …`, `pvmon: capture now …`).
+
+**Coordinator's items.** (1) PVMON's timer with Paintbrush open and idle: headless the PVH gaps
+are 1350-1400 ms (25 polls of a 40 ms timer = 55 ms ticks: normal), 3.9 s across a stroke (WM_TIMER
+is starved while Paintbrush drains the mouse flood); no stall reproduced. The phone's 21 s / 80 s
+silences happened right after strokes whose runaway steering pressed on Program Manager's size
+corner — a size/move modal loop with the button held on a 3-11 MIPS guest — and go with that bug.
+(2) The 100+ MIPS episode was not reproduced headless; the same sequence (hundreds of relative
+packets into a clipped Paintbrush plus a Program Manager size loop) is the suspect; the CS:EIP
+sampler of `tools/redraw-bench.mjs` is the tool if it returns. (3) See the host paragraph.
+
+Follow-ups: Paintbrush's default image is 352x760 under FakeScreen (its "narrow layout": the image
+fits a 640 window with a blue margin) — `Size.PBRUSH` or the metrics at its start-up decide;
+FakeScreen's cost list gains "programs that intersect with the screen metrics". Image
+`work-phone-20260902-182351.img` + `boot-20260902-182351.state.gz` (PVMON v35). Checks:
+`node v86/tests/pv/banked-vga.mjs` 77/77; `node tools/tour.mjs --apps PBRUSH,NOTEPAD,SOL` pass=26
+fail=2, the two pre-existing geometry checks (PBRUSH `fit 640x424>352x760`, Notepad `dlgfit 604x318`).

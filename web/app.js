@@ -1676,6 +1676,7 @@ function steerTo(pt) {
     try {
       for (let i = 0; i < 4 && steerTarget; i++) {
         if (!guestCursor) { emulator.bus.send("mouse-delta", [1, 0]); await sleep(20); continue; }
+        if (hiddenReport(guestCursor)) break;           // no position to correct against
         const dx = Math.round(steerTarget.x - guestCursor.x), dy = Math.round(steerTarget.y - guestCursor.y);
         if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) break;
         let rx = dx, ry = dy, packets = 0;
@@ -1717,9 +1718,16 @@ function screenSize() {
   const src = document.querySelector("#screen_container canvas");
   return src && src.width ? [src.width, src.height] : [SLOT_W * (1 + MAX_SLOTS), SHELL_H];
 }
+/* The driver reports (-1,-1) when USER has no cursor to show (an application drawing with a NULL
+   cursor: Paintbrush painting) or has clamped the pointer away: it is not a position. */
+const hiddenReport = c => !!c && c.x === 65535 && c.y === 65535;
 async function placePointer(pt) {
   if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) { diag(`place: bad target ${JSON.stringify(pt)}`); return; }
   const seq = cursorSeq, t0 = performance.now();
+  { // a finger can leave the mapped layer: the guest pointer stays on the screen
+    const [sw, sh] = screenSize();
+    pt = { x: Math.max(0, Math.min(sw - 1, Math.round(pt.x))), y: Math.max(0, Math.min(sh - 1, Math.round(pt.y))) };
+  }
   if (absPointer) {
     const [sw, sh] = screenSize();
     // USER maps x = norm * cxScreen / 65536, truncating: aim for the middle of the pixel
@@ -1737,8 +1745,14 @@ async function placePointer(pt) {
   }
   const reported = cursorSeq !== seq;
   diag(`place ${pt.x},${pt.y} reported=${reported} after ${Math.round(performance.now() - t0)}ms cursor=${JSON.stringify(guestCursor)}`);
-  // No report yet (nothing has moved the pointer since the restore) or off target: steer.
-  if (!guestCursor || Math.abs(guestCursor.x - pt.x) > 1 || Math.abs(guestCursor.y - pt.y) > 1) {
+  /* A report is the end of it, wherever the pointer was put: USER clamps the pointer to the screen
+     and to the application's ClipCursor rectangle, and (-1,-1) means it has no cursor to show at
+     all (Paintbrush painting). Correcting such a report with relative packets drove the pointer
+     to (0,0) with the button held (a 65535 "miss" became 64 packets of -100 a round, four rounds,
+     each waited on) -- every Paintbrush stroke ended in the top-left corner, dragging whatever
+     was there, ~900 ms per finger point. Relative steering is only for a guest that never
+     reports (an image without the PV mouse driver or PVMON). */
+  if (!reported && (!guestCursor || Math.abs(guestCursor.x - pt.x) > 1 || Math.abs(guestCursor.y - pt.y) > 1)) {
     await steerTo(pt);
     diag(`steered -> ${JSON.stringify(guestCursor)}`);
   }

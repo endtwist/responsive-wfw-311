@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 34     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 35     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
@@ -1521,6 +1521,7 @@ static void ship_print_job(void)
 #define CMD_SETPOS   9     /* string "x,y": put the pointer there (absolute, for a tap) */
 #define CMD_CURSOR   10    /* arg 0: hide the pointer (touch screen), 1: show it */
 #define CMD_DESKTOP  11    /* arg 1: desktop mode (whole screen 1:1, no columns or clamps), 0: phone layout */
+#define CMD_PROBE    12    /* diagnostics to pv_dbg: metrics, cursor clip, pointer, capture, children (tools/probe.mjs "probe") */
 
 static BOOL g_hideCursor = FALSE;
 static void enforce_cursor(void)
@@ -1629,6 +1630,43 @@ static void run_host_command_1(void)
             GetCursorPos(&pt);
             wr(R_CURSOR_X, (unsigned)pt.x);
             wr(R_CURSOR_Y, (unsigned)pt.y);     /* writing Y is what the host sees as a report */
+        }
+        return;
+    }
+    if (cmd == CMD_PROBE) {
+        /* Diagnostics for the headless probe: USER's idea of the screen, the cursor clip
+           rectangle, the pointer, the capture window and the children of the window under the
+           pointer (class and screen rectangle), one pv_dbg line each. */
+        char b[160]; RECT rc; POINT pt; HWND cap, top, ch; char cls[24];
+        if (arg == 1) {
+            /* experiment: what USER makes of a clip rectangle that lies outside the fake screen */
+            RECT r; r.left = 706; r.top = 86; r.right = 1058; r.bottom = 381;
+            ClipCursor(&r); GetClipCursor(&rc); GetCursorPos(&pt);
+            wsprintf(b, "pvmon: probe ClipCursor(706,86-1058,381) -> clip %d,%d-%d,%d cursor %d,%d", rc.left, rc.top, rc.right, rc.bottom, pt.x, pt.y); dbg(b);
+            SetCursorPos(800, 200); GetCursorPos(&pt);
+            wsprintf(b, "pvmon: probe SetCursorPos(800,200) under it -> cursor %d,%d", pt.x, pt.y); dbg(b);
+            ClipCursor(NULL); GetClipCursor(&rc);
+            wsprintf(b, "pvmon: probe ClipCursor(NULL) -> clip %d,%d-%d,%d", rc.left, rc.top, rc.right, rc.bottom); dbg(b);
+            return;
+        }
+        GetClipCursor(&rc); GetCursorPos(&pt); cap = GetCapture();
+        wsprintf(b, "pvmon: probe metrics %dx%d clip %d,%d-%d,%d cursor %d,%d capture %04X show %d",
+                 GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), rc.left, rc.top, rc.right, rc.bottom,
+                 pt.x, pt.y, (unsigned)cap, ShowCursor(FALSE) + 1);
+        ShowCursor(TRUE);
+        dbg(b);
+        top = cap ? cap : WindowFromPoint(pt);
+        while (top && GetParent(top)) top = GetParent(top);
+        if (top) {
+            GetWindowRect(top, &rc); GetClassName(top, cls, sizeof(cls));
+            wsprintf(b, "pvmon: probe top %04X %s %d,%d-%d,%d", (unsigned)top, (LPSTR)cls, rc.left, rc.top, rc.right, rc.bottom);
+            dbg(b);
+            for (ch = GetWindow(top, GW_CHILD); ch; ch = GetWindow(ch, GW_HWNDNEXT)) {
+                GetWindowRect(ch, &rc); GetClassName(ch, cls, sizeof(cls));
+                wsprintf(b, "pvmon: probe child %04X %s %d,%d-%d,%d%s%s", (unsigned)ch, (LPSTR)cls, rc.left, rc.top, rc.right, rc.bottom,
+                         (LPSTR)(IsWindowVisible(ch) ? "" : " hidden"), (LPSTR)(ch == cap ? " CAPTURE" : ""));
+                dbg(b);
+            }
         }
         return;
     }
@@ -1794,7 +1832,20 @@ static void poll(HWND hwnd)
     if (g_dlgReflow) check_dialogs();
     if (g_shellW || g_desktop) {
         static unsigned n;
+        static RECT lastClip; static HWND lastCap;
+        RECT clip; HWND cap;
         run_host_command();
+        /* trace (cheap, rare): the cursor clip rectangle and the capture window, when they change */
+        GetClipCursor(&clip); cap = GetCapture();
+        if (clip.left != lastClip.left || clip.top != lastClip.top || clip.right != lastClip.right || clip.bottom != lastClip.bottom) {
+            char b[96]; lastClip = clip;
+            wsprintf(b, "pvmon: clip now %d,%d-%d,%d", clip.left, clip.top, clip.right, clip.bottom); dbg(b);
+        }
+        if (cap != lastCap) {
+            char b[96], cls[24]; lastCap = cap; cls[0] = 0;
+            if (cap) GetClassName(cap, cls, sizeof(cls));
+            wsprintf(b, "pvmon: capture now %04X %s", (unsigned)cap, (LPSTR)cls); dbg(b);
+        }
         /* the hook published a list of its own (a dialog came or went): ours must follow, even if
            what we see is what we last said, or the host keeps the hook's snapshot (a closed DOS
            box "still published") */
