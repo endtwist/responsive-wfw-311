@@ -1,5 +1,48 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::iter::FromIterator;
+
+// responsive-wfw311: the maps in here are keyed by page numbers and table indices and are looked
+// up on every TLB miss and every interpreted block. std's SipHash was ~4% of the DOS-box profile;
+// a multiplicative hash is plenty for u32 keys.
+#[derive(Default)]
+pub struct FastHasher(u64);
+impl Hasher for FastHasher {
+    fn finish(&self) -> u64 { self.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x9E37_79B9);
+        }
+    }
+    fn write_u8(&mut self, i: u8) { self.write_u32(i as u32) }
+    fn write_u16(&mut self, i: u16) { self.write_u32(i as u32) }
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(0x9E37_79B9);
+    }
+    fn write_i32(&mut self, i: i32) { self.write_u32(i as u32) }
+    fn write_usize(&mut self, i: usize) { self.write_u32(i as u32) }
+}
+type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<FastHasher>>;
+type HashSet<K> = std::collections::HashSet<K, BuildHasherDefault<FastHasher>>;
+
+// responsive-wfw311: one bit per physical page, set when the page has compiled code or entry
+// points (i.e. ctx.pages or ctx.entry_points has it). do_page_walk asks this on every TLB miss;
+// it used to take the JIT mutex and do two hash lookups for the answer. Kept in sync by
+// sync_page_has_code at every point where those maps change.
+static mut PAGE_HAS_CODE: [u32; 0x8000] = [0; 0x8000];
+
+fn sync_page_has_code(ctx: &JitState, page: Page) {
+    let has = ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page);
+    let p = page.to_u32() as usize;
+    unsafe {
+        if has {
+            PAGE_HAS_CODE[p >> 5] |= 1 << (p & 31);
+        }
+        else {
+            PAGE_HAS_CODE[p >> 5] &= !(1 << (p & 31));
+        }
+    }
+}
 use std::mem::{self, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
@@ -119,6 +162,43 @@ struct PageInfo {
     hidden_wasm_table_indices: Vec<WasmTableIndex>,
     entry_points: Vec<(u16, u16)>,
     state_flags: CachedStateFlags,
+    // responsive-wfw311: the dispatch table for this page (entry offset -> block state), owned
+    // here and shared by pointer with every TLB entry that maps the page (cpu::tlb_code). It used
+    // to be allocated and filled (8 KB) on every TLB miss of a code page and freed on every TLB
+    // flush, which a VMM switching CR3 tens of thousands of times a second made a hot path. Any
+    // code that drops a PageInfo must clear the TLB pointers to its table first
+    // (clear_tlb_code_pointing_to).
+    code: Box<cpu::Code>,
+}
+
+fn new_code(
+    wasm_table_index: WasmTableIndex,
+    state_flags: CachedStateFlags,
+    entries: &[(u16, u16)],
+) -> Box<cpu::Code> {
+    let mut code = Box::new(cpu::Code {
+        wasm_table_index,
+        state_flags,
+        state_table: [u16::MAX; 0x1000],
+    });
+    for &(addr, state) in entries {
+        dbg_assert!(state != u16::MAX);
+        code.state_table[addr as usize] = state;
+    }
+    code
+}
+
+fn clear_tlb_code_pointing_to(code: &cpu::Code) {
+    let target = code as *const cpu::Code;
+    for i in 0..unsafe { cpu::valid_tlb_entries_count } {
+        let page = unsafe { cpu::valid_tlb_entries[i as usize] };
+        match unsafe { cpu::tlb_code[page as usize] } {
+            Some(c) if c.as_ptr() as *const cpu::Code == target => unsafe {
+                cpu::tlb_code[page as usize] = None;
+            },
+            _ => {},
+        }
+    }
 }
 
 enum CompilingPageState {
@@ -219,14 +299,14 @@ impl JitState {
         JitState {
             wasm_builder: WasmBuilder::new(),
 
-            entry_points: HashMap::new(),
-            pages: HashMap::new(),
+            entry_points: HashMap::default(),
+            pages: HashMap::default(),
 
             wasm_table_index_free_list: Vec::from_iter(wasm_table_indices),
             compiling: None,
 
             #[cfg(debug_assertions)]
-            wasm_table_index_to_page: HashMap::new(),
+            wasm_table_index_to_page: HashMap::default(),
         }
     }
 }
@@ -377,8 +457,9 @@ pub fn jit_find_cache_entry(phys_address: u32, state_flags: CachedStateFlags) ->
             state_flags: s,
             entry_points,
             hidden_wasm_table_indices: _,
+            code: _,
         }) => {
-            if *s == state_flags {
+            if s.accepts(state_flags) {
                 let page_offset = phys_address as u16 & 0xFFF;
                 if let Some(&(_, initial_state)) =
                     entry_points.iter().find(|(p, _)| p == &page_offset)
@@ -438,6 +519,7 @@ fn jit_find_basic_blocks(
         pages: &mut HashSet<Page>,
         page_blacklist: &mut HashSet<Page>,
         max_pages: u32,
+        state_flags: CachedStateFlags,
         marked_as_entry: &mut HashSet<i32>,
         to_visit_stack: &mut Vec<i32>,
     ) -> Option<u32> {
@@ -464,10 +546,14 @@ fn jit_find_basic_blocks(
             // page seen for the first time, handle entry points
             if let Some((hotness, entry_points)) = ctx.entry_points.get_mut(&phys_page) {
                 let existing_entry_points = match ctx.pages.get(&phys_page) {
-                    Some(PageInfo { entry_points, .. }) => {
+                    Some(PageInfo {
+                        entry_points,
+                        state_flags: existing_state_flags,
+                        ..
+                    }) if existing_state_flags.accepts(state_flags) => {
                         HashSet::from_iter(entry_points.iter().map(|x| x.0))
                     },
-                    None => HashSet::new(),
+                    _ => HashSet::default(),
                 };
 
                 if entry_points
@@ -508,10 +594,10 @@ fn jit_find_basic_blocks(
     }
 
     let mut to_visit_stack: Vec<i32> = Vec::new();
-    let mut marked_as_entry: HashSet<i32> = HashSet::new();
+    let mut marked_as_entry: HashSet<i32> = HashSet::default();
     let mut basic_blocks: BTreeMap<u32, BasicBlock> = BTreeMap::new();
-    let mut pages: HashSet<Page> = HashSet::new();
-    let mut page_blacklist = HashSet::new();
+    let mut pages: HashSet<Page> = HashSet::default();
+    let mut page_blacklist = HashSet::default();
 
     // 16-bit doesn't work correctly, most likely due to instruction pointer wrap-around
     let max_pages = if cpu.state_flags.is_32() { unsafe { MAX_PAGES } } else { 1 };
@@ -523,6 +609,7 @@ fn jit_find_basic_blocks(
             &mut pages,
             &mut page_blacklist,
             max_pages,
+            cpu.state_flags,
             &mut marked_as_entry,
             &mut to_visit_stack,
         );
@@ -654,6 +741,7 @@ fn jit_find_basic_blocks(
                             &mut pages,
                             &mut page_blacklist,
                             max_pages,
+                            cpu.state_flags,
                             &mut marked_as_entry,
                             &mut to_visit_stack,
                         ),
@@ -693,6 +781,7 @@ fn jit_find_basic_blocks(
                             &mut pages,
                             &mut page_blacklist,
                             max_pages,
+                            cpu.state_flags,
                             &mut marked_as_entry,
                             &mut to_visit_stack,
                         ),
@@ -853,9 +942,18 @@ fn jit_analyze_and_generate(
         Some(entry_points) => entry_points,
     };
 
+    // Entry points of an existing module only count if that module can run in the state we are
+    // compiling for; otherwise the page is being interpreted in this state and needs a module of
+    // its own (which, being the non-flat one, will then serve both states).
     let existing_entry_points = match ctx.pages.get(&page) {
-        Some(PageInfo { entry_points, .. }) => HashSet::from_iter(entry_points.iter().map(|x| x.0)),
-        None => HashSet::new(),
+        Some(PageInfo {
+            entry_points,
+            state_flags: existing_state_flags,
+            ..
+        }) if existing_state_flags.accepts(state_flags) => {
+            HashSet::from_iter(entry_points.iter().map(|x| x.0))
+        },
+        _ => HashSet::default(),
     };
 
     if entry_points
@@ -896,7 +994,7 @@ fn jit_analyze_and_generate(
         .collect();
     let basic_blocks = jit_find_basic_blocks(ctx, entry_points, cpu.clone());
 
-    let mut pages = HashSet::new();
+    let mut pages = HashSet::default();
 
     for b in basic_blocks.iter() {
         // Remove this assertion once page-crossing jit is enabled
@@ -1025,21 +1123,31 @@ fn jit_analyze_and_generate(
     );
     dbg_assert!(!entries.is_empty());
 
-    let mut page_info = HashMap::new();
+    let mut page_entries: HashMap<Page, Vec<(u16, u16)>> = HashMap::default();
     for &p in &pages {
-        page_info.entry(p).or_insert_with(|| PageInfo {
-            wasm_table_index,
-            state_flags,
-            entry_points: Vec::new(),
-            hidden_wasm_table_indices: Vec::new(),
-        });
+        page_entries.entry(p).or_insert_with(Vec::new);
         ctx.entry_points
             .entry(p)
-            .or_insert_with(|| (0, HashSet::new()));
+            .or_insert_with(|| (0, HashSet::default()));
+        sync_page_has_code(ctx, p);
     }
     for &(addr, state) in &entries {
-        let code = page_info.get_mut(&Page::page_of(addr)).unwrap();
-        code.entry_points.push((addr as u16 & 0xFFF, state));
+        let e = page_entries.get_mut(&Page::page_of(addr)).unwrap();
+        e.push((addr as u16 & 0xFFF, state));
+    }
+    let mut page_info = HashMap::default();
+    for (p, entry_points) in page_entries {
+        let code = new_code(wasm_table_index, state_flags, &entry_points);
+        page_info.insert(
+            p,
+            PageInfo {
+                wasm_table_index,
+                state_flags,
+                entry_points,
+                hidden_wasm_table_indices: Vec::new(),
+                code,
+            },
+        );
     }
 
     profiler::stat_increment_by(
@@ -1048,7 +1156,8 @@ fn jit_analyze_and_generate(
     );
     profiler::stat_increment_by(stat::COMPILE_PAGE, pages.len() as u64);
 
-    cpu::tlb_set_has_code_multiple(&pages, true);
+    let page_list: Vec<Page> = pages.iter().copied().collect();
+    cpu::tlb_set_has_code_multiple(&page_list, true);
 
     dbg_assert!(ctx.compiling.is_none());
     ctx.compiling = Some((
@@ -1074,7 +1183,7 @@ fn jit_analyze_and_generate(
 pub fn codegen_finalize_finished(
     wasm_table_index: WasmTableIndex,
     phys_addr: u32,
-    state_flags: CachedStateFlags,
+    _state_flags: CachedStateFlags,
 ) {
     let mut ctx = get_jit_state();
 
@@ -1113,12 +1222,7 @@ pub fn codegen_finalize_finished(
                 (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
             );
             if let Some(info) = pages.get(&tlb_physical_page) {
-                set_tlb_code(
-                    Page::of_u32(page as u32),
-                    wasm_table_index,
-                    &info.entry_points,
-                    state_flags,
-                );
+                set_tlb_code(Page::of_u32(page as u32), &info.code);
             }
         }
     }
@@ -1129,7 +1233,7 @@ pub fn codegen_finalize_finished(
             .insert(wasm_table_index, pages.keys().copied().collect());
     }
 
-    let mut check_for_unused_wasm_table_index = HashSet::new();
+    let mut check_for_unused_wasm_table_index = HashSet::default();
 
     for (page, mut info) in pages {
         if let Some(old_entry) = ctx.pages.remove(&page) {
@@ -1138,8 +1242,12 @@ pub fn codegen_finalize_finished(
             info.hidden_wasm_table_indices
                 .push(old_entry.wasm_table_index);
             check_for_unused_wasm_table_index.insert(old_entry.wasm_table_index);
+            // the loop above pointed every live TLB entry for this page at the new table; make
+            // sure nothing still refers to the old one before it is freed
+            clear_tlb_code_pointing_to(&old_entry.code);
         }
         ctx.pages.insert(page, info);
+        sync_page_has_code(&ctx, page);
     }
 
     let unused: Vec<&WasmTableIndex> = check_for_unused_wasm_table_index
@@ -1160,51 +1268,20 @@ pub fn codegen_finalize_finished(
     check_jit_state_invariants(&mut ctx);
 }
 
+/// Called on a TLB miss of a page that has code (see jit_page_has_code); points the virtual
+/// page's TLB entry at the page's dispatch table, if it has compiled code.
 pub fn update_tlb_code(virt_page: Page, phys_page: Page) {
     let ctx = get_jit_state();
 
     match ctx.pages.get(&phys_page) {
-        Some(PageInfo {
-            wasm_table_index,
-            entry_points,
-            state_flags,
-            hidden_wasm_table_indices: _,
-        }) => set_tlb_code(virt_page, *wasm_table_index, entry_points, *state_flags),
+        Some(info) => set_tlb_code(virt_page, &info.code),
         None => cpu::clear_tlb_code(virt_page.to_u32() as i32),
     };
 }
 
-pub fn set_tlb_code(
-    virt_page: Page,
-    wasm_table_index: WasmTableIndex,
-    entries: &Vec<(u16, u16)>,
-    state_flags: CachedStateFlags,
-) {
-    let c = match unsafe { cpu::tlb_code[virt_page.to_u32() as usize] } {
-        None => {
-            let state_table = [u16::MAX; 0x1000];
-            unsafe {
-                let mut c = NonNull::new_unchecked(Box::into_raw(Box::new(cpu::Code {
-                    wasm_table_index,
-                    state_flags,
-                    state_table,
-                })));
-                cpu::tlb_code[virt_page.to_u32() as usize] = Some(c);
-                c.as_mut()
-            }
-        },
-        Some(mut c) => unsafe {
-            let c = c.as_mut();
-            c.state_table.fill(u16::MAX);
-            c.state_flags = state_flags;
-            c.wasm_table_index = wasm_table_index;
-            c
-        },
-    };
-
-    for &(addr, state) in entries {
-        dbg_assert!(state != u16::MAX);
-        c.state_table[addr as usize] = state;
+pub fn set_tlb_code(virt_page: Page, code: &Box<cpu::Code>) {
+    unsafe {
+        cpu::tlb_code[virt_page.to_u32() as usize] = Some(NonNull::from(&**code));
     }
 }
 
@@ -1288,7 +1365,7 @@ fn jit_generate_module(
         result
     };
 
-    let mut index_for_addr = HashMap::new();
+    let mut index_for_addr = HashMap::default();
     for (i, &addr) in entry_blocks.iter().enumerate() {
         dbg_assert!(i < 0x10000);
         index_for_addr.insert(addr, i as u16);
@@ -1301,7 +1378,7 @@ fn jit_generate_module(
         }
     }
 
-    let mut label_for_addr: HashMap<u32, (Label, Option<u16>)> = HashMap::new();
+    let mut label_for_addr: HashMap<u32, (Label, Option<u16>)> = HashMap::default();
 
     enum Work {
         WasmStructure(WasmStructure),
@@ -1878,7 +1955,7 @@ fn jit_generate_module(
                     codegen::gen_profiler_stat_increment(ctx.builder, stat::DISPATCHER_SMALL);
                     let nexts: HashSet<u32> = next_addr
                         .as_ref()
-                        .map_or(HashSet::new(), |nexts| nexts.iter().copied().collect());
+                        .map_or(HashSet::default(), |nexts| nexts.iter().copied().collect());
                     for &addr in &entries {
                         if nexts.contains(&addr) {
                             continue;
@@ -1920,7 +1997,7 @@ fn jit_generate_module(
                     }
                 }
 
-                let mut olds = HashMap::new();
+                let mut olds = HashMap::default();
                 for &target in entries.iter() {
                     let index = if entries.len() == 1 {
                         None
@@ -1964,7 +2041,7 @@ fn jit_generate_module(
 
                 let targets = next_addr.clone().unwrap();
                 let label = ctx.builder.block_void();
-                let mut olds = HashMap::new();
+                let mut olds = HashMap::default();
                 for &target in targets.iter() {
                     let index = if targets.len() == 1 {
                         None
@@ -2166,11 +2243,17 @@ pub fn jit_increase_hotness_and_maybe_compile(
     let mut ctx = get_jit_state();
     let is_compiling = ctx.compiling.is_some();
     let page = Page::page_of(phys_address);
+    let mut is_new_page = false;
     let (hotness, entry_points) = ctx.entry_points.entry(page).or_insert_with(|| {
         cpu::tlb_set_has_code(page, true);
         profiler::stat_increment(stat::RUN_INTERPRETED_NEW_PAGE);
-        (0, HashSet::new())
+        is_new_page = true;
+        (0, HashSet::default())
     });
+    if is_new_page {
+        let p = page.to_u32() as usize;
+        unsafe { PAGE_HAS_CODE[p >> 5] |= 1 << (p & 31) };
+    }
 
     if !is_near_end_of_page(phys_address) {
         entry_points.insert(phys_address as u16 & 0xFFF);
@@ -2249,10 +2332,16 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
         hidden_wasm_table_indices,
         state_flags: _,
         entry_points: _,
+        code,
     }) = ctx.pages.remove(&page)
     {
         profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_CODE);
         did_have_code = true;
+
+        // TLB entries may still point at this page's table; the TLB scan in free() catches them
+        // (same wasm_table_index), but be explicit since `code` is dropped at the end of this
+        // block
+        clear_tlb_code_pointing_to(&code);
 
         free(ctx, wasm_table_index);
         for wasm_table_index in hidden_wasm_table_indices {
@@ -2260,7 +2349,22 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
         }
 
         fn free(ctx: &mut JitState, wasm_table_index: WasmTableIndex) {
-            ctx.pages.retain(|_, info| {
+            // First drop the TLB pointers to every table of this module, while the tables are
+            // still alive (the PageInfos owning them are removed below)
+            for i in 0..unsafe { cpu::valid_tlb_entries_count } {
+                let page = unsafe { cpu::valid_tlb_entries[i as usize] };
+                match unsafe { cpu::tlb_code[page as usize] } {
+                    None => {},
+                    Some(c) => unsafe {
+                        if c.as_ref().wasm_table_index == wasm_table_index {
+                            cpu::tlb_code[page as usize] = None;
+                        }
+                    },
+                }
+            }
+
+            let mut removed_pages: Vec<Page> = Vec::new();
+            ctx.pages.retain(|&page, info| {
                 if info.wasm_table_index != wasm_table_index {
                     return true;
                 }
@@ -2268,11 +2372,19 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
                     Some(new_primary) => {
                         info.wasm_table_index = new_primary;
                         info.entry_points.clear();
+                        info.code.wasm_table_index = new_primary;
+                        info.code.state_table.fill(u16::MAX);
                         true
                     },
-                    None => false,
+                    None => {
+                        removed_pages.push(page);
+                        false
+                    },
                 }
             });
+            for p in removed_pages {
+                sync_page_has_code(ctx, p);
+            }
 
             for info in ctx.pages.values_mut() {
                 info.hidden_wasm_table_indices
@@ -2282,24 +2394,14 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
             for i in 0..unsafe { cpu::valid_tlb_entries_count } {
                 let page = unsafe { cpu::valid_tlb_entries[i as usize] };
                 let entry = unsafe { cpu::tlb_data[page as usize] };
-                if 0 != entry {
+                if 0 != entry && entry & cpu::TLB_HAS_CODE != 0 {
                     let tlb_physical_page = Page::of_u32(
                         (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
                     );
-                    match unsafe { cpu::tlb_code[page as usize] } {
-                        None => {},
-                        Some(c) => unsafe {
-                            let w = c.as_ref().wasm_table_index;
-                            if wasm_table_index == w {
-                                drop(Box::from_raw(c.as_ptr()));
-                                cpu::tlb_code[page as usize] = None;
-                                if !ctx.entry_points.contains_key(&tlb_physical_page)
-                                    && !ctx.pages.contains_key(&tlb_physical_page)
-                                {
-                                    cpu::tlb_data[page as usize] &= !cpu::TLB_HAS_CODE;
-                                }
-                            }
-                        },
+                    if !ctx.entry_points.contains_key(&tlb_physical_page)
+                        && !ctx.pages.contains_key(&tlb_physical_page)
+                    {
+                        unsafe { cpu::tlb_data[page as usize] &= !cpu::TLB_HAS_CODE };
                     }
                 }
             }
@@ -2335,6 +2437,7 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
     check_jit_state_invariants(ctx);
 
     dbg_assert!(!jit_page_has_code_ctx(ctx, page));
+    sync_page_has_code(ctx, page);
 
     if did_have_code {
         cpu::tlb_set_has_code(page, false);
@@ -2382,7 +2485,7 @@ pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
 pub fn jit_clear_cache_js() { jit_clear_cache(&mut get_jit_state()) }
 
 fn jit_clear_cache(ctx: &mut JitState) {
-    let mut pages_with_code = HashSet::new();
+    let mut pages_with_code = HashSet::default();
 
     for &p in ctx.entry_points.keys() {
         pages_with_code.insert(p);
@@ -2396,7 +2499,10 @@ fn jit_clear_cache(ctx: &mut JitState) {
     }
 }
 
-pub fn jit_page_has_code(page: Page) -> bool { jit_page_has_code_ctx(&mut get_jit_state(), page) }
+pub fn jit_page_has_code(page: Page) -> bool {
+    let p = page.to_u32() as usize;
+    unsafe { PAGE_HAS_CODE[p >> 5] & 1 << (p & 31) != 0 }
+}
 
 fn jit_page_has_code_ctx(ctx: &mut JitState, page: Page) -> bool {
     ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page)

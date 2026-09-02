@@ -23,7 +23,6 @@ use crate::profiler::stat;
 use crate::softfloat;
 use crate::state_flags::CachedStateFlags;
 
-use std::collections::HashSet;
 use std::ptr;
 
 mod wasm {
@@ -2240,7 +2239,14 @@ pub unsafe fn do_page_walk(
         // of memory accesses
         tlb_data[page as usize] = tlb_entry;
 
-        jit::update_tlb_code(Page::page_of(addr as u32), Page::page_of(high));
+        // responsive-wfw311: only pages with code can have a dispatch table; the common case
+        // clears the entry without touching the JIT state (mutex + hash lookups)
+        if has_code {
+            jit::update_tlb_code(Page::page_of(addr as u32), Page::page_of(high));
+        }
+        else {
+            clear_tlb_code(page);
+        }
     }
 
     Ok(if DEBUG {
@@ -2429,8 +2435,7 @@ pub fn tlb_set_has_code(physical_page: Page, has_code: bool) {
 
     check_tlb_invariants();
 }
-pub fn tlb_set_has_code_multiple(physical_pages: &HashSet<Page>, has_code: bool) {
-    let physical_pages: Vec<Page> = physical_pages.into_iter().copied().collect();
+pub fn tlb_set_has_code_multiple(physical_pages: &[Page], has_code: bool) {
     for i in 0..unsafe { valid_tlb_entries_count } {
         let page = unsafe { valid_tlb_entries[i as usize] };
         let entry = unsafe { tlb_data[page as usize] };
@@ -3022,6 +3027,65 @@ pub unsafe fn run_instruction(opcode: i32) { gen::interpreter::run(opcode as u32
 pub unsafe fn run_instruction0f_16(opcode: i32) { gen::interpreter0f::run(opcode as u32) }
 pub unsafe fn run_instruction0f_32(opcode: i32) { gen::interpreter0f::run(opcode as u32 | 0x100) }
 
+// responsive-wfw311 diagnostics (profiler builds only): which pages run interpreted because the
+// cached module was compiled for the other flat-segmentation state, and why the current state
+// is not flat. pv_dbg_flat(0..3) = counts by [is_32<<1 | flat], pv_dbg_flat(4..7) = which flat
+// condition failed (ss base, ds null, ds base, cs base), pv_dbg_flat(8 + 2*i) / (9 + 2*i) = the
+// 16 most frequent virtual pages and their counts.
+#[cfg(feature = "profiler")]
+static mut pv_dbg_flat_counts: [u32; 8] = [0; 8];
+#[cfg(feature = "profiler")]
+static mut pv_dbg_flat_pages: [(u32, u32); 16] = [(0, 0); 16];
+
+#[cfg(feature = "profiler")]
+unsafe fn pv_dbg_record_flat_mismatch(eip: i32, s: CachedStateFlags) {
+    pv_dbg_flat_counts[(s.is_32() as usize) << 1 | s.has_flat_segmentation() as usize] += 1;
+    if *segment_offsets.offset(SS as isize) != 0 {
+        pv_dbg_flat_counts[4] += 1;
+    }
+    if *segment_is_null.offset(DS as isize) {
+        pv_dbg_flat_counts[5] += 1;
+    }
+    if *segment_offsets.offset(DS as isize) != 0 {
+        pv_dbg_flat_counts[6] += 1;
+    }
+    if *segment_offsets.offset(CS as isize) != 0 {
+        pv_dbg_flat_counts[7] += 1;
+    }
+    let page = (eip as u32 >> 12) | (s.to_u32() << 20) | (*cpl as u32) << 24 | (vm86_mode() as u32) << 26;
+    let mut min = 0;
+    for i in 0..16 {
+        if pv_dbg_flat_pages[i].0 == page {
+            pv_dbg_flat_pages[i].1 += 1;
+            return;
+        }
+        if pv_dbg_flat_pages[i].1 < pv_dbg_flat_pages[min].1 {
+            min = i;
+        }
+    }
+    if pv_dbg_flat_pages[min].1 <= 1 {
+        pv_dbg_flat_pages[min] = (page, 1);
+    }
+    else {
+        pv_dbg_flat_pages[min].1 -= 1;
+    }
+}
+
+#[no_mangle]
+#[cfg(feature = "profiler")]
+pub fn pv_dbg_flat(i: u32) -> u32 {
+    unsafe {
+        match i {
+            0..=7 => pv_dbg_flat_counts[i as usize],
+            8..=39 => {
+                let e = pv_dbg_flat_pages[((i - 8) / 2) as usize];
+                if i & 1 == 0 { e.0 } else { e.1 }
+            },
+            _ => 0,
+        }
+    }
+}
+
 pub unsafe fn cycle_internal() {
     profiler::stat_increment(stat::CYCLE_INTERNAL);
     let mut jit_entry = None;
@@ -3033,7 +3097,7 @@ pub unsafe fn cycle_internal() {
         Some(c) => {
             let c = c.as_ref();
 
-            if initial_state_flags == c.state_flags {
+            if c.state_flags.accepts(initial_state_flags) {
                 let state = c.state_table[initial_eip as usize & 0xFFF];
                 if state != u16::MAX {
                     jit_entry = Some((c.wasm_table_index.to_u16(), state));
@@ -3055,6 +3119,8 @@ pub unsafe fn cycle_internal() {
                 }
                 if c.state_flags.has_flat_segmentation() != s.has_flat_segmentation() {
                     profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_FLAT);
+                    #[cfg(feature = "profiler")]
+                    pv_dbg_record_flat_mismatch(initial_eip, s);
                 }
                 if c.state_flags.is_32() != s.is_32() {
                     profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_IS32);
@@ -3137,7 +3203,7 @@ pub unsafe fn cycle_internal() {
             Some(c) => {
                 let c = c.as_ref();
 
-                if initial_state_flags == c.state_flags
+                if c.state_flags.accepts(initial_state_flags)
                     && c.state_table[initial_eip as usize & 0xFFF] != u16::MAX
                 {
                     profiler::stat_increment(stat::RUN_INTERPRETED_PAGE_HAS_ENTRY_AFTER_PAGE_WALK);
@@ -4346,10 +4412,9 @@ pub unsafe fn get_opstats_buffer(
 pub unsafe fn get_opstats_buffer() -> f64 { 0.0 }
 
 pub fn clear_tlb_code(page: i32) {
+    // responsive-wfw311: the table is owned by the JIT's PageInfo and shared by pointer, so
+    // clearing a TLB entry is just that
     unsafe {
-        if let Some(c) = tlb_code[page as usize] {
-            drop(Box::from_raw(c.as_ptr()));
-        }
         tlb_code[page as usize] = None;
     }
 }
