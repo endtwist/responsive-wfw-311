@@ -23,7 +23,10 @@ def setkey(secs, sec, key, val):
 secs = parse(text)
 large = dpi == "120"
 fonts = ("8514fix.fon", "8514oem.fon", "8514sys.fon") if large else ("vgafix.fon", "vgaoem.fon", "vgasys.fon")
-setkey(secs, "boot", "fixedfon.fon", fonts[0]); setkey(secs, "boot", "oemfonts.fon", fonts[1]); setkey(secs, "boot", "fonts.fon", fonts[2])
+setkey(secs, "boot", "fixedfon.fon", fonts[0]); setkey(secs, "boot", "oemfonts.fon", fonts[1])
+# sysfont=PVSYS.FON: a taller system font (tools/mkfon.py) makes captions, menus and caption
+# boxes bigger, which is how the chrome becomes thumb-sized with only Windows' own pixels.
+setkey(secs, "boot", "fonts.fon", opts.get("sysfont", fonts[2]) if large else fonts[2])
 if disp == "svga256":
     setkey(secs, "boot", "display.drv", "svga256.drv"); setkey(secs, "boot", "386grabber", "vgadib.3gr")
     setkey(secs, "386Enh", "display", "vddsvga.386")

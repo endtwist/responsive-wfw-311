@@ -319,7 +319,11 @@ function chooseView(src) {
     const scale = Math.min(vw / src.width, vh / src.height);
     return { x: 0, y: 0, w: src.width, h: src.height, scale, ox: 0 };
   }
-  const scale = Math.min(vw / shell.w, vh / shell.h);
+  /* Portrait: the whole shell column fits the screen. Landscape: fitting the column's full
+     height would make everything tiny, so the desktop is scaled to show its top 480 rows (caption,
+     menu, the program groups) and the rest is simply below the fold; application layers scale to
+     the wide viewport on their own. */
+  const scale = vw > vh ? Math.min(vw / shell.w, vh / 480) : Math.min(vw / shell.w, vh / shell.h);
   return { x: 0, y: 0, w: shell.w, h: shell.h, scale,
            ox: Math.round((vw - shell.w * scale) / 2) };
 }
