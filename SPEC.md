@@ -1737,3 +1737,36 @@ did not reproduce in the pane (3 per row at IconSpacing 100, group maximised by 
   drag up 200 px -> view.y 188; further -> 385 (= 759-374, clamped; OK button and "KB Free" line
   visible in the shot); tap on the panned dialog -> `button down/up`, view.y unchanged; drag back
   down -> 57; Esc closes it -> view.y 0.
+
+### 2026-09-02 — Terminal close, oversize self-resize notification, Paintbrush KeepSize (PVMON v28)
+- **CMD_CLOSE** first cancels visible `#32770` dialogs owned by the window (`WM_COMMAND IDCANCEL`),
+  then posts `WM_CLOSE`: a modal start-up dialog (Terminal's "Default Serial Port") disables its
+  owner and kept `WM_CLOSE` queued, so the window looked unclosable. Tour TERMINAL `close=pass`.
+- The hook now watches `WM_WINDOWPOSCHANGED`: a resizable, unowned top-level window that has just
+  become wider than the column or taller than the shell posts `WM_USER+1` to PVMON, which parks
+  (clamps) it at once instead of at its next poll; `park()` logs `pvmon: <title> WxH` when it clamps,
+  so the phone's Terminal case (`1916x892` = 80 columns of its terminal font; not reproduced in the
+  pane or headless, where Terminal stays 352x600) will show who wins if the program re-asserts.
+- **Paintbrush**: the toolbox width follows the client width (~36 px at 352, two 18 px columns) while
+  the cell height follows the client height ((client - palette)/9 ≈ 32 px), so no 352-wide size gives
+  square tools (they would need a ~200 px tall client). PBRUSH is now `KeepSize` (natural size, the
+  host scales it uniformly); `Size.PBRUSH`/`MaxHeight.PBRUSH` removed.
+- Hearts' welcome dialog: OK is the default button but does nothing while the name field is empty;
+  typing a letter first, then Enter, closes it (verified); Alt+Q quits.
+
+### 2026-09-02 — shell dialogs: reflow only button columns; wide fixed windows take two slots (PVMON v31)
+- **About Program Manager** (natural 505x360 at the 20 px font) was reflowed into a 336x680 stack
+  (values moved under their labels). The shell-dialog reflow now runs only when everything that
+  falls off the right edge is a `Button` (a right-hand button column: Run 483 -> 327, the Open/Save
+  dialogs); anything else is left as laid out at x=0, top visible, clipped at the right (About PM:
+  its OK button is off the column, Esc closes it; Exit Windows 370: both buttons visible). A dialog
+  the reflow declined is remembered so it is not re-tried every poll. Control Panel's About (owner
+  chain not Progman) is untouched: `PVO 0 640 600 505 360` below Control Panel.
+  Host suggestion: a `PVO -1` wider than the shell column could be drawn as its own scaled layer.
+- **Wide fixed-layout windows**: PVMON reports the true rect (the old park clamp cropped Character
+  Map to 640); a fixed-layout window wider than one column takes **two adjacent slots** (both entries
+  hold the window, both free with it; `pvmon: no double slot for <title>` when none). Character Map
+  is now `PVW 0 640 0 785 278` with the full grid; tour `slot` reads it as "not in slot 0" — the tour
+  should accept a window spanning slot n and n+1 when both are its own.
+- Tour after this batch: TERMINAL launch/close/kbd pass, WINFILE pass; CHARMAP `fit`/`slot` are the
+  fixed-layout/double-slot cases above.

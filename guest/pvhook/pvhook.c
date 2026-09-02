@@ -668,6 +668,16 @@ LRESULT CALLBACK __export PvCwpProc(int code, WPARAM wParam, LPARAM lParam)
     if (code >= 0 && m && g_shellW) {
         if (m->message == WM_GETMINMAXINFO && m->lParam) clamp_minmax(m->hwnd, (MINMAXINFO FAR *)m->lParam);
         else if (m->message == WM_WINDOWPOSCHANGING && m->lParam) clamp_windowpos(m->hwnd, (WINDOWPOS FAR *)m->lParam);
+        else if (m->message == WM_WINDOWPOSCHANGED && m->lParam) {
+            /* a resizable program that has just sized itself past the frame (Terminal fits 80
+               columns of its font: 1916 wide): tell PVMON at once rather than at its next poll */
+            WINDOWPOS FAR *wp = (WINDOWPOS FAR *)m->lParam;
+            if (!(wp->flags & SWP_NOSIZE) && (wp->cx > shell_w() || wp->cy > shell_h()) &&
+                !(GetWindowLong(m->hwnd, GWL_STYLE) & WS_CHILD) && !GetWindow(m->hwnd, GW_OWNER)) {
+                HWND mon = FindWindow("PVMonitor", NULL);
+                if (mon) PostMessage(mon, WM_USER + 1, (WPARAM)m->hwnd, 0L);
+            }
+        }
     }
     return CallNextHookEx(g_cwp, code, wParam, lParam);
 }

@@ -54,7 +54,7 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 W=$SHELLW; [ "$W" = 0 ] && W=352
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.MaxHeight.PBRUSH=480 PVMon.Size.PBRUSH=${W}x480 PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER" \
+  PVMon.Live=$LIVE PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
   "windows.device=$( [ "$PRINTER" = TTY ] && echo "Text Printer,TTY" || echo "PDF Printer,PSCRIPT" ),C:\\PRINT.PRN" \
