@@ -20,6 +20,8 @@
         include windefs.inc
         include cursor.inc
         include bank.inc
+PVBLT_IMPL equ 1                ;this module carries the PV blit code
+        include pvblt.inc
 
 	??_out	vgastate		;;Identify if not in quiet mode
 	public	init_hw_regs

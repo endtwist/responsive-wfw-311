@@ -41,6 +41,7 @@ $(OBJ)\v31.obj:         $(SRC)\v31.asm
 			$(ASM) < vrammak
 
 $(OBJ)\bblt.obj:        $(SRC)\bblt.asm         \
+			$(SRC)\inc\pvblt.inc     \
 			$(SRC)\ropdefs.blt      \
 			$(SRC)\roptable.blt     \
 			$(SRC)\inc\bblt.inc     \
@@ -346,12 +347,14 @@ $(OBJ)\trn_pal.obj:     $(SRC)\trn_pal.asm
 			$(ASM) < vrammak
 
 $(OBJ)\vgastate.obj:    $(SRC)\vgastate.asm     \
-			$(SRC)\inc\bank.inc
+			$(SRC)\inc\bank.inc      \
+			$(SRC)\inc\pvblt.inc
 			echo $(ASMFLAGS) $(INC) $(SRC)\$* > vrammak
 			echo $(ASMOPTS) $(OBJ)\$*.obj; >> vrammak
 			$(ASM) < vrammak
 
-$(OBJ)\vgavram.obj:     $(SRC)\vga.asm
+$(OBJ)\vgavram.obj:     $(SRC)\vga.asm          \
+			$(SRC)\inc\pvblt.inc
 			echo $(ASMFLAGS) $(INC) $(SRC)\vga      > vrammak
 			echo $(ASMOPTS) $(OBJ)\$*.obj; >> vrammak
 			$(ASM) < vrammak

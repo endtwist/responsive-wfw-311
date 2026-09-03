@@ -1,6 +1,11 @@
 if(typeof DEBUG === "undefined")
 {
-    globalThis.DEBUG = true;
+    // responsive-wfw311: upstream defaults this to true and the page never set it, so every
+    // dbg_assert ran and every dbg_log's arguments were evaluated on a phone. Default it off and
+    // let a host turn it back on before the module graph loads (globalThis.V86_DEBUG = true, or
+    // V86_DEBUG=1 in the environment for the node harnesses).
+    globalThis.DEBUG = globalThis.V86_DEBUG === true ||
+        (typeof process !== "undefined" && !!process.env && process.env.V86_DEBUG === "1");
 }
 
 import { LOG_NAMES } from "./const.js";

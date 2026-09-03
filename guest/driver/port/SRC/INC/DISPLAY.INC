@@ -181,6 +181,9 @@ WF_80x87        =    0400h
 BOARD_FLAG_VRAM 	EQU	10000000B
 BOARD_FLAG_SPLITBANK    EQU     01000000B
 BOARD_FLAG_ENABLE_216	EQU	00100000B
+;	responsive-wfw311: the paravirtual adapter does screen-to-screen blits
+;	itself (INC/PVBLT.INC), read from DISPI CTRL by pv_blt_probe in vga.asm
+BOARD_FLAG_PV_BLT	EQU	00010000B
 
 IFNDEF	FILE_VGA
 sBegin  Data

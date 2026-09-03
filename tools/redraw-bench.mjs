@@ -12,6 +12,13 @@
  *
  *   node tools/redraw-bench.mjs [--ops progman,notepad,winfile,sol,pbrush] [--nofast] [--json out] [--log]
  *   --nofast keeps every A000 write in JS (vga.pv_planar_disabled), for A/B against the rust path.
+ *   --cold cold-boots Windows instead of restoring the snapshot (needed with --noblt).
+ *   --pointer leaves the guest pointer visible during the scroll and switch benchmarks (the phone
+ *   hides it, and the software cursor's save/restore around each blit otherwise dominates them).
+ *   --nochain4 sends the chain-4 A000 writes back to JS (the state before that fast path).
+ *   --noblt refuses the adapter screen-to-screen blit (vga.pv_blt_disabled), for A/B against the
+ *   driver's banked latch copy. Both are set before the snapshot is restored, so the driver reads
+ *   the capability with the flag already in force.
  *
  * Caveat: the CS:IP sample is taken where a main_loop slice ends, which is biased towards places
  * where the JIT exits (exception handlers, far calls), so "hot" is indicative; the counters are exact.
@@ -65,13 +72,15 @@ if (flag("--log")) emulator.bus.register("pv-debug", line => console.log("[guest
 await new Promise(res => emulator.add_listener("emulator-ready", res));
 const cpu = emulator.v86.cpu, vga = cpu.devices.vga;
 if (flag("--nofast")) { vga.pv_planar_disabled = true; vga.pv_planar_sync(); }
+if (flag("--nochain4")) { vga.pv_planar_chain4_disabled = true; vga.pv_planar_sync(); }   // only the chain-4 A000 writes go back to JS
+if (flag("--noblt")) vga.pv_blt_disabled = true;   // refuse the adapter blit capability: the driver falls back to its banked latch copy
 const wexp = n => { try { return cpu.wm.exports[n](...[].slice.call(arguments, 1)) >>> 0; } catch (e) { return 0; } };
 const excStat = i => { try { return cpu.wm.exports.pv_exc_stat(i) >>> 0; } catch (e) { return 0; } };
 const planarStat = () => { try { return cpu.wm.exports.pv_planar_stat() >>> 0; } catch (e) { return 0; } };
 const fbhash = () => { const m = vga.svga_mem ? vga.svga_mem() : vga.svga_memory; let h = 0x811c9dc5; for (let y = 0; y < SCREEN_H; y++) { const row = y * 4096; for (let x = 0; x < SCREEN_W; x++) { h ^= m[row + x]; h = Math.imul(h, 0x01000193); } } return (h >>> 0).toString(16); };
 
 /* ---- counters ---- */
-const C = { a000w: 0, a000r: 0, dispiIdx: 0, dispiData: 0, bank: 0, bankSame: 0, cursorReg: 0, other: 0 };
+const C = { a000w: 0, a000r: 0, dispiIdx: 0, dispiData: 0, bank: 0, bankSame: 0, cursorReg: 0, other: 0, ide: 0, ideNs: 0 };
 const lastBank = { 0x18: -1, 0x19: -1 };
 const blk = 0xA0000 >>> 17;
 const ow = cpu.memory_map_write8[blk], orr = cpu.memory_map_read8[blk];
@@ -90,6 +99,15 @@ for (const [port, name] of [[0x1CE, "idx"], [0x1CF, "data"]]) {
     P[port][w] = name === "idx"
       ? function (v) { if (w === "write32") countData(v & 0xFFFF, v >>> 16); else C.dispiIdx++; return o.call(this, v); }
       : function (v) { countData(vga.dispi_index, v); return o.call(this, v); };
+  }
+}
+/* IDE data-port reads: SeaBIOS reads every sector of an INT 13h read with `rep insw`, one JS port
+   call per word, so this counts them and times the JS side of them (the wasm->JS transition itself
+   is not included, which is exactly the part a block transfer would remove). */
+for (const port of [0x1F0, 0x170]) {
+  for (const w of ["read8", "read16", "read32"]) {
+    const o = cpu.io.ports[port][w]; if (!o) continue;
+    cpu.io.ports[port][w] = function () { const t = performance.now(); const r = o.call(this); C.ideNs += (performance.now() - t) * 1e6; C.ide++; return r; };
   }
 }
 /* slice profiler */
@@ -164,13 +182,20 @@ const where = (cs, ip, cpl) => { const a = attribute(cs, ip, cpl); return a.seg 
 
 /* ---- boot ---- */
 emulator.bus.send("pv-set-dpi", 120); emulator.bus.send("sb16-dsp-version", [2, 1]); emulator.bus.send("pv-request-mode", [SCREEN_W, SCREEN_H]);
-const snap = zlib.gunzipSync(fs.readFileSync(STATE));
-await emulator.restore_state(snap.buffer.slice(snap.byteOffset, snap.byteOffset + snap.byteLength));
-emulator.run(); await sleep(300); emulator.bus.send("pv-command", [6, 0]);
+/* --cold boots Windows instead of restoring the snapshot (about 5 s). The driver reads the
+   adapter's blit capability once, at set_board_flags and setmode, so an A/B on --noblt has to
+   start before Windows starts: a restored snapshot already has the answer in guest memory. */
+if (flag("--cold")) {
+  emulator.run();
+} else {
+  const snap = zlib.gunzipSync(fs.readFileSync(STATE));
+  await emulator.restore_state(snap.buffer.slice(snap.byteOffset, snap.byteOffset + snap.byteLength));
+  emulator.run(); await sleep(300); emulator.bus.send("pv-command", [6, 0]);
+}
 const tb = performance.now();
-while (!st.desktopReady && performance.now() - tb < 60000) await sleep(100);
+while (!st.desktopReady && performance.now() - tb < 240000) await sleep(100);
 if (!st.desktopReady) { console.error("desktop not ready"); process.exit(1); }
-console.log(`desktop ready; shell ${st.shell.w}x${st.shell.h} pvmon v${st.shell.ver}; wasm counters: exc ${cpu.wm.exports.pv_exc_stat ? "yes" : "no"}, planar ${cpu.wm.exports.pv_planar_stat ? "yes" : "no"}${flag("--nofast") ? " (fast path disabled)" : ""}`);
+console.log(`desktop ready; shell ${st.shell.w}x${st.shell.h} pvmon v${st.shell.ver}; wasm counters: exc ${cpu.wm.exports.pv_exc_stat ? "yes" : "no"}, planar ${cpu.wm.exports.pv_planar_stat ? "yes" : "no"}${flag("--nofast") ? " (fast path disabled)" : ""}, blt cap ${vga.svga_register_read(0x26)}`);
 const until = async (pred, timeout, step = 20) => { const s = performance.now(); for (;;) { const v = pred(); if (v) return v; if (performance.now() - s > timeout) return null; await sleep(step); } };
 
 /* idle: the guest is halted (INT 2F idle hook) at >= 90% of 10 ms polls over 400 ms; returns when the quiet period began */
@@ -184,7 +209,7 @@ async function waitIdle(maxMs = 25000) {
   }
   return performance.now();
 }
-const snapC = () => ({ ...C, gp: excStat(13), pf: excStat(14), irq: excStat(32), fast: planarStat() });
+const snapC = () => ({ ...C, gp: excStat(13), pf: excStat(14), irq: excStat(32), fast: planarStat(), blt: vga.pv_blt_count | 0 });
 const diffC = (a, b) => Object.fromEntries(Object.keys(a).map(k => [k, b[k] - a[k]]));
 const results = [];
 async function measure(name, fn) {
@@ -203,7 +228,7 @@ async function measure(name, fn) {
   row.hot = top.slice(0, 8).map(e => `${where(e.cs, e.ip, e.cpl)} ${(100 * e.t / prof.t).toFixed(1)}%`);
   row.writeSites = [...writeSites.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, n]) => `${where(Math.floor(k / 65536), k % 65536, 3)} ${n}`);
   results.push(row);
-  console.log(`\n== ${name}: ${instr} instr, busy ${row.busy} ms (${row.mips} MIPS) of ${row.wall} ms to idle; fb ${row.fb}; A000 w=${d.a000w} JS +${d.fast} rust, r=${d.a000r}; DISPI bank reg writes=${d.bank} (unchanged ${d.bankSame}) cursor=${d.cursorReg} other=${d.other} idx16=${d.dispiIdx}; #GP=${d.gp} #PF=${d.pf} irq/other=${d.irq}; ring time ms ${row.byRing.join("/")}`);
+  console.log(`\n== ${name}: ${instr} instr, busy ${row.busy} ms (${row.mips} MIPS) of ${row.wall} ms to idle; fb ${row.fb}; A000 w=${d.a000w} JS +${d.fast} rust, r=${d.a000r}; DISPI bank reg writes=${d.bank} (unchanged ${d.bankSame}) cursor=${d.cursorReg} other=${d.other} idx16=${d.dispiIdx}; PV blits=${d.blt}; IDE data-port reads=${d.ide} (${Math.round(d.ideNs / 1e6)} ms in JS); #GP=${d.gp} #PF=${d.pf} irq/other=${d.irq}; ring time ms ${row.byRing.join("/")}`);
   console.log("  modules: " + row.mods.join(" | "));
   console.log("  hot: " + row.hot.join(" | "));
   console.log("  JS A000 write sites (1/97): " + row.writeSites.join(" | "));
@@ -221,16 +246,104 @@ async function openApp(exe, rx, label) {
   const L = winOf(rx); if (L) await minRestore(`${label} restore (repaint)`, L.slot);
   await closeWin(rx);
 }
+/* ---- OS-level operations: scroll, move, switch, resize ----
+ * Windows does all four by blitting inside the frame buffer and repainting only what that
+ * uncovered, so they exercise the screen-to-screen path the ordinary repaint ops do not.
+ * Scroll goes through PVMON's CMD_SCROLL (the same WM_VSCROLL the host's two-finger gesture
+ * sends); move and resize are real pointer drags on the caption / bottom-right corner, so
+ * USER's own move loop and its ScrollWindow/WM_NCPAINT traffic are in the measurement.  */
+let cursor = null, cursorSeq = 0;
+emulator.bus.register("pv-cursor", xy => { cursor = { x: xy[0], y: xy[1] }; cursorSeq++; });
+async function place(x, y) {
+  const seq = cursorSeq, t0 = performance.now();
+  emulator.bus.send("pv-mouse-abs", [Math.round((x + 0.5) * 65536 / SCREEN_W) & 0xFFFF, Math.round((y + 0.5) * 65536 / SCREEN_H) & 0xFFFF]);
+  emulator.bus.send("mouse-delta", [1, 0]);
+  while (cursorSeq === seq && performance.now() - t0 < 1200) await sleep(5);
+  if (cursorSeq === seq) { emulator.bus.send("pv-command-string", [9, `${x},${y}`]); while (cursorSeq === seq && performance.now() - t0 < 2000) await sleep(5); }
+  return cursorSeq !== seq ? cursor : null;
+}
+const click = down => emulator.bus.send("mouse-click", [down, false, false]);
+async function drag(x0, y0, x1, y1, steps = 8) {
+  await place(x0, y0); await sleep(60); click(true); await sleep(120);
+  for (let i = 1; i <= steps; i++) { await place(Math.round(x0 + (x1 - x0) * i / steps), Math.round(y0 + (y1 - y0) * i / steps)); await sleep(40); }
+  await sleep(60); click(false); await sleep(120);
+}
+const SCROLL = (slot, dir, lines) => emulator.bus.send("pv-command", [7, (slot & 0xFF) | (dir << 8) | (lines << 12)]);
+/* The phone hides the guest pointer (host CMD_CURSOR 0), and that matters to the measurement:
+   with it visible the driver saves and restores the pixels under it around every blit, which for
+   a File Manager list scroll is ~90% of the A000 traffic. Scroll and window-switch benchmarks
+   therefore run with it hidden, as on the phone; --pointer keeps it visible. Move and resize are
+   pointer drags, so they need it (and on the phone the host moves the layer itself anyway). */
+const POINTER = flag("--pointer");
+async function pointer(on) { if (!POINTER) { emulator.bus.send("pv-command", [10, on ? 1 : 0]); await sleep(300); await waitIdle(); } }
+async function scrollBench(exe, rx, label, { lines = 3, n = 10 } = {}) {
+  emulator.bus.send("pv-command-string", [5, exe]);
+  const L = await until(() => winOf(rx), 20000);
+  if (!L) { console.log(`${label}: never appeared`); return; }
+  await sleep(600); await waitIdle();
+  await pointer(false);
+  SCROLL(L.slot, 2, lines); await sleep(400); await waitIdle();          // one warm-up scroll
+  await measure(`${label} scroll down ${n}x${lines} lines`, async () => {
+    for (let i = 0; i < n; i++) { SCROLL(L.slot, 2, lines); await sleep(120); }
+    await sleep(200);
+  });
+  await measure(`${label} scroll up ${n}x${lines} lines`, async () => {
+    for (let i = 0; i < n; i++) { SCROLL(L.slot, 1, lines); await sleep(120); }
+    await sleep(200);
+  });
+  await pointer(true);
+  await closeWin(rx);
+}
+async function moveResizeBench() {
+  emulator.bus.send("pv-command-string", [5, "NOTEPAD.EXE"]);
+  let L = await until(() => winOf(/Notepad/), 15000);
+  if (!L) { console.log("move/resize: no Notepad"); return; }
+  await sleep(600); await waitIdle();
+  L = winOf(/Notepad/);
+  const capX = Math.round(L.wx + L.ww / 2), capY = Math.round(L.wy + (L.gy - L.wy) / 2);
+  await measure("notepad move (caption drag 240,140)", async () => { await drag(capX, capY, capX + 240, capY + 140); });
+  await sleep(300); await waitIdle();
+  L = winOf(/Notepad/) || L;
+  const capX2 = Math.round(L.wx + L.ww / 2), capY2 = Math.round(L.wy + (L.gy - L.wy) / 2);
+  await measure("notepad move back", async () => { await drag(capX2, capY2, capX2 - 240, capY2 - 140); });
+  await sleep(300); await waitIdle();
+  L = winOf(/Notepad/) || L;
+  const brX = L.wx + L.ww - 2, brY = L.wy + L.wh - 2;
+  await measure("notepad resize (corner drag +160,+120)", async () => { await drag(brX, brY, brX + 160, brY + 120); });
+  await sleep(300); await waitIdle();
+  L = winOf(/Notepad/) || L;
+  await measure("notepad resize back", async () => { await drag(L.wx + L.ww - 2, L.wy + L.wh - 2, L.wx + L.ww - 162, L.wy + L.wh - 122); });
+  await closeWin(/Notepad/);
+}
+async function switchBench() {
+  emulator.bus.send("pv-command-string", [5, "NOTEPAD.EXE"]);
+  const A = await until(() => winOf(/Notepad/), 15000);
+  await sleep(500);
+  emulator.bus.send("pv-command-string", [5, "WINFILE.EXE"]);
+  const B = await until(() => winOf(/File Manager/), 20000);
+  if (!A || !B) { console.log("switch: need both windows"); return; }
+  await sleep(800); await waitIdle();
+  await pointer(false);
+  await measure("window switch (activate the one behind)", async () => { emulator.bus.send("pv-command", [1, A.slot]); await sleep(400); });
+  await measure("window switch back", async () => { emulator.bus.send("pv-command", [1, B.slot]); await sleep(400); });
+  await pointer(true);
+  await closeWin(/File Manager/); await closeWin(/Notepad/);
+}
 for (const op of OPS) {
   if (op === "progman") await minRestore("progman restore (repaint)", shellSlot());
   else if (op === "notepad") await openApp("NOTEPAD.EXE", /Notepad/, "notepad");
   else if (op === "winfile") await openApp("WINFILE.EXE", /File Manager/, "winfile");
   else if (op === "sol") await openApp("SOL.EXE", /Solitaire/, "solitaire");
   else if (op === "pbrush") await openApp("PBRUSH.EXE", /Paintbrush/, "paintbrush");
+  else if (op === "scroll-winfile") await scrollBench("WINFILE.EXE", /File Manager/, "winfile list");
+  else if (op === "scroll-notepad") await scrollBench("NOTEPAD.EXE C:\\WINDOWS\\WIN.INI", /Notepad/, "notepad WIN.INI");
+  else if (op === "scroll-write") await scrollBench("WRITE.EXE C:\\WINDOWS\\README.WRI", /Write/, "write README.WRI");
+  else if (op === "moveresize") await moveResizeBench();
+  else if (op === "switch") await switchBench();
   else console.log("unknown op " + op);
 }
-console.log("\n| operation | instr (M) | busy ms | node MIPS | A000 writes JS | A000 writes rust | A000 reads | bank reg writes | #GP | #PF | ring0 ms | fb |");
-console.log("|---|---|---|---|---|---|---|---|---|---|---|---|");
-for (const r of results) console.log(`| ${r.name} | ${(r.instr / 1e6).toFixed(2)} | ${r.busy} | ${r.mips} | ${r.a000w} | ${r.fast} | ${r.a000r} | ${r.bank} | ${r.gp} | ${r.pf} | ${r.byRing[0]} | ${r.fb} |`);
+console.log("\n| operation | instr (M) | busy ms | node MIPS | A000 writes JS | A000 writes rust | A000 reads | bank reg writes | PV blits | #GP | #PF | ring0 ms | fb |");
+console.log("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+for (const r of results) console.log(`| ${r.name} | ${(r.instr / 1e6).toFixed(2)} | ${r.busy} | ${r.mips} | ${r.a000w} | ${r.fast} | ${r.a000r} | ${r.bank} | ${r.blt} | ${r.gp} | ${r.pf} | ${r.byRing[0]} | ${r.fb} |`);
 if (val("--json")) fs.writeFileSync(val("--json"), JSON.stringify(results, null, 1));
 await emulator.stop(); process.exit(0);

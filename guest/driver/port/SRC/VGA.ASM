@@ -67,6 +67,7 @@ FILE_VGA	EQU	1
 	include ega.inc
         include ssb.inc
 	include display.inc
+	include pvblt.inc		;responsive-wfw311: adapter blit registers
 	include macros.mac
 	include	cursor.inc
 	include rt.mac
@@ -881,8 +882,40 @@ set_board_flags 	PROC	NEAR
 	mov	Video_Board_Id,ax
 	mov	Video_Memory_Banks,al
 	mov	Video_Board_Flags,al
+	call	pv_blt_probe		;but it may do screen-to-screen blits
 	ret
 set_board_flags 	ENDP
+
+
+;	pv_blt_probe
+;
+;	responsive-wfw311: ask the paravirtual adapter whether it will do
+;	screen-to-screen blits (DISPI CTRL, see INC/PVBLT.INC) and record the
+;	answer as BOARD_FLAG_PV_BLT in Video_Board_Flags. Called from
+;	set_board_flags and from setmode, since set_board_flags clears the byte
+;	and either may run last.
+;	PARMS:
+;	ds	Data
+
+PUBLIC	pv_blt_probe
+pv_blt_probe	PROC	NEAR
+	push	ax
+	push	dx
+	mov	dx,01CEh
+	mov	ax,PV_BLT_CTRL
+	out	dx,ax			;index (16-bit: nothing at interrupt time
+	inc	dx			; touches the index register)
+	in	ax,dx
+	and	al,1
+	je	@F
+	or	Video_Board_Flags,BOARD_FLAG_PV_BLT
+	jmp	short pv_blt_probe_done
+@@:	and	Video_Board_Flags,NOT BOARD_FLAG_PV_BLT
+pv_blt_probe_done:
+	pop	dx
+	pop	ax
+	ret
+pv_blt_probe	ENDP
 
 
 
@@ -993,6 +1026,7 @@ setmode proc    near
 	out	dx,ax
 	mov	pv_hw_read_bank,0FFh	;the banks reset with the mode: pv_apply_banks
 	mov	pv_hw_write_bank,0FFh	; must reprogram them on its next call
+	call	pv_blt_probe		;does this adapter do screen-to-screen blits?
 	mov	dx,03C4h		;sequencer: chain-4 on, extended memory, odd/even off
 	mov	ax,0E04h		; (the adapter honours planar write modes when
 	out	dx,ax			;  chain-4 is off, like real SVGA silicon)
