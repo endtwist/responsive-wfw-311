@@ -88,11 +88,9 @@ people hold a phone. Landscape is explicitly not a priority.
 8. **Networking.** This is Windows *for Workgroups*, and v86 has a network card with a
    fetch-based backend. Even partial TCP/IP puts a period-correct browser and file sharing in
    reach. The largest item on the list and the most distinctive.
-9. **MIDI and system sounds.** MSADLIB.DRV is already staged. Media Player playing MIDI, and
-   Windows' own event sounds, cost little now that audio works.
-10. **Deep links with state.** `/solitaire` exists; extend to opening a specific document
-    (Write, Notepad, Paintbrush) and to resuming a saved session, so a link is shareable.
-10b. **Shareable session snapshots (blob-backed).** A link that drops someone into a
+9. **Deep links with state.** `/solitaire` exists; extend to opening a specific document
+   (Write, Notepad, Paintbrush) and to resuming a saved session, so a link is shareable.
+9b. **Shareable session snapshots (blob-backed).** A link that drops someone into a
     mid-Solitaire game, which encoded state cannot do because the deal lives in app memory.
     The page already saves and restores whole-machine state; add: host gzips it (~2 MB) and
     uploads to Vercel Blob, the link carries the blob id, opening it restores in about the
@@ -117,21 +115,21 @@ people hold a phone. Landscape is explicitly not a priority.
       unguessable, not sequential.
     - Sequence after items 5 (files in/out) and 6 (clipboard), which unlock the smaller
       sharing wins first.
-11. **Screen-reader access.** The page is pixels, so VoiceOver sees nothing. Build an invisible
+10. **Screen-reader access.** The page is pixels, so VoiceOver sees nothing. Build an invisible
     accessibility tree from the window, menu and control information the guest already
     reports. Not visible chrome, so it stays inside the rule.
-12. **First-run note as ABOUT.EXE.** Done 2026-09-03 (SPEC): `guest/about/` builds ABOUT.EXE with
+11. **First-run note as ABOUT.EXE.** Done 2026-09-03 (SPEC): `guest/about/` builds ABOUT.EXE with
     the Watcom toolchain, staged as `image/changes/windows/ABOUT.EXE`, opened once by WIN.INI
     `[windows] run=` and suppressed afterwards by `[PVMon] AboutShown`; "Read Me First" in Main
     shows it again. Remaining: the `/about` alias in `web/app.js`'s `APPS` table.
 
 ## Known, not yet scheduled
 
-- **MIDI is configured but silent**: `[drivers] midi=msadlib.drv` is written and the driver loads,
-  but v86's SB16 does not synthesise the OPL FM chip (write-only dummy registers, status port a
-  constant 0xFF, so even Adlib detection fails). Chip's Challenge's Background Music is greyed and
-  Media Player says "This device cannot play" on a .MID. Needs a v86 change: implement OPL, or
-  route MIDI out to WebAudio. Everything else about sound works (SPEC 2026-09-03).
+- **MIDI is thin, by the mapper's design**: v86 now has an OPL3 and MIDI plays (SPEC 2026-09-03),
+  but MIDIMAP.CFG's only usable setup maps MIDI channels 13-16, so a .MID renders as the
+  base-level Ad Lib three melodic voices plus percussion. A fuller rendition needs a MIDIMAP.CFG
+  whose setup routes all 16 channels to the Ad Lib port; the file is a packed binary and the
+  Control Panel applet that would write it is not offered on this install.
 - **Entertainment Pack leftovers**: Tetris' Sound option is on but it drives the PC speaker (no
   .WAV of its own) and nothing is audible; Golf, Tut's Tomb, Rodent's Revenge and Pipe Dream were
   silent in the interactions tested. Taipei's Hint (H) highlight was too brief to catch headlessly,

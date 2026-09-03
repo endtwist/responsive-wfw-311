@@ -41,6 +41,12 @@ if opts.get("sound"):
     setkey(secs, "drivers", "midi", "msadlib.drv")
     setkey(secs, "msadlib.drv", "port", "388")
     addline(secs, "386Enh", "device=vsbd.386")
+    # MIDI: MSADLIB.DRV is the Ad Lib FM output driver (ports 388/389, no INI settings of its own
+    # beyond [adlib.drv] WriteDelay), and the box has no wavetable, so FM is the only MIDI there
+    # is. midimapper= is already in the stock SYSTEM.INI; MIDIMAP.CFG's "Ad Lib" base-level setup
+    # is what routes the mapper to this driver (SPEC 2026-09-03).
+    setkey(secs, "drivers", "midi", "msadlib.drv")
+    setkey(secs, "boot.description", "midi", "Ad Lib")
 # sysfont=PVSYS.FON: a taller system font (tools/mkfon.py) makes captions, menus and caption
 # boxes bigger, which is how the chrome becomes thumb-sized with only Windows' own pixels.
 setkey(secs, "boot", "fonts.fon", opts.get("sysfont", fonts[2]) if large else fonts[2])

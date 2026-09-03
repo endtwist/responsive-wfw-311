@@ -2890,3 +2890,114 @@ Risks:
   registers a port width twice, it now fails quietly.
 - The measurement image has no `image/changes-local/`, so the Entertainment Pack games are absent
   from these runs; nothing in this pass is game-specific.
+### 2026-09-03 — MIDI: v86 grew an OPL3, and Windows' event sounds turned on
+
+**The blocker was that v86 had no FM synthesis at all.** `v86/src/sb16.js` decoded the Ad Lib
+register ports (0x220/0x228/0x388) into an empty `FM_HANDLERS` table, threw every write away,
+and returned a constant `0xFF` from the status port. MSADLIB.DRV's very first act is the classic
+Ad Lib detection — write register 4 = 0x60 then 0x80, read the status (expect 0x00), arm timer 1
+with register 2 = 0xFF and register 4 = 0x21, wait, read again (expect 0xC0) — so it failed at
+step one, MMSYSTEM reported no MIDI output device, and Media Player answered "This device cannot
+play." for any `.MID`. Josh's call: build the chip rather than work around it.
+
+**`v86/src/opl3.js` (new, ~520 lines, written for this repo).** A full OPL3 (YMF262), which is a
+superset of the OPL2 (YM3812) that MSADLIB actually drives. Nothing was vendored — no
+third-party emulator source is included and there is no licence to carry — and the two ROM
+tables are *computed at load* from their defining formulas rather than transcribed:
+`LOGSIN[i] = round(-log2(sin((i+0.5)·π/512))·256)` and `EXP[i] = round(1024·2^((255-i)/256))`.
+Written from the public documentation: the Yamaha YMF262 application manual
+(`map.grauw.nl/resources/sound/yamaha_ymf262.pdf`) and the OPL3 programming guide
+(`fit.vutbr.cz/~arnost/opl/opl3.html`), both already cited at the top of `sb16.js`.
+
+What it implements: 36 operators in two banks; 18 two-operator channels, the three
+four-operator pairs per bank (register 0x104) with all four algorithms, and the five-voice
+rhythm section (register 0xBD, with the 23-bit noise LFSR and the hi-hat/snare/cymbal phase
+arithmetic); all eight waveforms, gated to the first four in OPL2 mode by the waveform-select
+enable in register 0x01 and to the sine alone when that is off; the DADSR envelope generator
+with key-scaled rates, the percussive/sustaining flag, 6-bit total level, key-scale level and
+the tremolo/vibrato LFOs; feedback and phase modulation in the chip's own units (an operator's
+13-bit output added straight to the 10-bit phase index, so full scale is four cycles of
+deviation); OPL3 stereo panning. Output is 49716 Hz (14.318 MHz / 288) stereo float, scaled by
+1/32768, which leaves one loud voice near -14 dBFS.
+
+Two details worth recording:
+
+- **Envelope rates are a continuous model, calibrated against the data sheet** rather than the
+  hardware's counter/shift network: the step per sample is `2^((rate-48)/4)` envelope units,
+  where `rate = 4·R + keyscale`. That puts DR=15 with no key scaling at 511/8 = 64 samples =
+  1.28 ms for the full 96 dB (data sheet: 1.27 ms) and DR=1 at 21.1 s (data sheet: 21 s).
+  Attack is the same schedule applied multiplicatively to the remaining gap.
+- **The timers are charged by the status read, not only by the wall clock.** A driver arms timer
+  1 for 80 µs and then waits by spinning; this emulator runs that spin in far less than 80 µs of
+  real time, so a purely wall-clock timer was never up when MSADLIB looked (verified: the
+  detection stopped dead after its six writes). `timers_read_tick()` charges one 80 µs step to
+  each read of the status port — the only thing that ever reads it is such a wait — so with the
+  usual load of 0xFF the flag is up on the first read, exactly where a real 386 would have found
+  it. `timers_advance(now)` keeps the wall clock as well.
+
+**`v86/src/sb16.js`.** The four FM ports now address the chip for real: 0x220/0x228/0x388 select
+a register in the first bank, 0x222 selects one in the second (`0x100 | value`), and the data
+ports write it; the three FM status reads return `opl.read_status()`. The dead `FM_HANDLERS`
+registry and its 191 lines of empty stubs are gone. Rendering is paced on the wall clock in a
+new `opl_timer(now)`, called from the existing `timer(now)` (whose recording half became
+`rec_timer`): blocks of 128–2048 samples are generated as they come due and sent as
+`opl-send-data` with transferable buffers, at most 4096 samples of catch-up after a stall.
+`any_active()` returns false when every envelope is off, so an idle Windows costs one 36-entry
+scan per tick and nothing is sent. The chip is deliberately *not* in the snapshot (like the
+recording path): `set_state` resets it, so a state saved mid-note comes back silent instead of
+with the note stuck on. `sb16-trace` now also prints the first 400 register writes.
+
+**Why a second audio channel and not the wave DAC.** The DAC is a pull-model queue whose
+sampling rate follows whatever DMA playback the guest programmed (22050, 22222, …). MIDI has to
+be able to sound at the same time as a `.WAV` without the two agreeing about a rate, and
+`v86/src/browser/speaker.js` belongs to another agent, so the page owns the FM output itself:
+`web/app.js` drains `opl-send-data` into a 32768-frame interleaved ring and plays it through a
+`ScriptProcessor(1024, 0, 2)` on the speaker adapter's own AudioContext, resampling 49716 Hz to
+the context's rate with linear interpolation. 2048 frames of pre-roll, silence on under-run, and
+a jump forward if the ring ever runs more than ~480 ms ahead. Gain 3, the same the speaker
+adapter gives its own DAC source. `window.oplState()` reports blocks, queue depth, under-runs
+and skips.
+
+**Guest configuration.** `tools/inied.py` (under `sound=`) adds `[drivers] midi=msadlib.drv` and
+`[boot.description] midi=Ad Lib`; `midimapper=midimap.drv` and `[mci] Sequencer=mciseq.drv` are
+already in the stock SYSTEM.INI, and MSADLIB has no settings of its own beyond `[adlib.drv]
+WriteDelay`. Control Panel → Drivers lists **Ad Lib** with no "configuration or hardware
+problem" box. MIDIMAP.CFG is left exactly as shipped: its current setup is the 16-bit field at
+offset 6, and the stock value 7 is "Ad Lib general", whose channel entries name the "Ad Lib"
+port — the one port this machine has. All nine setups were tried; 6 ("Ad Lib", despite the name)
+and the rest point at Roland or Creative ports and raise "The current MIDI Mapper setup refers
+to a MIDI device that is not installed" (`shots/play-err.png`). Pointing `midimapper=` at
+msadlib.drv to bypass the mapper does not work either. Setup 7 maps MIDI channels 13–16, so the
+rendition is the authentic base-level Ad Lib one: three melodic voices plus the rhythm section
+(observed: `0xBD` = 0x21, hi-hat).
+
+**Windows' event sounds.** The stock WIN.INI already lists the WAVs in `[Sounds]`; what it
+lacked was `[Sound] Enable=1`, the master switch the Sound applet writes, without which MMSYSTEM
+plays none of them. `image/build-image.sh` writes it under `sound=1` and asserts the nine names
+(SystemStart/Exit/Default/Asterisk/Question/Exclamation/Hand, RingIn, RingOut) against
+CHIMES/DING/RINGIN/RINGOUT.WAV, all of which ship in C:\WINDOWS. Note that Windows 3.1's
+`MessageBox` does **not** beep for an icon style on its own — a box appearing is silent — so the
+event to test is a real `MessageBeep`: a keystroke a dialog has no button for.
+
+**Evidence** (headless, `tools/probe.mjs`, image `work-phone-20260903-110757.img`):
+
+| what | result |
+|---|---|
+| boot | `dac blocks=32 samples=16384 rates=22050,22222` — SystemStart, and CHIMES.WAV is 0.74 s at 22222 Hz. Peak 0.475 |
+| MessageBeep | two unhandled keystrokes in Notepad's "cannot find file" box → `dac 48 blocks / 24576 samples`, 0.55 s each = DING.WAV |
+| CANYON.MID | Media Player → Play: `fm blocks=2045 samples=510462 @49716Hz regwrites=3290 peak=0.207 rms=0.0278`; 510462 samples in a 10 s window is 10.27 s of audio, i.e. real time. `shots/canyon-fm.wav` |
+| CHIP01.MID (games overlay) | `fm blocks=1648 samples=410762 regwrites=2874 peak=0.310 rms=0.0472`. `shots/chip01-fm.wav` |
+| Chip's Challenge | Options → **Background Music** is no longer greyed out (`shots/chips-options.png`); enabling it gives `fm blocks=2704 samples=395472 regwrites=2769 peak=0.257 rms=0.0514`. `shots/chips-music.wav` |
+| pitch check | spectra hold real notes across the range: E2/E3 (82/164 Hz) in Chip's music, G4/E5 in CHIP01, D7/G7 partials in Canyon's high base-level part |
+| host side | pane at localhost:8451, real AudioContext `running`: `blocks=5386 samples=1346393 queued=2668 under=0 skips=0`, and 49709 samples/s consumed against a nominal 49716 over 6 s — 0.014% off, buffer steady at 2200–2700 frames, no under-runs in 20 s |
+
+`tools/probe.mjs` gained `--audio-trace` (turns on `sb16-trace`, which now includes OPL register
+writes), `clickwin:dx,dy` (click at an offset from the current window's corner — Media Player's
+Play button is +40,163, and a fixed screen coordinate broke once ABOUT.EXE took slot 0), and its
+`audio` step now reports the FM channel and the PC speaker alongside the wave DAC and can dump
+the FM output as a WAV (`audio:shots/x.wav`).
+
+`cd v86 && make build/libv86.js` passes closure's VERBOSE type checks (0 errors, 0 warnings).
+**No wasm rebuild is needed** — the OPL is pure JavaScript and the page loads `v86/src` modules
+directly. `node tools/tour.mjs --apps MPLAYER,SOUNDREC,NOTEPAD` is green apart from the known
+`dlgfit=fail:604x318` (Notepad's File Open, already on the list).

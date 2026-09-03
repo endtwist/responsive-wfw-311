@@ -3,7 +3,8 @@
  * snapshot), waits for the desktop, then runs a list of steps over the bus and prints what the
  * guest reports (PVMON/PVHOOK protocol lines, layer rects, the pointer). No browser pane needed.
  *
- *   node tools/probe.mjs [--image image/x.img] [--state boot.state.gz] [--save out.state.gz] [--log] steps...
+ *   node tools/probe.mjs [--image image/x.img] [--state boot.state.gz] [--save out.state.gz] [--log]
+ *                        [--audio-trace] steps...
  *
  * Steps (in order):
  *   run:NOTEPAD.EXE         WinExec through PVMON (CMD_RUN)
@@ -18,6 +19,7 @@
  *   png:x,y,w,h,file        the rectangle as a PNG (8 bpp through the DAC palette)
  *   cursor:1000,500         absolute pointer to x,y and print where the guest says it landed
  *   tap                     tap the middle of the current window's client area (absolute pointer)
+ *   clickwin:dx,dy          click dx,dy from the current window's top-left corner
  *   down[:ms] / up[:ms]     left button (then wait ms, default 40)
  *   rdown[:ms] / rup[:ms]   right button — what the host's long-press-then-release sends
  *                           (web/app.js LONG_PRESS_MS): JezzBall's wall-orientation toggle
@@ -29,10 +31,10 @@
  *   probe[:1]               PVMON CMD_PROBE: metrics, cursor clip, pointer, capture, children of the window
  *                           under the pointer; :1 = the ClipCursor experiment
  *   beats                   PVMON heartbeat (PVH) gaps so far
- *   audio                   what the SB16 has been asked to play: dac-enable/disable transitions
- *                           and sampling rates (the guest really started a DMA wave playback).
- *                           v86's OPL/FM registers are accepted but not synthesised, so MIDI
- *                           through MSADLIB.DRV never shows up here — see SPEC 2026-09-03.
+ *   audio[:out.wav]         what reached the host's audio since the last `audio` step: the wave
+ *                           DAC (enable/disable transitions, rates, blocks, peak), the FM
+ *                           synthesiser (blocks, register writes, peak, rms) and the PC speaker.
+ *                           With a file, the FM output as a 16-bit stereo WAV to listen to.
  *   close                   CMD_CLOSE the current slot, wait for it to go (N to a save box)
  *   shellsize:700           CMD_SHELLSIZE
  *   republish               CMD_REPUBLISH
@@ -103,7 +105,13 @@ emulator.bus.register("pv-cursor", xy => { cursor = { x: xy[0], y: xy[1] }; curs
 /* ... and a headless stand-in for browser/speaker.js: pull samples on a timer the way the
    AudioWorklet does and measure them, so "did that tap play a sound?" has an answer with no
    audio device. Peak is the loudest |sample| since the last `audio` step. */
-const audio = { enable: 0, disable: 0, rates: [], blocks: 0, samples: 0, peak: 0 };
+/* The FM synthesiser (v86/src/opl3.js) is a second channel: it renders at its own 49716 Hz and
+   pushes blocks, so nothing has to pull it. MIDI arrives here, wave playback on the DAC above.
+   The blocks are kept so the `audio` step can write them out as a WAV to listen to. The PC
+   speaker is counted too, so an event sound that fell back to a bare beep is not mistaken for a
+   wave that played. */
+const audio = { enable: 0, disable: 0, rates: [], blocks: 0, samples: 0, peak: 0,
+                opl: 0, oplSamples: 0, oplRate: 49716, keep: [], beeps: 0, beepHz: 0 };
 emulator.bus.register("dac-enable", () => audio.enable++);
 emulator.bus.register("dac-disable", () => audio.disable++);
 emulator.bus.register("dac-tell-sampling-rate", r => { if (!audio.rates.includes(r)) audio.rates.push(r); });
@@ -113,6 +121,13 @@ emulator.bus.register("dac-send-data", d => {
   for (let i = 0; i < ch.length; i++) { const v = Math.abs(ch[i]); if (v > audio.peak) audio.peak = v; }
 });
 setInterval(() => emulator.bus.send("dac-request-data"), 20).unref?.();
+emulator.bus.register("opl-tell-sampling-rate", r => { if (r > 0) audio.oplRate = r; });
+emulator.bus.register("opl-send-data", d => {
+  audio.opl++; audio.oplSamples += d[0].length;
+  if (audio.keep.length < 4000) audio.keep.push([d[0], d[1]]);
+});
+emulator.bus.register("pcspeaker-enable", () => { audio.beeps++; });
+emulator.bus.register("pcspeaker-update", d => { audio.beepHz = d && d[1] ? Math.round(1193182 / d[1]) : 0; });
 
 const key = async (sc, down) => { emulator.bus.send("keyboard-code", down ? sc : sc | 0x80); await sleep(30); };
 const press = async sc => { await key(sc, true); await key(sc, false); };
@@ -134,6 +149,7 @@ const dump = () => { for (const L of st.layers) console.log("  " + fmt(L)); };
 await new Promise(res => emulator.add_listener("emulator-ready", res));
 emulator.bus.send("pv-set-dpi", 120);
 emulator.bus.send("sb16-dsp-version", [2, 1]);
+if (flag("--audio-trace")) emulator.bus.send("sb16-trace", true);   // DSP/DMA/IRQ and OPL register writes
 emulator.bus.send("pv-request-mode", [SCREEN_W, SCREEN_H]);
 const t0 = performance.now();
 if (STATE) {
@@ -241,10 +257,55 @@ for (const s of steps) {
   }
   else if (op === "probe") { emulator.bus.send("pv-command", [12, +arg || 0]); await sleep(400); }   // PVMON CMD_PROBE: metrics, clip, pointer, capture, children (printed as pvmon: lines)
   else if (op === "audio") {
-    console.log(`${ts()} audio: dac-enable=${audio.enable} dac-disable=${audio.disable} rates=${audio.rates.join(",") || "-"} blocks=${audio.blocks} samples=${audio.samples} peak=${audio.peak.toFixed(3)}`);
+    /* audio[:file.wav]: what has reached the host's audio since the last `audio` step - the wave
+       DAC (Media Player, Windows' event sounds), the FM synthesiser (MIDI) and the PC speaker.
+       With a file, the FM output is written out as a 16-bit stereo WAV to listen to or measure. */
+    const file = arg && arg !== "reset" ? arg : null;
+    const opl = emulator.v86.cpu.devices.sb16 ? emulator.v86.cpu.devices.sb16.opl : null;
+    let fmPeak = 0, sum = 0, n = 0;
+    for (const [l, r] of audio.keep) for (let i = 0; i < l.length; i++) {
+      const v = Math.max(Math.abs(l[i]), Math.abs(r[i]));
+      if (v > fmPeak) fmPeak = v;
+      sum += l[i] * l[i] + r[i] * r[i]; n += 2;
+    }
+    console.log(`${ts()} audio: dac-enable=${audio.enable} dac-disable=${audio.disable} rates=${audio.rates.join(",") || "-"}` +
+      ` blocks=${audio.blocks} samples=${audio.samples} peak=${audio.peak.toFixed(3)};` +
+      ` fm blocks=${audio.opl} samples=${audio.oplSamples} @${audio.oplRate}Hz` +
+      (opl ? ` regwrites=${opl.writes}` : "") +
+      (n ? ` peak=${fmPeak.toFixed(3)} rms=${Math.sqrt(sum / n).toFixed(4)}` : "") +
+      `; beeps=${audio.beeps}${audio.beepHz ? " (" + audio.beepHz + " Hz)" : ""}`);
+    if (file && audio.keep.length) {
+      let total = 0; for (const [l] of audio.keep) total += l.length;
+      const buf = Buffer.alloc(44 + total * 4);
+      buf.write("RIFF", 0); buf.writeUInt32LE(36 + total * 4, 4); buf.write("WAVEfmt ", 8);
+      buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(2, 22);
+      buf.writeUInt32LE(audio.oplRate, 24); buf.writeUInt32LE(audio.oplRate * 4, 28);
+      buf.writeUInt16LE(4, 32); buf.writeUInt16LE(16, 34); buf.write("data", 36);
+      buf.writeUInt32LE(total * 4, 40);
+      let o = 44;
+      for (const [l, r] of audio.keep) for (let i = 0; i < l.length; i++) {
+        buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(l[i] * 32767))), o); o += 2;
+        buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(r[i] * 32767))), o); o += 2;
+      }
+      fs.writeFileSync(file, buf);
+      console.log(`${ts()} audio: ${total} fm frames -> ${file}`);
+    }
     audio.blocks = 0; audio.samples = 0; audio.peak = 0;
+    audio.opl = 0; audio.oplSamples = 0; audio.beeps = 0; audio.keep.length = 0;
   }
   else if (op === "beats") { const g = beatGaps(); console.log(`${ts()} heartbeat gaps (ms): ${g.slice(-40).join(" ")}${g.length ? ` max ${Math.max(...g)}` : " none"}`); }
+  /* clickwin:dx,dy - click at an offset from the current window's top-left, for a control the
+     tour cannot name (Media Player's Play button is 40,163 from its origin). Survives the window
+     landing in a different slot, which a fixed screen coordinate does not. */
+  else if (op === "clickwin") {
+    const L = curWin() || cur;
+    if (!L) { console.log(`${ts()} clickwin: no window`); continue; }
+    const [dx, dy] = arg.split(",").map(Number);
+    const x = L.wx + dx, y = L.wy + dy;
+    const c = await place(x, y);
+    await click(true); await sleep(60); await click(false); await sleep(300);
+    console.log(`${ts()} clickwin +${dx},${dy} -> ${x},${y} (${c ? c.x + "," + c.y : "no report"}) in "${L.title}"`);
+  }
   else if (op === "tap") { const L = curWin() || cur; if (!L) { console.log("tap: no window"); continue; } const x = Math.round(L.gx + L.gw / 2), y = Math.round(L.gy + L.gh / 2); const c = await place(x, y); await click(true); await sleep(60); await click(false); await sleep(400); console.log(`${ts()} tap ${x},${y} -> ${c ? c.x + "," + c.y : "no report"}`); }
   else if (op === "close") {
     if (!cur) continue;
