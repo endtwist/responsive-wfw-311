@@ -168,7 +168,9 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
        scroll gesture works on it. ES_READONLY keeps the caret out, so the soft keyboard stays
        away; the host reports a read-only edit as not wanting text. */
     hText = CreateWindow("edit", pText,
-                         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_LEFT,
+                         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_LEFT
+                         | WS_DISABLED,   /* disabled: no caret, no selection dragging -- the note
+                                             is read, not edited, and a drag on it scrolls */
                          MARGIN, MARGIN, cw - 2 * MARGIN, cy - MARGIN - GAP, hwnd, (HMENU)-1, hInst, NULL);
     hHide = CreateWindow("button", szHide, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                          MARGIN, cy, cw - 2 * MARGIN, lh + 6, hwnd, (HMENU)ID_HIDE, hInst, NULL);
