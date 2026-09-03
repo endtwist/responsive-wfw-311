@@ -537,6 +537,7 @@ emulator.bus.register("pv-debug", line => {
     for (const k of Object.keys(layerPos)) if (!live.has(k)) delete layerPos[k];
     for (const k of Object.keys(menuPan)) if (!live.has(k)) delete menuPan[k];
     for (const k of Object.keys(layerZoom)) if (!live.has(k)) delete layerZoom[k];
+    resetAim(layers.map(L => L.title));   // JezzBall gone: the next one starts vertical again
   }
 });
 
@@ -1040,7 +1041,8 @@ const SURFACE_POLICY = [
   /* Entertainment Pack: every one is a pointer surface (JezzBall draws a wall from the tap, the
      card games and Rodent's Revenge drag, Pipe Dream / Taipei / TetraVex place a piece per tap).
      "drag" is also the fallback, so these lines are the record, not a behaviour change. */
-  [/^JezzBall/, "drag"], [/^TETRIS/, "drag"], [/^TetraVex/, "drag"], [/^TriPeaks/, "drag"],
+  [/^JezzBall/, "aim"],                                               // the swipe direction is the wall
+  [/^TETRIS/, "drag"], [/^TetraVex/, "drag"], [/^TriPeaks/, "drag"],
   [/^Tut's Tomb/, "drag"], [/^FreeCell/, "drag"], [/^Golf/, "drag"], [/^Chip's Challenge/, "drag"],
   [/^Rodent's Revenge/, "drag"], [/^Pipe Dream/, "drag"], [/^Taipei/, "drag"], [/^Dr\. Black Jack/, "drag"],
 ];
@@ -1074,6 +1076,13 @@ function keyGame(title) { for (const [re, map] of KEY_GAMES) if (re.test(title |
    This is the accessory bar's own rule and has nothing to do with the keyboard decision, which is
    made entirely from the guest's PVK report (see guestTextFocus) -- the title tables that used to
    live here (KEYBOARD_TITLES, NO_KEYBOARD) are gone. */
+/* JezzBall builds a vertical or a horizontal wall depending on a mode the right button toggles.
+   On a phone the natural gesture is to draw the wall you want, so a swipe sets the mode: we hold
+   which way the game is pointing (we are the only thing that toggles it), right-click if the swipe
+   disagrees, then click where the finger went down. The game starts in vertical mode; a wrong
+   guess costs one wall, and the next swipe is right again because the toggle is tracked. */
+let jezzVertical = true;
+function resetAim(titles) { if (!titles.some(t => /^JezzBall/.test(t || ""))) jezzVertical = true; }
 const ARROW_GAMES = /^(TETRIS|Chip's Challenge|Rodent's Revenge|CHIPS|JezzBall)/i;
 
 /* The shell column's height follows the visible viewport (browser toolbars come and go), so the
@@ -2238,7 +2247,7 @@ function installTouch() {
      drag. A finger that never travels is still a click. */
   let oneScroll = null, shellPan = null;
 let hoverSurface = false;
-let keySwipe = null, lastKeyTap = 0;
+let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
 
   /* Swipe in from the right edge: the window at the back of the z-order comes to the front
      (CMD_ACTIVATE), so a repeated swipe cycles through what is open, front to back. The right
@@ -2318,6 +2327,7 @@ let keySwipe = null, lastKeyTap = 0;
       shellPan = pol === "pan" ? { startY: py, base: shellPanY, panning: false } : null;
       hoverSurface = pol === "hover";
       keySwipe = pol === "keys" ? { startX: px, startY: py, map: keyGame(title), title, fired: 0, t0: performance.now() } : null;
+      aimSwipe = pol === "aim" ? { startX: px, startY: py, guest: h0 && (h0.kind === "client") ? { x: h0.x, y: h0.y } : null, decided: false } : null;
       oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, t0: performance.now() } : null;
       // The finger is on a surface a drag would scroll: tell the guest to watch the command
       // register closely, so the first line of scroll is not 55 ms behind the finger.
@@ -2353,6 +2363,13 @@ let keySwipe = null, lastKeyTap = 0;
   const move = ev => {
     window.pvPhase = "move";
     if (dragMove(ev)) return;
+    if (aimSwipe && !aimSwipe.decided) {
+      const { px, py } = hostPoint(ev);
+      const dx = px - aimSwipe.startX, dy = py - aimSwipe.startY;
+      if (Math.max(Math.abs(dx), Math.abs(dy)) >= 18) { aimSwipe.decided = true; aimSwipe.vertical = Math.abs(dy) > Math.abs(dx); }
+      return;
+    }
+    if (aimSwipe) return;
     /* A "keys" game: a swipe is the arrow key it looks like, repeated as the finger keeps going,
        so holding a drag to the left walks the piece left. No pointer, no button. */
     if (keySwipe && keySwipe.map) {
@@ -2499,6 +2516,22 @@ let keySwipe = null, lastKeyTap = 0;
       queue(async () => { button(true, true); await sleep(60); button(false, true); });
       return;
     }
+    if (aimSwipe) {
+      const A = aimSwipe; aimSwipe = null;
+      if (A.guest && ev && ev.type === "touchend") {
+        const want = A.decided ? A.vertical : jezzVertical;      // a plain tap keeps the current wall
+        (async () => {
+          if (want !== jezzVertical) {                            // flip the mode with a right click first
+            await placePointer(A.guest); button(true, true); await sleep(60); button(false, true);
+            jezzVertical = want; await sleep(80);
+            diag(`aim: flipped to ${want ? "vertical" : "horizontal"}`);
+          }
+          await placePointer(A.guest); button(true, false); await sleep(60); button(false, false);
+          noteInput(`aim ${want ? "vertical" : "horizontal"} at ${A.guest.x},${A.guest.y}`);
+        })();
+      }
+      return;
+    }
     if (keySwipe) {
       const K = keySwipe; keySwipe = null;
       if (!K.fired && ev && ev.type === "touchend") {
@@ -2614,6 +2647,8 @@ let keySwipe = null, lastKeyTap = 0;
        land unevenly, and a 10 px / 500 ms tolerance rejected most genuine taps. */
     if (T && !T.scrolled && !T.zoomed && T.guest && ev.type === "touchend" && performance.now() - T.t0 < 1200) {
       diag(`two-finger tap: right click at ${T.guest.x},${T.guest.y}`);
+      { const f = layers.filter(l => l.kind === "W" || l.kind === "O").slice(-1)[0];
+        if (f && /^JezzBall/.test(f.title || "")) jezzVertical = !jezzVertical; }   // it toggles the wall too
       noteInput("two-finger right click");
       /* Straight through, not via the shared queue: a right click is atomic, and a queue still
          draining an earlier gesture (a follow loop that outlived its finger) swallowed it. */
