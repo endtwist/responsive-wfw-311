@@ -97,9 +97,10 @@ people hold a phone. Landscape is explicitly not a priority.
 11. **Screen-reader access.** The page is pixels, so VoiceOver sees nothing. Build an invisible
     accessibility tree from the window, menu and control information the guest already
     reports. Not visible chrome, so it stays inside the rule.
-12. **First-run note as ABOUT.EXE.** A small native Win16 program (not a Write document) that
-    opens once and explains the gestures: hold to drag, swipe the menu bar, long-press for
-    right-click, the keyboard bar. Built with the Watcom toolchain like PVMON.
+12. **First-run note as ABOUT.EXE.** Done 2026-09-03 (SPEC): `guest/about/` builds ABOUT.EXE with
+    the Watcom toolchain, staged as `image/changes/windows/ABOUT.EXE`, opened once by WIN.INI
+    `[windows] run=` and suppressed afterwards by `[PVMon] AboutShown`; "Read Me First" in Main
+    shows it again. Remaining: the `/about` alias in `web/app.js`'s `APPS` table.
 
 ## Known, not yet scheduled
 
