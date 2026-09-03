@@ -1009,7 +1009,7 @@ const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi|Ski
 /* Titles that do take typing. Checked before NO_KEYBOARD, because a few of the games own a dialog
    that wants text under a title that starts with the game's own name ("TriPeaks Player Name",
    "BlackJack Player Name", Chip's Challenge's level password). */
-const KEYBOARD_TITLES = /MS-DOS|^Notepad\b|^Write\b|^Terminal\b|^Cardfile\b|^Calendar\b|^Calculator\b|Player Name|Password/;
+const KEYBOARD_TITLES = /MS-DOS|^Notepad\b|^Write\b|^Terminal\b|^Cardfile\b|^Calendar\b|^Calculator\b|Player Name|Password|High Score|Name|Enter /i;
 
 /* The shell column's height follows the visible viewport (browser toolbars come and go), so the
    desktop fills the phone with no letterbox. PVMON re-arranges Program Manager on request. */
@@ -2344,7 +2344,7 @@ let hoverSurface = false;
     else if (wantKeyboard && keyboardUp()) why = "want";    // the guest asked AND the keyboard is up: keep it
 
     else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
-    else if (hit && hit.win && hit.kind === "client" && KEYBOARD_TITLES.test(title) && !onScrollbar(hit)) why = "title";   // client only, and not on a scrollbar
+    else if (hit && hit.win && KEYBOARD_TITLES.test(title) && (hit.win.kind === "O" || (hit.kind === "client" && !onScrollbar(hit)))) why = "title";   // a dialog's whole window counts; in an app, the client outside its scrollbars
     else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
     else if (hit && (hit.kind === "client" || hit.kind === "desktop")) {
       /* No speculative focus: it flashed the keyboard up and down on every dialog tap. Instead the
