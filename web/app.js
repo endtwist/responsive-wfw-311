@@ -1224,11 +1224,26 @@ function pumpCommands() {
   else emulator.bus.send("pv-command", [c.cmd, c.arg]);
   cmdSentAt = performance.now();
 }
+let scrollDrops = 0;
 function sendCommand(cmd, arg) {
   if (cmd === CMD_SCROLL && cmdQueue.length) {
     const last = cmdQueue[cmdQueue.length - 1];
     if (last.cmd === CMD_SCROLL && (last.arg & 0xFFF) === (arg & 0xFFF)) {
       last.arg = (arg & 0xFFF) | Math.min(15, (last.arg >> 12) + (arg >> 12)) << 12;
+      return;
+    }
+    /* A finger, and much more a glide, can ask for scroll faster than the guest can deliver it:
+       PVMON has to reach the window, scroll it and let it repaint before it takes the next
+       command, and a program group full of icons repaints slowly. Once the merge above has
+       stopped absorbing them (it only merges into the tail, and only to fifteen lines), further
+       commands are not scrolling -- they are a backlog the user sits through after lifting the
+       finger, which is what "everything freezes for a minute" was. Beyond a few queued scrolls
+       the newest ones are dropped: the scroll stops where the guest got to, which is the
+       behaviour a slow list has on any touch device. */
+    let queued = 0;
+    for (const c of cmdQueue) if (c.cmd === CMD_SCROLL) queued++;
+    if (queued >= 3) {
+      if (++scrollDrops % 30 === 1) diag(`scroll dropped, ${queued} already queued (guest behind)`);
       return;
     }
   }
@@ -2224,16 +2239,49 @@ function switcherCards() {
 
 function switcherBox(vw, vh) { return { boxW: Math.round(vw * 0.72), boxH: Math.round(vh * 0.58) }; }
 
-/* Which card, if any, sits under a host point: used on the way down to decide whether a
-   subsequent drag lifts a particular card or just pans the strip. Slots are boxW+16 apart and
-   each box is boxW wide, so at most one card can claim a given point. */
-function switcherCardAt(px, py, vw, vh) {
+/* Where every card sits this frame. Cards are not all the same width -- each one is its own
+   window scaled to fit the box, and a tall narrow window comes out much narrower than a squat one
+   -- so a fixed pitch either overlapped two wide cards or left a chasm between two narrow ones.
+   The strip is laid out from the cards' real widths instead, each separated from the next by
+   SW_GAP, and `pos` interpolates between card centres: card 0 centred is pos 0, and half way
+   between cards 0 and 1 is pos 0.5, whatever the two of them measure. */
+const SW_GAP = 22;
+function switcherLayout(vw, vh) {
   const { boxW, boxH } = switcherBox(vw, vh);
-  for (let i = 0; i < switcher.cards.length; i++) {
-    const cx = vw / 2 + (i - switcher.pos) * (boxW + 16);
-    if (px >= cx - boxW / 2 && px <= cx + boxW / 2 && py >= vh / 2 - boxH / 2 && py <= vh / 2 + boxH / 2) return i;
+  const out = switcher.cards.map(card => {
+    const s = Math.min(1, boxW / card.L.ww, boxH / card.L.wh);
+    return { card, dw: Math.round(card.L.ww * s), dh: Math.round(card.L.wh * s), strip: 0, cx: 0 };
+  });
+  let x = 0;
+  for (const e of out) { e.strip = x + e.dw / 2; x += e.dw + SW_GAP; }
+  if (!out.length) return out;
+  const p = Math.max(0, Math.min(out.length - 1, switcher.pos));
+  const i0 = Math.floor(p), i1 = Math.min(out.length - 1, i0 + 1);
+  const focus = out[i0].strip + (out[i1].strip - out[i0].strip) * (p - i0);
+  for (const e of out) e.cx = vw / 2 + e.strip - focus;
+  return out;
+}
+/* How many host pixels a finger drags for one card of travel, at the strip's current position:
+   the distance between the two cards the pan is between. */
+function switcherPitch(vw, vh) {
+  const L = switcherLayout(vw, vh);
+  if (L.length < 2) return Math.max(1, switcherBox(vw, vh).boxW);
+  const i0 = Math.max(0, Math.min(L.length - 2, Math.floor(switcher.pos)));
+  return Math.max(1, L[i0 + 1].strip - L[i0].strip);
+}
+
+/* Which card, if any, sits under a host point: used on the way down to decide whether a
+   subsequent drag lifts a particular card or just pans the strip. The slots overlap, so a point
+   can fall in two of them; the nearer one to the centre wins, which is the one drawn on top. */
+function switcherCardAt(px, py, vw, vh) {
+  const L = switcherLayout(vw, vh);
+  let best = -1;
+  for (let i = 0; i < L.length; i++) {
+    const e = L[i], top = vh / 2 - e.dh / 2 - e.card.lift;
+    if (px >= e.cx - e.dw / 2 && px <= e.cx + e.dw / 2 && py >= top && py <= top + e.dh)
+      if (best < 0 || Math.abs(i - switcher.pos) < Math.abs(best - switcher.pos)) best = i;
   }
-  return -1;
+  return best;
 }
 
 /* Draws the desktop exactly as presentOnce always has, then every card on top of it, back to
@@ -2256,19 +2304,21 @@ function refreshCards() {
 }
 
 function drawSwitcher(g, src, vw, vh) {
-  const dw0 = view.w * view.scale, dh0 = view.h * view.scale;
-  blit(g, src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw0), Math.round(dh0));
-  const { boxW, boxH } = switcherBox(vw, vh);
-  const order = switcher.cards.map((c, i) => i)
+  /* Behind the cards, the desktop's own colour and nothing else. Drawing the desktop slice itself
+     showed Program Manager twice -- once as the backdrop, once as its own card -- which read as
+     the shell being missing from the switcher. The colour is sampled from a bare corner of the
+     guest desktop, the same way a masked hole is filled, so the backdrop is still a colour
+     Windows chose. */
+  g.fillStyle = sampleColour(src, src.width - 6, src.height - 6);
+  g.fillRect(0, 0, vw, vh);
+  const L = switcherLayout(vw, vh);
+  const order = L.map((e, i) => i)
     .sort((a, b) => Math.abs(b - switcher.pos) - Math.abs(a - switcher.pos));   // farthest first, centred card last
   for (const i of order) {
-    const card = switcher.cards[i];
-    const cx = vw / 2 + (i - switcher.pos) * (boxW + 16);
-    if (cx + boxW / 2 < 0 || cx - boxW / 2 > vw) continue;      // fully off-screen: nothing to draw
-    const s = Math.min(1, boxW / card.L.ww, boxH / card.L.wh);
-    const dw = Math.round(card.L.ww * s), dh = Math.round(card.L.wh * s);
-    const dx = Math.round(cx - dw / 2), dy = Math.round(vh / 2 - dh / 2 - card.lift);
-    blit(g, src, card.L.wx, card.L.wy, card.L.ww, card.L.wh, dx, dy, dw, dh);
+    const e = L[i], card = e.card;
+    if (e.cx + e.dw / 2 < 0 || e.cx - e.dw / 2 > vw) continue;   // fully off-screen: nothing to draw
+    const dx = Math.round(e.cx - e.dw / 2), dy = Math.round(vh / 2 - e.dh / 2 - card.lift);
+    blit(g, src, card.L.wx, card.L.wy, card.L.ww, card.L.wh, dx, dy, e.dw, e.dh);
   }
 }
 
@@ -2507,7 +2557,15 @@ function runSleepers() {
   const now = performance.now();
   for (let i = sleepers.length - 1; i >= 0; i--) if (sleepers[i].at <= now) sleepers.splice(i, 1)[0].r();
 }
-const diag = params.get("diag") ? (m => report("diag", m)) : (() => {});
+/* A function declaration, not a const: the frame loop below starts during this module's own
+   evaluation, and on the desktop its first pump reports a cursor shape -- which reached this
+   binding before the declaration had run and threw for every desktop visitor. `report` is
+   hoisted too, so the early call works. */
+var diagWanted;                       // var: hoisted as undefined, so an early call cannot throw
+function diag(m) {
+  if (diagWanted === undefined) diagWanted = !!params.get("diag");
+  if (diagWanted) report("diag", m);
+}
 
 /* Steer the guest pointer to a point. The stock PS/2 driver is relative, so the whole distance
    is sent as one burst of packets (mouse acceleration is off, so mickeys are pixels), then the
@@ -2789,6 +2847,8 @@ function installTouch() {
       if (nx) { armFastPoll(); sendCommand(CMD_SCROLL, g0.slot | (nx > 0 ? 3 : 4) << 8 | Math.min(15, Math.abs(nx)) << 12); g0.accX -= nx * SCROLL_STEP; }
       // nothing painted for a quarter of a second while we are asking it to scroll: it has hit the end
       if (ny || nx) { g0.still = rectDirtySince(g0.gen, 0, 0, 2560, 970) ? 0 : g0.still + 1; g0.gen = dirtyGen; }
+      const behind = cmdQueue.reduce((n, c) => n + (c.cmd === CMD_SCROLL ? 1 : 0), 0) >= 3;
+      if (behind) { g0.vx *= 0.8; g0.vy *= 0.8; }          // the guest cannot keep up: coast down, do not pile up
       if (Math.max(Math.abs(g0.vx), Math.abs(g0.vy)) < 0.05 || now > g0.until || g0.still > 15) {
         diag(`glide ended after ${Math.round(now - (g0.until - 1500))} ms`);
         releaseFastPoll(); glide = null; return;
@@ -3048,7 +3108,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
       const D = switcher.drag;
       if (!D) return;
       const [vw, vh] = viewport();
-      const { boxW } = switcherBox(vw, vh);
+      const pitch = switcherPitch(vw, vh);
       const { px, py } = hostPoint(ev);
       const dx = px - D.startX, dy = py - D.startY;
       D.dx = dx; D.dy = dy;
@@ -3059,7 +3119,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
         else if (dy > 0) D.mode = "dismiss";
         else D.mode = "none";
       }
-      if (D.mode === "pan") switcher.pos = switcher.target = D.startPos - dx / (boxW + 16);
+      if (D.mode === "pan") switcher.pos = switcher.target = D.startPos - dx / pitch;
       else if (D.mode === "lift") switcher.cards[D.cardIndex].lift = Math.max(0, -dy);
       return;
     }
