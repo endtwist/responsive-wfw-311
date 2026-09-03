@@ -24,7 +24,9 @@
                font:12px/1.4 ui-monospace, monospace; overflow:hidden; overscroll-behavior:none; }
   /* The guest's own canvas is never shown: it is the source the compositor draws slices from. */
   #screen_container { position:absolute; left:-10000px; top:0; }
-  #pres { position:fixed; inset:0; z-index:1; touch-action:none; display:block; image-rendering: pixelated; }
+  /* The browser's own arrow is hidden over the canvas: the guest draws its own pointer, and two
+     pointers a few pixels apart is worse than none. The page's cursor comes back outside it. */
+  #pres { position:fixed; inset:0; z-index:1; touch-action:none; display:block; image-rendering: pixelated; cursor:none; }
   #screen_container canvas { display:block; touch-action:none;
                              transition: width .18s ease-out, height .18s ease-out; }
   /* The page draws nothing of its own on any display: the desktop is the whole viewport (the old
