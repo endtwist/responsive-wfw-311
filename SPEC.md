@@ -3347,3 +3347,124 @@ Risks:
 - `web/app.js` is also being changed for dirty-region compositing. This diff is confined to
   `maskShellDialogCopies`, the new `shellClientBackground`, `dominantColour` and one line of
   `dropSampleCache`.
+
+### 2026-09-03 — the compositor draws only what changed (and a menu is only drawn where it settles)
+
+The worker publishes which guest pixels changed (`pvRectDirty` / `pvRectDirtySince`, the 256-entry
+ring from the worker pass), and until now nothing used it: `presentOnce` re-blitted the desktop
+column, every window's nine-sliced chrome, every scaled client and every transient, sixty times a
+second, whether anything had moved or not. It now repaints regions instead of frames.
+
+**The structure, and why this one.** The visible canvas *is* the persistent composite. A 2D canvas
+keeps its pixels between frames — only a resize clears the backing store — so a frame with nothing
+to do draws nothing at all and what is on screen is already right. The alternative considered was a
+separate offscreen canvas holding the composite and blitted to the visible one each frame; it was
+rejected because that blit is 1125 x 2436 = 2.7 M pixels at the phone's dpr, several times the cost
+of the whole composite it is meant to save, to buy retention the visible canvas already has.
+
+Per-layer skipping *alone* would be wrong: layers overlap, so a repaint underneath must show
+through the ones above it. The unit is therefore a damage region, not a layer:
+
+1. Every frame still runs `chooseView()` and `placeLayers()` — arithmetic plus the side effects the
+   rest of the page depends on (shell sizing, pan clamps, first placements, hit testing).
+2. Damage is accumulated in host pixels from: the guest rectangles that changed since each piece
+   was last drawn, each mapped through its own mapping (the desktop's view; a layer's chrome bands;
+   a layer's client at its zoom and pan); and anything structural — viewport, safe areas, shell
+   pan, keyboard shift, layer set, z-order, canvas resize, mode change, a new layout, coming back
+   from hidden — which damages the whole viewport, i.e. exactly the old behaviour for one frame.
+3. The damage rectangles become the clip and the stack is redrawn inside it, bottom up: the desktop
+   slice, the shell-dialog masks, then every layer whose rectangle meets the damage. Rebuilding the
+   region from the bottom is what makes it correct — nothing has to reason about what covers or
+   uncovers what, because the region is composited exactly as a full frame would have composited it.
+4. A layer whose rectangle does not meet the damage is not drawn; inside a layer that is drawn,
+   `drawWindow` skips each piece of chrome that the damage does not touch (chrome and client are
+   separate sources, so a client-only repaint costs one clipped client blit and no nine-slice work).
+
+Two details earned their keep. The desktop slice is still handed to `drawImage` whole, with the clip
+doing the trimming, rather than blitted as a sub-rectangle: a nearest-neighbour source rectangle
+rounded to whole guest pixels shifts the sampling grid by a fraction of a pixel, which on the
+desktop's dithered background is visible against the region beside it (measured: 0.08 % of the
+screen differing before this was fixed, 0 after). And "has anything moved?" is answered by two
+running sums over the placement fields, not by a signature string per layer: formatting thirty
+numbers per layer per frame cost more than the blits the exercise saves. Every host-side placement
+input (drag, pinch, menu pan, shell pan, new layout) also calls `invalidate()`; the sums are the
+backstop that catches anything that forgets to, and a changed sum is simply a full frame.
+
+**Menus are drawn once, where they end up.** Windows creates a popup where it was asked for and, if
+it would run off the screen, moves it — two publishes milliseconds apart, and a compositor that
+draws every publish faithfully flickers the menu between two places. A transient is now held out of
+`placed` until its rectangle has survived one frame (capped at 80 ms, so a continuously moving popup
+is never held out for good). It is held out of the layer list rather than merely left undrawn, so
+hit testing agrees with the screen. Measured on File Manager's menus: before, the popup is
+composited on the same frame it is published; after, one frame later, at one position only.
+
+**The desktop-colour flash when a window closes is not fixable here, and the naive fix makes it
+worse.** Instrumented frame by frame (`shots/flash-*.json`): closing Notepad over Solitaire, the
+erase to the desktop colour reaches the compositor at frame 8 and the shell's publish saying the
+window has gone arrives at frame 20 — the grey is already on screen for 200 ms before the host has
+any way to know a window is closing, and the guest's own repaint lands at frame 41. Holding the
+composite when the publish arrives therefore freezes the *grey*: it lengthened the flash from 5
+frames to 22 in the first experiment, and a variant that kept the frame before each large repaint
+and rewound to it on the closure publish only replaced the tail of the flash with a stale window.
+Both were reverted rather than shipped. Distinguishing an erase from any other repaint host-side
+needs a pixel readback, which is the one thing this compositor does not do. **What would fix it: a
+PVMON hint published before the erase paints** — a line on the debug channel at `HCBT_DESTROYWND` /
+`WM_NCDESTROY`, before the desktop is repainted — after which the hold is about ten lines here
+(freeze until two paints after the last publish, capped).
+
+**Measured** (`tools/composite-bench.mjs`, extended: two new cases — an untouched idle desktop and
+several windows open with one repainting — a drag case that drags the front window's caption for the
+whole window, per-frame composite accounting from `window.pvComposite()`, and `still`, a
+deterministic probe that composites the *same* scene 120 times with the guest quiescent, which
+removes the run-to-run variation in what the guest happened to paint. 375x812 @3x, 6 s a case,
+`--throttle 6` for the phone stand-in as in the worker pass.)
+
+| 6x throttled | still (ms/composite) | mean composite (ms) | frames >20 ms | input queue p50 | damage | blits/frame |
+|---|---|---|---|---|---|---|
+| idle, untouched | 0.115 → **0.074** | 0.319 → **0.223** | 1 → 1 | – | 100 % → **0.3 %** | ~5 → **0.02** |
+| idle, tapping a menu | 0.057 → **0.054** | 0.238 → **0.213** | 11 → **1** | 25.0 → **10.3** | 100 % → **6.9 %** | ~5 → **0.28** |
+| one window repainting | 0.106 → **0.056** | 0.553 → **0.532** | 23 → **12** | 26.5 → **9.2** | 100 % → **15.4 %** | ~5 → **0.50** |
+| several windows, one repainting | 0.129 → **0.061** | 0.406 → **0.397** | 30 → **16** | 27.0 → **10.3** | 100 % → **10.3 %** | ~5 → **0.56** |
+| a drag in progress | 0.153 → **0.069** | 0.346 → 0.706 | 5 → 6 | 25.1 → **8.5** | 100 % → 30 % | ~5 → 1.78 |
+
+Unthrottled the same shape, smaller: `still` 0.056 → 0.035 (idle), 0.042 → 0.020 (one repainting),
+0.020 → 0.011 (several windows), 0.020 → 0.017 (drag); mean composite 0.173 → 0.107 idle and
+0.157 → 0.124 busy; input queue p50 27–29 ms → 11–14 ms in every case. 60 fps in both builds
+throughout — this was never a frame-rate problem, it is a wasted-work problem, and the wasted work
+is what the finger was queueing behind: the input-queue figure (how long a touch event waits for
+this thread) halves in every case, which is the number Josh actually feels.
+
+95–97 % of frames now composite nothing at all on a live desktop (`pvComposite()`: `empty_pct`),
+and the damaged area averages 2–3 % of the viewport over a session. The planning itself costs
+0.007–0.05 ms a frame at 6x (`plan_ms`). The remaining cost of a "nothing to do" frame is
+`pixels.sync()` plus `chooseView`/`placeLayers`, which still run every frame because hit testing and
+the shell sizing depend on them; making *those* incremental is the next saving, not the blits.
+
+The dirty rectangles are row bands across the whole guest screen (v86's VGA tracks a linear offset
+range, so `buffer_x` is always 0), which is why the per-layer skip rate is only 1–7 %: a repaint in
+one slot column marks the same rows in every other column, so the shell copy and the other layers
+are damaged with it. The vertical selectivity is where the saving comes from. Per-column x extents
+would raise the skip rate a lot, but they would have to come from `vga.js`, not from the worker.
+
+**Verified.** `node tools/tour.mjs --apps NOTEPAD,SOL,WINFILE` pass=22 fail=1 (the pre-existing
+`dlgfit 604x318`), identical to main. `?selftest=1` in the page pass=269 fail=6, the same six as
+main (`dlgfit` x3, CALENDAR `winexec=2`, PBRUSH `fit`/`scale`). Ten scenes screenshotted against
+both builds and compared pixel by pixel — desktop with Program Manager, Solitaire scaled with its
+cropped caption and menu bar, Notepad, an open menu, a dialog over its owner with the masked hole, a
+shell dialog inside the column (File → Run), a shell dialog wider than the column drawn as its own
+layer (About Program Manager, with its copy masked out), a menu-bar pan, a pinch, and 1:1 desktop
+mode at 1280x800 — all identical (the only differing pixels are a blinking text caret and
+Solitaire's random deal). A drift check runs a session (launch, drag, open and close a menu, open
+and close a dialog, close a window) and after each step compares the incremental composite with a
+forced full repaint of the same scene: 0 pixels different at every checkpoint. The watchdog's
+frame-change signature (`emulator.pixels.change_count`, set in `sync()`) is untouched and still
+advances — `sync()` runs before any damage decision, so a frame that draws nothing still counts the
+guest's paint.
+
+**Risks and notes.** A placement input that neither calls `invalidate()` nor moves one of the
+summed fields would leave a stale layer on screen; the summed fields cover every field
+`drawWindow` reads, and `NaN` cannot creep in (every term is coerced, which was a real bug in the
+first draft: one `undefined` made every frame a full one). `window.pvComposite()` reports frames,
+empty frames, full frames, damage percentage, layer and chrome-piece skips, blits per frame and
+plan time; `window.pvInvalidate()` forces the next frame to be full, which is also how the drift
+check works.

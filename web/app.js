@@ -447,6 +447,7 @@ emulator.add_listener("screen-set-size", s => {
   }
   setText("mode", `${s[0]}x${s[1]}`);
   emulator.screen_set_scale(1, 1);
+  invalidate();                        // a new screen size: every guest pixel is new
   fitCanvas();
   // Give the guest a moment to paint the new size, then drop the held frame.
   clearTimeout(holdTimer);
@@ -533,6 +534,8 @@ emulator.bus.register("pv-debug", line => {
   if (/^PVE/.test(line) && pendingLayers) {
     layers = pendingLayers; dock = pendingDock; pendingLayers = pendingDock = null;
     dropSampleCache();                 // the sampled background points belong to the old layout
+    invalidate();                      // a new layout: the next composite is a full one
+    holdTransients();                  // a popup that is about to be moved is not drawn twice
     const live = new Set(layers.map(layerKey));
     for (const k of Object.keys(layerPos)) if (!live.has(k)) delete layerPos[k];
     for (const k of Object.keys(menuPan)) if (!live.has(k)) delete menuPan[k];
@@ -1004,7 +1007,10 @@ function unlockAudio(why) {
 }
 for (const evn of ["touchend", "click", "keydown", "pointerup"])
   document.addEventListener(evn, () => unlockAudio(evn), { capture: true, passive: true });
-document.addEventListener("visibilitychange", () => { if (!document.hidden) unlockAudio("visible"); });
+/* Nothing composites while the page is hidden (the worker's pixel conversion stops with it), so
+   what the guest painted meanwhile is not in the dirty ring frame by frame: come back with a full
+   composite rather than trusting the last generation. */
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { unlockAudio("visible"); invalidate(); } });
 window.addEventListener("focus", () => unlockAudio("focus"));
 window.addEventListener("pageshow", () => unlockAudio("pageshow"));
 const CMD_SCROLL = 7, CMD_CURSOR = 10;
@@ -1102,6 +1108,38 @@ function wantShellHeight(h) {
 }
 
 function layerKey(L) { return L.kind === "W" ? "s" + L.slot : L.kind + ":" + L.title; }
+
+/* Menus do not always appear where they end up. Windows creates a popup at the point it was asked
+   for and, if that would run off the screen, moves it — two publishes, milliseconds apart, and a
+   compositor that draws every publish faithfully shows the menu in both places: a flicker on
+   exactly the gesture the phone uses most. So a transient is held out of the composite until its
+   rectangle has survived one frame: a popup that appears where it stays is one frame (16 ms) late,
+   which nobody can see, and a popup that jumps is only ever drawn where it settles. The hold is
+   capped in time as well as in frames, so a program that moves a popup continuously (a dragged
+   drop-down) is never held out for good. It is held out of `placed`, not merely undrawn, so hit
+   testing agrees with what is on the screen. */
+const T_HOLD_MS = 80;
+const tHold = new Map();               // transient key -> { rect, until (frame), deadline }
+let frameNo = 0;
+function holdTransients() {
+  const live = new Set();
+  for (const L of layers) {
+    if (L.kind !== "T") continue;
+    const key = layerKey(L);
+    live.add(key);
+    const rect = `${L.wx},${L.wy},${L.ww},${L.wh}`;
+    const had = tHold.get(key);
+    if (had && had.rect === rect) continue;                 // published again unmoved: it has settled
+    tHold.set(key, { rect, until: frameNo + 1, deadline: performance.now() + T_HOLD_MS });
+  }
+  for (const k of tHold.keys()) if (!live.has(k)) tHold.delete(k);
+}
+function transientHeld(key) {
+  const h = tHold.get(key);
+  if (!h) return false;
+  if (frameNo >= h.until || performance.now() > h.deadline) { h.until = -1; return false; }
+  return true;
+}
 /* Host -> guest commands go through one register that PVMON polls every 40 ms and clears when it
    has taken the command. Two sends inside one poll interval used to overwrite each other (a
    CMD_CURSOR followed by a CMD_ACTIVATE lost the cursor command), so commands are queued and the
@@ -1254,6 +1292,7 @@ function placeLayers(src) {
       return;
     }
     if (L.kind === "T") {
+      if (transientHeld(key)) return;                  // published this frame and may still move
       const hw = Math.round(L.ww * c), hh = Math.round(L.wh * c);
       let x, y;
       const centred = Math.abs(L.wx + L.ww / 2 - screenW / 2) < 8;      // the Alt+Tab switcher
@@ -1469,8 +1508,13 @@ function shellClientBackground(src, w) {
   const width = Math.max(1, Math.min(cx1, src.width) - x);
   return dominantColour(src, x, y, width);
 }
-function drawWindow(g, src, w) {
+/* `meets(x, y, w, h)` says whether a piece of this window is inside the damage being repainted.
+   Everything drawn here is clipped to the damage anyway, so skipping a piece changes no pixel; it
+   saves the call. A window repainting its client is the case that matters: the nine-sliced caption,
+   the menu strip and the borders are then not touched at all. */
+function drawWindow(g, src, w, meets) {
   const c = w.c;
+  if (!meets) meets = () => true;
   if (w.transient || w.shellCopy) {
     blit(g, src, w.wx, w.wy, w.ww, w.wh, w.x, w.y, w.hw, w.hh);
     if (w.shellCopy) maskShellDialogCopies(g, src);
@@ -1481,6 +1525,8 @@ function drawWindow(g, src, w) {
   const cornerL = Math.round((inset.l + box) * c), cornerR = Math.round((inset.l + 2 * box) * c);
   const midSrcW = w.ww - 2 * inset.l - 3 * box;       // the caption strip between the boxes
   const midDstW = w.hw - cornerL - cornerR;
+  const capDirty = meets(w.x, w.y, w.hw, capH);
+  if (capDirty) {
   blit(g, src, w.wx, w.wy, inset.l + box, capRow, w.x, w.y, cornerL, capH);
   blit(g, src, w.wx + w.ww - inset.l - 2 * box, w.wy, inset.l + 2 * box, capRow,
               w.x + w.hw - cornerR, w.y, cornerR, capH);
@@ -1498,7 +1544,8 @@ function drawWindow(g, src, w) {
       blit(g, src, w.wx + inset.l + box, w.wy, midSrcW, capRow, w.x + cornerL + pad, w.y, midH, capH);
     }
   }
-  if (menuRow > 0 && menuH > 0) {
+  }
+  if (menuRow > 0 && menuH > 0 && meets(w.x + hl, w.y + capH, w.hw - 2 * hl, menuH)) {
     const innerW = w.hw - 2 * hl;                     // between the side borders, never over them
     const mwG = Math.min(w.ww - 2 * inset.l, Math.round(innerW / c)), mwH = Math.round(mwG * c);
     const mp = w.mpan || 0;                           // panned: the strip is a window onto the full-width bar
@@ -1514,11 +1561,13 @@ function drawWindow(g, src, w) {
       blit(g, src, w.wx + inset.l + mwG - 2, w.wy + capRow, 2, menuRow, w.x + hl + mwH, w.y + capH, innerW - mwH, menuH);
   }
   if (hl > 0) {                                       // side borders, stretched only lengthways, caption to bottom
-    blit(g, src, w.wx, w.wy + capRow, inset.l, w.wh - capRow - inset.b, w.x, w.y + capH, hl, w.hh - capH - hb);
+    if (meets(w.x, w.y + capH, hl, w.hh - capH - hb))
+      blit(g, src, w.wx, w.wy + capRow, inset.l, w.wh - capRow - inset.b, w.x, w.y + capH, hl, w.hh - capH - hb);
     { const hr = w.hr == null ? hl : w.hr, ir = w.inset.r == null ? inset.l : w.inset.r;
-      blit(g, src, w.wx + w.ww - ir, w.wy + capRow, ir, w.wh - capRow - inset.b, w.x + w.hw - hr, w.y + capH, hr, w.hh - capH - hb); }
+      if (meets(w.x + w.hw - hr, w.y + capH, hr, w.hh - capH - hb))
+        blit(g, src, w.wx + w.ww - ir, w.wy + capRow, ir, w.wh - capRow - inset.b, w.x + w.hw - hr, w.y + capH, hr, w.hh - capH - hb); }
   }
-  if (hb > 0)
+  if (hb > 0 && meets(w.x, w.y + ht + w.ch, w.hw, hb))
     blit(g, src, w.wx, w.gy + w.gh, Math.min(w.ww, Math.round(w.hw / c)), inset.b,
                 w.x, w.y + ht + w.ch, w.hw, hb);
   /* The client, at the scale that fits. An owned dialog or a menu that physically overlaps this
@@ -1526,6 +1575,7 @@ function drawWindow(g, src, w) {
      overlapping rectangles are masked out of the client blit (clipped away, so whatever is behind
      the owner shows through until the child's own layer covers it), so a fallback placement never
      shows two copies of a dialog. */
+  if (!meets(w.x + hl, w.y + ht, Math.round(w.vw * w.zs), Math.round(w.vh * w.zs))) return;
   const holes = overlapsOf(w);
   if (holes.length) {
     g.save();
@@ -1715,6 +1765,11 @@ window.pvPerf = reset => {
   const out = { frames: perf.n, fps: iv.length ? +(1000 / (iv.reduce((x, y) => x + y, 0) / iv.length)).toFixed(1) : 0,
                 iv_p50: q(iv, 0.5), iv_p95: q(iv, 0.95), iv_max: q(iv, 1),
                 draw_p50: q(dr, 0.5), draw_p95: q(dr, 0.95), draw_max: q(dr, 1),
+                /* Composite time per frame, averaged over the window, and the total: the honest
+                   comparison when most frames draw nothing at all and percentiles are measuring
+                   two different populations. */
+                draw_mean: dr.length ? +(dr.reduce((x, y) => x + y, 0) / dr.length).toFixed(3) : 0,
+                draw_sum: +dr.reduce((x, y) => x + y, 0).toFixed(1),
                 sync_ms: +perf.syncCost.toFixed(2), path: emulator.pixels.path, guestFrames: emulator.pixels.frames };
   if (reset !== false) { perf.n = 0; perf.syncCost = 0; emulator.pixels.cost = 0; }
   return out;
@@ -1768,8 +1823,30 @@ function rectDirtySince(gen, x, y, w, h) {
   }
   return false;
 }
+/* The rectangles themselves, newest first, for a caller that wants to repaint them rather than
+   just ask whether something changed. `all` means "assume the whole screen": either the caller's
+   generation has fallen off the end of the ring, or so many rectangles have accumulated that their
+   bounding box is the cheaper answer. */
+const DIRTY_MAX_RECTS = 24;
+function dirtyRectsSince(gen) {
+  if (gen >= dirtyGen) return null;                         // nothing new since the caller looked
+  if (dirtyGen - gen > DIRTY_LOG) return "all";
+  const out = [];
+  for (let i = 1; i <= DIRTY_LOG; i++) {
+    const r = dirtyLog[(dirtyLogAt - i + DIRTY_LOG * 2) % DIRTY_LOG];
+    if (!r || r.gen <= gen) break;
+    out.push(r);
+    if (out.length > DIRTY_MAX_RECTS) {                     // coalesce: one box beats thirty clips
+      let x0 = out[0].x, y0 = out[0].y, x1 = x0 + out[0].w, y1 = y0 + out[0].h;
+      for (const q of out) { x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y); x1 = Math.max(x1, q.x + q.w); y1 = Math.max(y1, q.y + q.h); }
+      return [{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }];
+    }
+  }
+  return out.length ? out : null;
+}
 window.pvRectDirty = rectDirty;
 window.pvRectDirtySince = rectDirtySince;
+window.pvDirtyRectsSince = dirtyRectsSince;
 window.pvDirty = () => ({ rect: guestDirty, gen: dirtyGen, path: emulator.pixels.path,
                           changes: emulator.pixels.change_count, cost: emulator.pixels.cost });
 
@@ -1851,6 +1928,181 @@ function drawFirstFrame(g, vw, vh) {
   g.drawImage(img, Math.round((vw - dw) / 2), 0, dw, dh);
   if (!firstFrameShown) { firstFrameShown = true; report("firstframe", `shown ${img.width}x${img.height} at ${Math.round(performance.now() - pageStart)}ms`); }
 }
+/* ------------------------------------------------------------- composite only what changed */
+/* The compositor is a stack: the desktop column, then every layer back to front, and until now
+   all of it was re-blitted on every one of the 60 frames a second whether anything had moved or
+   not. The worker says exactly which guest pixels changed (the dirty ring above), so a frame can
+   instead repaint only the regions that need it.
+ *
+ * Structure: the visible canvas IS the persistent composite. A 2D canvas keeps its pixels between
+ * frames (only a resize clears the backing store), so the frame that repaints nothing draws
+ * nothing; whatever is on screen is already right. An offscreen canvas holding the composite,
+ * blitted to the visible one each frame, was the other candidate and was rejected: it would add a
+ * full-viewport copy — 1125x2436 = 2.7 M pixels at the phone's dpr 3 — to every frame, which is
+ * several times the entire composite it is meant to save, and it buys nothing, because the visible
+ * canvas already has exactly the retention an offscreen one would provide.
+ *
+ * Per-layer skipping alone (draw a layer only when its own pixels changed) is NOT correct, because
+ * layers overlap: a repaint of a layer underneath would show through the one above it. So the unit
+ * is a damage region, not a layer:
+ *
+ *   1. Every frame still runs chooseView() and placeLayers() — they are pure arithmetic plus the
+ *      side effects the rest of the page relies on (shell sizing, pan clamps, first placements).
+ *   2. Damage is accumulated in host pixels from: the guest rectangles that changed since each
+ *      piece was last drawn, mapped through that piece's own mapping (the desktop's view, a
+ *      layer's chrome bands, a layer's client at its zoom); a layer whose placement signature
+ *      changed (moved, resized, re-scaled, zoomed, panned, its masked holes moved) damages both
+ *      where it was and where it now is; and anything structural — the viewport, the safe areas,
+ *      the shell column's pan, the keyboard shift, the layer set or its z-order, a canvas resize,
+ *      a mode change — damages the whole viewport, which is the old behaviour for that one frame.
+ *   3. The damage rectangles become the clip, and the stack is redrawn inside it, bottom up: the
+ *      desktop slice (per damage rectangle, so the blit is small), the shell-dialog masks, then
+ *      every layer whose rectangle meets the damage. Rebuilding the stack from the bottom is what
+ *      makes it correct — nothing has to reason about what covers or uncovers what, because the
+ *      region is composited from scratch exactly as a full frame would have been.
+ *   4. A layer whose rectangle does not meet the damage is not drawn at all: that is the "skip"
+ *      the dirty rectangles were published for, and chrome and client are separate sources, so a
+ *      client-only repaint costs one small client blit and no nine-slice work.
+ *
+ * An idle desktop therefore costs nothing but the dirty-ring lookups, and a repainting window
+ * costs its own client area rather than every window on screen.
+ */
+const comp = { frames: 0, empty: 0, full: 0, dmgPx: 0, viewPx: 0, draws: 0, skips: 0, bg: 0, pieces: 0, pieceSkips: 0, planMs: 0 };
+window.pvComposite = reset => {
+  const f = Math.max(1, comp.frames);
+  const out = { frames: comp.frames, empty: comp.empty, empty_pct: +(100 * comp.empty / f).toFixed(1),
+                full: comp.full, damage_pct: +(100 * comp.dmgPx / Math.max(1, comp.viewPx)).toFixed(1),
+                skipped: +(100 * comp.skips / Math.max(1, comp.skips + comp.draws)).toFixed(1),
+                pieces_skipped: +(100 * comp.pieceSkips / Math.max(1, comp.pieces)).toFixed(1),
+                blits_per_frame: +((comp.draws + comp.bg) / f).toFixed(2),
+                plan_ms: +(comp.planMs / f).toFixed(4) };
+  if (reset !== false) { comp.frames = comp.empty = comp.full = comp.dmgPx = comp.viewPx = comp.draws = comp.skips = comp.bg = comp.pieces = comp.pieceSkips = comp.planMs = 0; }
+  return out;
+};
+/* Anything the compositor cannot see for itself says so here: the next frame is a full one. */
+let needFull = true;
+function invalidate() { needFull = true; }
+window.pvInvalidate = invalidate;
+window.pvPlanSums = () => [planA, planB, needFull];
+const layerGen = new Map();             // layer key -> the dirty generation it was last drawn at
+let lastBgGen = -1, lastPlanA = NaN, lastPlanB = NaN;
+
+/* Whether anything about the layout has moved since the last frame, as two running numbers rather
+   than a signature string per layer: at 60 Hz on a phone, formatting thirty numbers per layer per
+   frame costs more than the blits the whole exercise is meant to save. Every host-side placement
+   input (a drag, a pinch, a menu pan, the shell pan, a new guest layout) calls invalidate() as
+   well, so this is the backstop that catches anything that forgets to — a changed sum means a full
+   frame, which is exactly what the compositor did before this pass. */
+function planSums(vw, vh, shift) {
+  /* Not every layer carries every field (a transient has no client scale, the shell copy no
+     insets), and one `undefined` would make the whole sum NaN — which never compares equal, so
+     every frame would be a full one. Missing means zero here. */
+  const n = v => (v || 0);
+  let a = vw + 3 * vh + 5 * n(safe.l) + 7 * n(safe.t) + 11 * n(shift) + 13 * placed.length;
+  let b = n(view.x) + 3 * n(view.y) + 5 * n(view.w) + 7 * n(view.h) + 11 * n(view.scale) + 13 * n(view.ox);
+  for (let i = 0; i < placed.length; i++) {
+    const w = placed[i], k = i + 2;
+    a += k * (n(w.x) + 3 * n(w.y) + 5 * n(w.hw) + 7 * n(w.hh) + 11 * n(w.wx) + 13 * n(w.wy) + 17 * n(w.ww) + 19 * n(w.wh));
+    b += k * (n(w.gx) + 3 * n(w.gy) + 5 * n(w.gw) + 7 * n(w.gh) + 11 * n(w.zs) + 13 * n(w.px) + 17 * n(w.py) +
+              19 * n(w.mpan) + 23 * n(w.c) + 29 * n(w.hl) + 31 * n(w.ht) + 37 * n(w.hb) + 41 * n(w.hr) +
+              43 * n(w.capRow) + 47 * n(w.menuRow) + 53 * n(w.vw) + 59 * n(w.vh));
+  }
+  planA = a; planB = b;
+}
+let planA = 0, planB = 0;
+/* The pieces of a window's frame, each with the guest rectangle it comes from: a repaint inside
+   the client area must not drag the nine-sliced chrome through drawWindow again, and a caption
+   that redraws (a title change, an activation) must not repaint the client. Written into a reused
+   array of six slots, since this runs for every layer of every frame that carries new pixels. */
+const BANDS = [];
+for (let i = 0; i < 6; i++) BANDS.push({ sx: 0, sy: 0, sw: 0, sh: 0, x: 0, y: 0, w: 0, h: 0 });
+function chromeBands(w, y0) {
+  const { inset, capRow, menuRow, hl, ht, hb } = w;
+  const c = w.c, capH = Math.round(capRow * c), hr = w.hr == null ? hl : w.hr, ir = inset.r == null ? inset.l : inset.r;
+  let n = 0;
+  const put = (sx, sy, sw, sh, x, y, ww, hh) => { const b = BANDS[n++]; b.sx = sx; b.sy = sy; b.sw = sw; b.sh = sh; b.x = x; b.y = y; b.w = ww; b.h = hh; };
+  put(w.wx, w.wy, w.ww, capRow, w.x, y0, w.hw, capH);
+  if (menuRow > 0 && ht - capH > 0)
+    put(w.wx + inset.l, w.wy + capRow, Math.max(1, w.ww - 2 * inset.l), menuRow, w.x + hl, y0 + capH, w.hw - 2 * hl, ht - capH);
+  if (hl > 0) {
+    put(w.wx, w.wy + capRow, inset.l, Math.max(1, w.wh - capRow - inset.b), w.x, y0 + capH, hl, w.hh - capH - hb);
+    put(w.wx + w.ww - ir, w.wy + capRow, Math.max(1, ir), Math.max(1, w.wh - capRow - inset.b), w.x + w.hw - hr, y0 + capH, hr, w.hh - capH - hb);
+  }
+  if (hb > 0)
+    put(w.wx, w.gy + w.gh, w.ww, Math.max(1, inset.b), w.x, y0 + ht + w.ch, w.hw, hb);
+  return n;
+}
+/* The damage for this frame, in host pixels inside the safe rectangle (layers already shifted by
+   the keyboard pan). null means "nothing to draw"; `full` means "everything", the old behaviour. */
+const dmgRects = [];
+const rectsByGen = new Map();                 // this frame's dirtyRectsSince answers, by generation
+function planDamage(vw, vh, shift) {
+  const rects = dmgRects;
+  rects.length = 0;
+  const add = (x, y, w, h) => {
+    const x0 = Math.max(0, Math.floor(x) - 1), y0 = Math.max(0, Math.floor(y) - 1);
+    const x1 = Math.min(vw, Math.ceil(x + w) + 1), y1 = Math.min(vh, Math.ceil(y + h) + 1);
+    if (x1 > x0 && y1 > y0) rects.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+  };
+  const mapInto = (src, sx, sy, sw, sh, dx, dy, kx, ky) => {
+    for (const r of src) {
+      const x0 = Math.max(sx, r.x), y0 = Math.max(sy, r.y);
+      const x1 = Math.min(sx + sw, r.x + r.w), y1 = Math.min(sy + sh, r.y + r.h);
+      if (x1 > x0 && y1 > y0) add(dx + (x0 - sx) * kx, dy + (y0 - sy) * ky, (x1 - x0) * kx, (y1 - y0) * ky);
+    }
+  };
+  const since = gen => {                      // layers drawn together share a generation
+    if (rectsByGen.has(gen)) return rectsByGen.get(gen);
+    const r = dirtyRectsSince(gen);
+    rectsByGen.set(gen, r);
+    return r;
+  };
+  planSums(vw, vh, shift);
+  const moved = planA !== lastPlanA || planB !== lastPlanB;
+  lastPlanA = planA; lastPlanB = planB;
+  if (needFull || moved) { comp.full++; return { rects: [{ x: 0, y: 0, w: vw, h: vh }], full: true }; }
+  if (dirtyGen === lastBgGen) return null;    // nothing moved and the guest painted nothing
+
+  rectsByGen.clear();
+  // the desktop column: the guest's own pixels under everything
+  const bg = since(lastBgGen);
+  if (bg === "all") { comp.full++; return { rects: [{ x: 0, y: 0, w: vw, h: vh }], full: true }; }
+  if (bg) {
+    mapInto(bg, view.x, view.y, view.w, view.h, view.ox, 0, view.scale, view.scale);
+    // a shell dialog drawn as a layer is masked out of the column with a stretched desktop row;
+    // that fill moves with the column's pixels, so any change inside the column repaints it
+    for (const w of placed) if (w.shellDialog) add(view.ox + (w.wx - view.x) * view.scale, (w.wy - view.y) * view.scale,
+                                                   w.ww * view.scale, w.wh * view.scale);
+  }
+  for (let i = 0; i < placed.length; i++) {
+    const w = placed[i], y0 = w.y - shift;
+    const gen = layerGen.get(w.key);
+    if (gen === undefined) { add(w.x, y0, w.hw, w.hh); continue; }      // never drawn before
+    const src = since(gen);
+    if (src === "all") { add(w.x, y0, w.hw, w.hh); continue; }
+    if (!src) continue;                                                // its own pixels are untouched
+    if (w.transient || w.shellCopy) {                                  // one blit of the whole window
+      mapInto(src, w.wx, w.wy, w.ww, w.wh, w.x, y0, w.hw / Math.max(1, w.ww), w.hh / Math.max(1, w.wh));
+      continue;
+    }
+    const n = chromeBands(w, y0);
+    for (let j = 0; j < n; j++) {
+      const b = BANDS[j];
+      for (const r of src) if (hits(r, b.sx, b.sy, b.sw, b.sh)) { add(b.x, b.y, b.w, b.h); break; }
+    }
+    mapInto(src, w.gx + w.px, w.gy + w.py, w.vw, w.vh, w.x + w.hl, y0 + w.ht, w.zs, w.zs);
+  }
+  if (!rects.length) return null;
+  let area = 0;
+  for (const r of rects) area += r.w * r.h;
+  // many small pieces, or so much of the screen that the clip is not paying for itself: one box
+  if (rects.length > 12 || area > 0.6 * vw * vh) {
+    let x0 = rects[0].x, y0 = rects[0].y, x1 = x0 + rects[0].w, y1 = y0 + rects[0].h;
+    for (const r of rects) { x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y); x1 = Math.max(x1, r.x + r.w); y1 = Math.max(y1, r.y + r.h); }
+    return { rects: [{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }], full: false };
+  }
+  return { rects, full: false };
+}
 function presentOnce() {
   /* One place where guest pixels reach this thread: the rows the worker says changed are copied
      out of shared memory (or drawn from the ImageBitmaps it transferred) into the source canvas.
@@ -1867,6 +2119,7 @@ function presentOnce() {
   if (pres.width !== Math.round(fw * dpr) || pres.height !== Math.round(fh * dpr)) {
     pres.width = Math.round(fw * dpr); pres.height = Math.round(fh * dpr);
     pres.style.width = fw + "px"; pres.style.height = fh + "px";
+    needFull = true;                                     // a resize clears the backing store
   }
   const g = pres.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1876,13 +2129,11 @@ function presentOnce() {
     g.fillStyle = "#000"; g.fillRect(0, 0, fw, fh);
     g.translate(safe.l, safe.t);
     drawFirstFrame(g, vw, vh);
+    needFull = true;                                     // the guest's own first frame is a full one
     return;
   }
   if (src && src.width) {
     view = chooseView(src);
-    g.fillStyle = "#000";
-    g.fillRect(0, 0, fw, fh);                            // the safe areas stay black: nothing there
-    g.translate(safe.l, safe.t);                         // everything else in the safe rectangle
     /* Until the shell has been arranged, show the whole guest screen (DOS, the Windows logo)
        rather than the desktop column: the user should not watch Program Manager being resized,
        and nothing drawn here is ever the host's own. A long timeout guards a guest that never
@@ -1891,16 +2142,61 @@ function presentOnce() {
       const sc = Math.min(vw / src.width, vh / src.height);
       view = { x: 0, y: 0, w: src.width, h: src.height, scale: sc, ox: Math.round((vw - src.width * sc) / 2) };
     }
-    {
-      const dw = view.w * view.scale, dh = view.h * view.scale;
-      blit(g, src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
-      placed = narrow() ? placeLayers(src) : [];
-      maskShellDialogCopies(g, src);
-      const shift = keyboardShift();
-      if (shift) g.translate(0, -shift);
-      for (const w of placed) drawWindow(g, src, w);  // back to front
-      if (shift) g.translate(0, shift);
+    placed = narrow() ? placeLayers(src) : [];
+    const shift = keyboardShift();
+    frameNo++;
+    const tPlan = performance.now();
+    const dmg = planDamage(vw, vh, shift);
+    comp.planMs += performance.now() - tPlan;
+    comp.frames++;
+    comp.viewPx += vw * vh;
+    if (!dmg) { comp.empty++; return; }                  // nothing changed: the canvas is already right
+    for (const r of dmg.rects) comp.dmgPx += r.w * r.h;
+    if (dmg.full) { g.fillStyle = "#000"; g.fillRect(0, 0, fw, fh); }   // safe areas and letterbox
+    g.save();
+    g.translate(safe.l, safe.t);                         // everything else in the safe rectangle
+    /* A full frame takes no clip at all: it is the old compositor exactly, and a clip that covers
+       everything is cost without a saving. */
+    if (!dmg.full) {
+      g.beginPath();
+      for (const r of dmg.rects) g.rect(r.x, r.y, r.w, r.h);
+      g.clip();
     }
+    /* The desktop. The whole slice is handed to drawImage exactly as it always was, and the clip
+       does the trimming: the rasterizer only fills the damaged part, and every pixel lands on the
+       same sample it would have in a full frame. Blitting a sub-rectangle instead would be
+       cheaper to describe but not pixel-identical — a nearest-neighbour source rectangle rounded
+       to whole guest pixels shifts the sampling grid by a fraction of a pixel, which on the
+       desktop's dithered background is a visible difference against the region beside it. */
+    const dw = view.w * view.scale, dh = view.h * view.scale;
+    blit(g, src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw), Math.round(dh));
+    comp.bg++;
+    maskShellDialogCopies(g, src);
+    /* Damage test in the layers' own coordinates (the keyboard pan is a translate, so a piece at
+       host y is compared at y - shift). drawWindow uses it per piece of chrome. */
+    const meets = dmg.full ? null : (x, y, ww, hh) => {
+      const y0 = y - shift;
+      comp.pieces++;
+      for (const r of dmg.rects) if (r.x < x + ww && x < r.x + r.w && r.y < y0 + hh && y0 < r.y + r.h) return true;
+      comp.pieceSkips++;
+      return false;
+    };
+    if (shift) g.translate(0, -shift);
+    for (let i = 0; i < placed.length; i++) {             // back to front, damage only
+      const w = placed[i];
+      if (meets && !meets(w.x, w.y, w.hw, w.hh)) { comp.skips++; continue; }   // its generation stands
+      drawWindow(g, src, w, meets);
+      comp.draws++;
+      layerGen.set(w.key, dirtyGen);
+    }
+    if (shift) g.translate(0, shift);
+    g.restore();
+    /* Everything the guest had painted is now on the canvas, so the next frame's questions start
+       from this generation. A drawn layer is complete: every dirty rectangle of its own was part
+       of the damage, so nothing of it was left behind the clip. */
+    lastBgGen = dirtyGen;
+    needFull = false;
+    for (const k of layerGen.keys()) if (!placed.some(w => w.key === k)) layerGen.delete(k);
     /* "Has the guest painted?" used to be a per-frame getImageData of two dozen source rows.
        The worker now says exactly which rows changed, so the signature is its running count of
        dirty regions (set above, in sync()) and the readback is gone. */
@@ -1934,6 +2230,7 @@ function requestMode(force) {
   const { w, h, zoom: scale } = computeMode();
   if (!force && lastReq && Math.abs(lastReq.w - w) < 8 && Math.abs(lastReq.h - h) < 8) return;
   lastReq = { w, h };
+  invalidate();
   holdLastFrame();
   emulator.bus.send("pv-request-mode", [w, h]);
   setText("zoom", scale === 1 ? "" : `scale ${scale.toFixed(2)}`);

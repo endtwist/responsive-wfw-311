@@ -178,14 +178,44 @@ async function pointer_round_trip(n)
     }, n);
 }
 
-async function measure(name, busyFn)
+/* A drag in progress: the front-most layer's caption dragged around the screen for the whole
+   window. Every move re-places that layer, so it is the case where the compositor cannot skip the
+   layer that moves — and must not skip whatever the layer uncovers. */
+async function dragger(ms)
 {
-    await page.evaluate(() => { window.__genReset(); window.__benchReset(); });
+    const w = await page.evaluate(() => {
+        const p = (window.pvState().placed || []).filter(q => !q.transient && !q.shellCopy);
+        const q = p[p.length - 1];
+        return q ? { x: Math.round(q.x + q.hw / 2), y: Math.round(q.y + 6), hw: q.hw, hh: q.hh } : null;
+    });
+    if(!w) { await sleep(ms); return 0; }
+    const end = Date.now() + ms;
+    let n = 0;
+    const t = page.touchscreen;
+    while(Date.now() < end)
+    {
+        const touch = await t.touchStart(w.x, w.y);
+        for(let i = 0; i < 12 && Date.now() < end; i++)
+        {
+            await touch.move(w.x + Math.round(30 * Math.sin(i / 2)), w.y + i * 8);
+            await sleep(24);
+        }
+        await touch.end();
+        n++;
+        await sleep(120);
+    }
+    return n;
+}
+
+async function measure(name, busyFn, poke)
+{
+    await page.evaluate(() => { window.__genReset(); window.__benchReset(); if(window.pvComposite) window.pvComposite(); });
     const busy = busyFn ? busyFn() : Promise.resolve();
-    const taps = await tapper(SECONDS * 1000);
+    const taps = await (poke || tapper)(SECONDS * 1000);
     await busy;
     const r = await page.evaluate(() => ({
         perf: window.pvPerf ? window.pvPerf(false) : null,
+        comp: window.pvComposite ? window.pvComposite(false) : null,
         g: { iv: window.__gen.iv, delays: window.__gen.delays, lat: window.__gen.lat, frames: window.__gen.frames },
         px: window.__bench.latencies,
     }));
@@ -198,10 +228,34 @@ async function measure(name, busyFn)
         inq_p50: pct(r.g.delays, 0.5), inq_p95: pct(r.g.delays, 0.95), inq_max: pct(r.g.delays, 1),
         lat_p50: pct(lat, 0.5), lat_p95: pct(lat, 0.95), lat_max: pct(lat, 1), lat_lost: r.g.lat.filter(x => x < 0).length,
         px_p50: pct(r.px.filter(x => x > 0), 0.5), px_p95: pct(r.px.filter(x => x > 0), 0.95),
-        draw_p95: r.perf ? r.perf.draw_p95 : null, draw_max: r.perf ? r.perf.draw_max : null,
+        draw_mean: r.perf ? r.perf.draw_mean : null, draw_sum: r.perf ? r.perf.draw_sum : null,
+        draw_p50: r.perf ? r.perf.draw_p50 : null, draw_p95: r.perf ? r.perf.draw_p95 : null, draw_max: r.perf ? r.perf.draw_max : null,
+        skipped: r.comp ? r.comp.skipped : null, pieces_skipped: r.comp ? r.comp.pieces_skipped : null, damage: r.comp ? r.comp.damage_pct : null, blits: r.comp ? r.comp.blits_per_frame : null, plan_ms: r.comp ? r.comp.plan_ms : null,
         sync_ms: r.perf ? r.perf.sync_ms : null, guestFrames: r.perf ? r.perf.guestFrames : null,
         path: r.perf ? r.perf.path : "main-thread",
     };
+    /* The same scene, composited over and over with the guest quiescent: a deterministic
+       composite cost, free of the run-to-run variation in what the guest happened to paint. The
+       old compositor redraws everything every time; the new one should find nothing to do. */
+    row.still_ms = await page.evaluate(async () => {
+        const frame = () => {
+            const raf = window.requestAnimationFrame;
+            window.requestAnimationFrame = () => 0;
+            try { window.pvPresent(); } finally { window.requestAnimationFrame = raf; }
+        };
+        let g = -1;                                     // wait for the guest to stop painting
+        for(let i = 0; i < 40; i++)
+        {
+            const now = window.pvDirty ? window.pvDirty().gen : i;
+            if(now === g) break;
+            g = now;
+            await new Promise(r => setTimeout(r, 120));
+        }
+        frame();
+        const t = performance.now();
+        for(let i = 0; i < 120; i++) frame();
+        return +((performance.now() - t) / 120).toFixed(4);
+    });
     const rt = (await pointer_round_trip(12)).filter(x => x > 0);
     row.ptr_p50 = pct(rt, 0.5); row.ptr_p95 = pct(rt, 0.95); row.ptr_max = pct(rt, 1); row.ptr_n = rt.length;
     console.log(`${ts()} ${name}: ` + JSON.stringify(row));
@@ -209,6 +263,10 @@ async function measure(name, busyFn)
 }
 
 const rows = [];
+/* A desktop nobody is touching: the guest paints nothing, so a compositor that repaints only what
+   changed should draw nothing at all. (The other cases all tap, which is a repaint every 500 ms.) */
+const still = async ms => { await sleep(ms); return 0; };
+rows.push(await measure("idle:untouched", null, still));
 rows.push(await measure("idle"));
 
 /* Busy: the guest given real work. "winfile" opens File Manager (17 M instructions, and the
@@ -228,6 +286,18 @@ async function busy()
 }
 rows.push(await measure("busy:" + BUSY, busy));
 
+/* Several windows open, one of them repainting: the case the per-layer skip is for. Notepad and
+   Clock (Clock repaints its own second hand, so it is never quite still) stay open while File
+   Manager is minimised and restored underneath them. */
+async function many()
+{
+    await runExe("NOTEPAD.EXE"); await sleep(1200);
+    await runExe("CLOCK.EXE");   await sleep(1200);
+    await busy();
+}
+rows.push(await measure("many:one-repainting", many));
+rows.push(await measure("drag", null, dragger));
+
 await sleep(1500);
 rows.push(await measure("after"));
 
@@ -237,9 +307,10 @@ fs.mkdirSync(path.dirname(file), { recursive: true });
 fs.writeFileSync(file, JSON.stringify(out, null, 1));
 await page.screenshot({ path: path.join(root, "shots", `bench-${LABEL}.png`) });
 console.log(`${ts()} wrote ${file}`);
-console.log("\ncase              fps  iv_p50 iv_p95 iv_max >20ms >33ms inq_p50 inq_p95 inq_max lat_p50 lat_p95 ptr_p50 ptr_p95");
+console.log("\ncase                  fps  iv_p50 iv_p95 iv_max >20ms >33ms dr_mean still dr_p95 dr_max skip% dmg% blits plan_ms inq_p50 lat_p50 ptr_p50");
 for(const r of rows)
 {
-    console.log(`${r.case.padEnd(16)} ${String(r.fps).padStart(5)} ${String(r.iv_p50).padStart(6)} ${String(r.iv_p95).padStart(6)} ${String(r.iv_max).padStart(6)} ${String(r.iv_over20).padStart(5)} ${String(r.iv_over33).padStart(5)} ${String(r.inq_p50).padStart(7)} ${String(r.inq_p95).padStart(7)} ${String(r.inq_max).padStart(7)} ${String(r.lat_p50).padStart(7)} ${String(r.lat_p95).padStart(7)} ${String(r.ptr_p50).padStart(7)} ${String(r.ptr_p95).padStart(7)}`);
+    const c = (v, n) => String(v == null ? "-" : v).padStart(n);
+    console.log(`${r.case.padEnd(20)} ${c(r.fps, 5)} ${c(r.iv_p50, 6)} ${c(r.iv_p95, 6)} ${c(r.iv_max, 6)} ${c(r.iv_over20, 5)} ${c(r.iv_over33, 5)} ${c(r.draw_mean, 7)} ${c(r.still_ms, 6)} ${c(r.draw_p95, 6)} ${c(r.draw_max, 6)} ${c(r.skipped, 5)} ${c(r.damage, 4)} ${c(r.blits, 5)} ${c(r.plan_ms, 7)} ${c(r.inq_p50, 7)} ${c(r.lat_p50, 7)} ${c(r.ptr_p50, 7)}`);
 }
 await browser.close();
