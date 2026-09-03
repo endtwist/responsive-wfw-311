@@ -460,33 +460,85 @@ static void fix_msgbox(HWND dlg)
     pv_dbg(text);
 }
 
+/* PVK: what has the focus, not a guess from the window title.
+ *
+ * The host used to decide whether to raise the soft keyboard from a regex over window titles
+ * (`MS-DOS|^Notepad|...|High Score|Name|Enter `) plus a per-app veto list. Every new dialog needed
+ * a new entry (JezzBall's high-score box was the last), and a game on the veto list vetoed its own
+ * text dialog. The line below reports the facts Windows itself exposes about the focused window,
+ * and the host decides from those:
+ *
+ *     PVK <0|1> <class> <flags>
+ *
+ * <class> is the focused window's class ('-' if it has none, spaces mapped to '_'), <flags> a
+ * string of letters:
+ *     e  class Edit
+ *     r  ... with ES_READONLY (takes no typing)
+ *     c  class ComboBox, or the Edit child of one
+ *     t  class tty (the WinOldAp DOS grabber)
+ *     n  a class that is known never to take text (Button, Static, ScrollBar, ListBox, ComboLBox,
+ *        a #NNNNN system class, MDIClient, PMGroup, Progman)
+ *     k  the focused window's program is in [PVMon] KeyboardApps
+ *     a  the focused window owns the caret  (PVMON only: see caret_owner(), the caret is created
+ *        by the app's WM_SETFOCUS handler, which has not run yet when this hook fires)
+ * want = (e|c|t|k|a) && !r && !n. The old `PVK 0`/`PVK 1` prefix is unchanged, so a host that
+ * only reads the digit still works, and a class the guest cannot classify is learned by the host
+ * (caption-hold while it has the focus) rather than added to a table here.
+ */
+#define PV_ES_READONLY 0x0800L
+static BOOL pv_nontext_class(const char FAR *cls)
+{
+    return lstrcmpi(cls, "Button") == 0 || lstrcmpi(cls, "Static") == 0 || lstrcmpi(cls, "ScrollBar") == 0 ||
+           lstrcmpi(cls, "ListBox") == 0 || lstrcmpi(cls, "ComboLBox") == 0 || cls[0] == '#' ||
+           lstrcmpi(cls, "MDIClient") == 0 || lstrcmp(cls, "PMGroup") == 0 || lstrcmp(cls, "Progman") == 0;
+}
+/* Fills cls (>= 24 bytes) and fl (>= 12 bytes); returns want. caretOwner is the window that owns
+   the caret, or NULL when unknown (the hook) -- never a reason to say "no". */
+static int focus_report(HWND f, HWND caretOwner, char FAR *cls, char FAR *fl)
+{
+    int n = 0, text = 0, no = 0; char FAR *p;
+    cls[0] = 0; fl[0] = 0;
+    if (!f || GetClassName(f, cls, 24) <= 0) { lstrcpy(cls, "-"); return 0; }
+    for (p = cls; *p; p++) if (*p == ' ') *p = '_';
+    if (lstrcmpi(cls, "Edit") == 0) {
+        fl[n++] = 'e'; text = 1;
+        if (GetWindowLong(f, GWL_STYLE) & PV_ES_READONLY) { fl[n++] = 'r'; no = 1; }
+    }
+    if (lstrcmpi(cls, "ComboBox") == 0) { fl[n++] = 'c'; text = 1; }
+    else if (!text) {                              /* a combo box's edit child reports as Edit already */
+        char pcls[24]; HWND parent = GetParent(f);
+        if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) { fl[n++] = 'c'; text = 1; }
+    }
+    if (lstrcmpi(cls, "tty") == 0) { fl[n++] = 't'; text = 1; }
+    if (pv_nontext_class(cls)) { fl[n++] = 'n'; no = 1; }
+    if (!no) {
+        /* Programs that take text in a window of their own class (Write's document, Cardfile's
+           card, Terminal, a DOS box). The caret below is the general form of this; the list stays
+           as the fallback for when the caret cannot be located in USER's data. */
+        HWND top = f; char mod[16]; int hops;
+        for (hops = 0; hops < 8 && (GetWindowLong(top, GWL_STYLE) & WS_CHILD); hops++) top = GetParent(top);
+        module_base(top, mod, sizeof(mod));
+        if (mod[0] && in_list("KeyboardApps", mod)) { fl[n++] = 'k'; text = 1; }
+        if (caretOwner && caretOwner == f) { fl[n++] = 'a'; text = 1; }
+    }
+    fl[n] = 0;
+    if (!n) { fl[0] = '-'; fl[1] = 0; }
+    return text && !no;
+}
+static void focus_line(HWND f, HWND caretOwner, char FAR *out)
+{
+    char cls[24], fl[12];
+    int want = focus_report(f, caretOwner, cls, fl);
+    wsprintf(out, "PVK %d %s %s", want, (LPSTR)cls, (LPSTR)fl);
+}
+
 LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code == HCBT_SETFOCUS) {
         /* The host must know the moment a text control takes the focus: iOS only shows its
            keyboard inside the touch gesture that caused it, so a poll 100 ms later is too late. */
         HWND f = (HWND)wParam;
-        char cls[24];
-        if (f && GetClassName(f, cls, sizeof(cls)) > 0) {
-            int want = 0;
-            if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0 || lstrcmpi(cls, "tty") == 0) want = 1;
-            else {
-                char pcls[24]; HWND parent = GetParent(f);
-                if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) want = 1;
-            }
-            /* Programs that take text in a window of their own class (Write's document, Cardfile's
-               card, Terminal, a DOS box): the focused window is not one of the known non-text
-               classes and its program is listed in [PVMon] KeyboardApps. */
-            if (!want && !(lstrcmpi(cls, "Button") == 0 || lstrcmpi(cls, "Static") == 0 || lstrcmpi(cls, "ScrollBar") == 0 ||
-                           lstrcmpi(cls, "ListBox") == 0 || lstrcmpi(cls, "ComboLBox") == 0 || cls[0] == '#' ||
-                           lstrcmpi(cls, "MDIClient") == 0 || lstrcmp(cls, "PMGroup") == 0 || lstrcmp(cls, "Progman") == 0)) {
-                HWND top = f; char mod[16]; int hops;
-                for (hops = 0; hops < 8 && (GetWindowLong(top, GWL_STYLE) & WS_CHILD); hops++) top = GetParent(top);
-                module_base(top, mod, sizeof(mod));
-                if (mod[0] && in_list("KeyboardApps", mod)) want = 1;
-            }
-            pv_dbg(want ? "PVK 1" : "PVK 0");
-        }
+        if (f) { char line[64]; focus_line(f, NULL, line); pv_dbg(line); }
     }
     if (code == HCBT_ACTIVATE && shell_w()) {
         HWND h = (HWND)wParam;

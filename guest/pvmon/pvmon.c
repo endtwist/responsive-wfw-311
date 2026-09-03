@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 37     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 38     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 /* Windows 3.x rounds SetTimer up to the 18.2 Hz PC tick, so the 40 ms poll really fires every
@@ -498,6 +498,54 @@ static BOOL find_desktop_rect(WORD sel)
             g_deskRc[g_nDeskRc++] = off;
     }
     return g_nDeskRc > 0;
+}
+
+/* The caret: Windows' own signal that a window expects typing.
+ *
+ * Win16 has one caret system-wide and no API that names its owner (GetCaretPos answers the last
+ * position whether or not a caret exists), so the owner word is located in USER's data the same
+ * way the metrics array is: plant a caret with a signature position on a window whose handle we
+ * know, find the pattern, then prove the offset by destroying the caret and seeing it clear.
+ * A window that owns a caret takes text whatever its class is -- Write's document, Cardfile's
+ * card, Terminal, Paintbrush's text tool -- which is what makes the per-app KeyboardApps list and
+ * the host's title regex unnecessary. If any step fails, caret reporting simply stays off.
+ */
+static WORD g_offCaret;            /* offset of the caret owner's HWND within USER's DGROUP */
+static void find_caret(HWND mine)
+{
+    WORD off, cand = 0; int hits = 0;
+    char buf[80];
+    if (!mine) return;
+    if (!g_userDS) g_userDS = find_dgroup("USER");     /* live re-mode off: found for the caret alone */
+    if (!g_userDS) { dbg("pvmon: caret: USER DGROUP not found"); return; }
+    CreateCaret(mine, NULL, 3, 11);                    /* void in Win16 */
+    ShowCaret(mine);                                   /* the position is only tracked while shown */
+    SetCaretPos(0x3456, 0x789A);
+    for (off = 0; off < 0xF000 - 8; off += 2) {
+        WORD __far *p = PVFP(g_userDS, off);
+        if (p[0] != 0x3456 || p[1] != 0x789A) continue;
+        /* the owner is a word near the position pair; take the nearest match either side */
+        { int d; for (d = 2; d <= 12; d += 2) {
+              if (off >= (WORD)d && *PVFP(g_userDS, off - d) == (WORD)mine) { if (!hits++) cand = off - d; break; }
+              if (*PVFP(g_userDS, off + 4 + d - 2) == (WORD)mine) { if (!hits++) cand = off + 4 + d - 2; break; }
+          } }
+    }
+    DestroyCaret();
+    if (hits != 1 || !cand) { dbgnum("pvmon: caret owner not located, candidates", (unsigned)hits, 0); return; }
+    if (*PVFP(g_userDS, cand) != 0) { dbg("pvmon: caret owner word did not clear, caret report off"); return; }
+    CreateCaret(mine, NULL, 3, 11);
+    if (*PVFP(g_userDS, cand) != (WORD)mine) { DestroyCaret(); dbg("pvmon: caret owner word did not re-arm"); return; }
+    DestroyCaret();
+    g_offCaret = cand;
+    wsprintf(buf, "pvmon: caret owner at USER:+%04X", g_offCaret);
+    dbg(buf);
+}
+static HWND caret_owner(void)
+{
+    HWND h;
+    if (!g_offCaret) return NULL;
+    h = (HWND)*PVFP(g_userDS, g_offCaret);
+    return h && IsWindow(h) ? h : NULL;
 }
 
 static void find_user_state(void)
@@ -1136,11 +1184,12 @@ static BOOL module_of(HWND hwnd, char *out, int outlen)
 /* [PVMon] KeepSize, read once (WM_CREATE) and again with each CMD_SHELLSIZE: a WIN.INI read per
    window per layout pass is file I/O a phone's guest can do without. */
 static char g_keepList[160];
-static BOOL in_keep_list(const char *mod)
+static char g_kbdList[160];               /* [PVMon] KeyboardApps, read alongside it */
+static BOOL in_list_of(const char *list, const char *mod)
 {
-    char *k;
-    for (k = g_keepList; *k; ) {
-        char *e = k; int n;
+    const char *k;
+    for (k = list; *k; ) {
+        const char *e = k; int n;
         while (*e && *e != ' ' && *e != ',') e++;
         n = (int)(e - k);
         if (n == lstrlen(mod) && lstrcmpi_n(k, mod, n)) return TRUE;
@@ -1148,6 +1197,8 @@ static BOOL in_keep_list(const char *mod)
     }
     return FALSE;
 }
+static BOOL in_kbd_list(const char *mod) { return in_list_of(g_kbdList, mod); }
+static BOOL in_keep_list(const char *mod) { return in_list_of(g_keepList, mod); }
 static void apply_initial_size(HWND hwnd, int slotX)
 {
     char key[48], val[24], *p, mod[16];
@@ -1265,41 +1316,64 @@ static void describe(HWND hwnd, char *line, const char *tag, int slot)
 /* Tell the host whether a text control has the keyboard focus, so it can offer the soft keyboard
    when one does and put it away when none does. Windows 3.1 has no soft keyboard of its own. */
 static int g_lastKbd = -1;
+/* PVK <0|1> <class> <flags> -- see pvhook.c for the protocol. PVHOOK reports the same line the
+   instant the focus moves (HCBT_SETFOCUS, inside the tap's gesture); this one runs from the poll,
+   which is the only place the caret can be seen: the app creates it in its WM_SETFOCUS handler,
+   after the hook has returned. Sent only when the line changes. */
+#define PV_ES_READONLY 0x0800L
+static BOOL nontext_class(const char *cls)
+{
+    return lstrcmpi(cls, "Button") == 0 || lstrcmpi(cls, "Static") == 0 || lstrcmpi(cls, "ScrollBar") == 0 ||
+           lstrcmpi(cls, "ListBox") == 0 || lstrcmpi(cls, "ComboLBox") == 0 || cls[0] == '#' ||
+           lstrcmpi(cls, "MDIClient") == 0 || lstrcmp(cls, "PMGroup") == 0 || lstrcmp(cls, "Progman") == 0;
+}
+static char g_lastKbdLine[64];
 static void report_focus(void)
 {
-    HWND f = GetFocus();
-    char cls[24];
-    int want = 0;
-    if (f && GetClassName(f, cls, sizeof(cls)) > 0) {
-        if (lstrcmpi(cls, "Edit") == 0 || lstrcmpi(cls, "ComboBox") == 0 || lstrcmpi(cls, "tty") == 0) want = 1;
-        else {                             /* a combo box's edit child reports as Edit already */
-            char pcls[24]; HWND parent = GetParent(f);
-            if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) want = 1;
-        }
+    HWND f = GetFocus(), car = caret_owner();
+    char cls[24], fl[12], line[64], *p;
+    int n = 0, text = 0, no = 0;
+    cls[0] = 0;
+    if (!f || GetClassName(f, cls, sizeof(cls)) <= 0) lstrcpy(cls, "-");
+    for (p = cls; *p; p++) if (*p == ' ') *p = '_';
+    if (lstrcmpi(cls, "Edit") == 0) {
+        fl[n++] = 'e'; text = 1;
+        if (GetWindowLong(f, GWL_STYLE) & PV_ES_READONLY) { fl[n++] = 'r'; no = 1; }
     }
-    if (!want) {
-        /* programs that take keys without an edit control (a DOS box, Paintbrush's text tool,
-           Terminal): [PVMon] KeyboardApps=WINOA386 TERMINAL ... by module of the active window */
-        HWND a = GetActiveWindow();
-        if (a) {
-            char path[128], mod[16], list[128], *base, *p, *k; int n;
-            HINSTANCE inst = (HINSTANCE)GetWindowWord(a, GWW_HINSTANCE);
-            if (inst && GetModuleFileName(inst, path, sizeof(path))) {
-                base = path;
-                for (p = path; *p; p++) if (*p == '\\' || *p == ':') base = p + 1;
-                for (n = 0; base[n] && base[n] != '.' && n < 15; n++) mod[n] = base[n];
-                mod[n] = 0;
-                GetProfileString("PVMon", "KeyboardApps", "", list, sizeof(list));
-                for (k = list; *k; ) {
-                    char *e = k;
-                    while (*e && *e != ' ' && *e != ',') e++;
-                    if ((int)(e - k) == lstrlen(mod) && lstrcmpi_n(k, mod, (int)(e - k))) { want = 1; break; }
-                    k = e; while (*k == ' ' || *k == ',') k++;
-                }
-            }
-        }
+    if (lstrcmpi(cls, "ComboBox") == 0) { fl[n++] = 'c'; text = 1; }
+    else if (!text && f) {                 /* a combo box's edit child reports as Edit already */
+        char pcls[24]; HWND parent = GetParent(f);
+        if (parent && GetClassName(parent, pcls, sizeof(pcls)) > 0 && lstrcmpi(pcls, "ComboBox") == 0) { fl[n++] = 'c'; text = 1; }
     }
-    if (want != g_lastKbd) { g_lastKbd = want; dbg(want ? "PVK 1" : "PVK 0"); }
+    if (lstrcmpi(cls, "tty") == 0) { fl[n++] = 't'; text = 1; }
+    if (nontext_class(cls)) { fl[n++] = 'n'; no = 1; }
+    if (!no && f) {
+        /* The caret is the general test: a window that owns one expects typing whatever its class
+           is (Write's document, Cardfile's card, Terminal, Paintbrush's text tool). KeyboardApps
+           stays behind it as the fallback for when the caret could not be located in USER's data
+           (g_offCaret == 0) or an app types without one. */
+        char mod[16];
+        HWND top = f, act;
+        int hops;
+        for (hops = 0; hops < 8 && (GetWindowLong(top, GWL_STYLE) & WS_CHILD); hops++) top = GetParent(top);
+        if (module_of(top, mod, sizeof(mod)) && mod[0] && in_kbd_list(mod)) { fl[n++] = 'k'; text = 1; }
+        /* The caret need not be owned by the focused window itself: Paintbrush's text tool puts one
+           in its canvas child while the focus stays on pbParent. Anywhere inside the focused
+           top-level window counts -- a caret exists only while that program expects typing. */
+        if (car) {
+            HWND ct = car;
+            for (hops = 0; hops < 8 && (GetWindowLong(ct, GWL_STYLE) & WS_CHILD); hops++) ct = GetParent(ct);
+            if (ct == top) { fl[n++] = 'a'; text = 1; }
+        }
+        /* A DOS box takes the focus in its tty child, but the grabber window is what the caret and
+           the module belong to; the active window covers the case where GetFocus() lags. */
+        if (!text && (act = GetActiveWindow()) != NULL && act != top &&
+            module_of(act, mod, sizeof(mod)) && mod[0] && in_kbd_list(mod)) { fl[n++] = 'k'; text = 1; }
+    }
+    fl[n] = 0;
+    if (!n) { fl[0] = '-'; fl[1] = 0; }
+    wsprintf(line, "PVK %d %s %s", text && !no ? 1 : 0, (LPSTR)cls, (LPSTR)fl);
+    if (lstrcmp(line, g_lastKbdLine) != 0) { lstrcpy(g_lastKbdLine, line); g_lastKbd = text && !no; dbg(line); }
 }
 
 static void publish_layout(void)
@@ -1599,6 +1673,7 @@ static void run_host_command_1(void)
            toolbars vary), so the desktop fills the phone edge to edge with no letterboxing. */
         if (arg >= 300 && arg <= (unsigned)(int)g_realH) g_shellH = arg;
         GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
+        GetProfileString("PVMon", "KeyboardApps", "", g_kbdList, sizeof(g_kbdList));
         if (g_desktop) { send_pvd(); return; }          /* kept for the way back; no column to arrange */
         apply_fake_screen();
         hook_set_shell();
@@ -1931,6 +2006,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
            labels) is left as laid out at x=0, clipped at the right. */
         g_dlgReflow = GetProfileInt("PVMon", "DialogReflow", 1) != 0;
         GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
+        GetProfileString("PVMon", "KeyboardApps", "", g_kbdList, sizeof(g_kbdList));
         g_shellW = (unsigned)GetProfileInt("PVMon", "ShellWidth", 0);
         g_shellH = (unsigned)GetProfileInt("PVMon", "ShellHeight", 0);
         /* The screen is now one row of columns, so the shell column is the full screen height
@@ -1946,6 +2022,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (g_shellW) send_pvd();
         if (g_live) dbg("pvmon: live re-mode enabled");
         if (g_live || g_fakeScreen) find_user_state();
+        find_caret(hwnd);                           /* the focused window's caret: PVK's 'a' flag */
         if (g_shellW) apply_fake_screen();          /* before the shell and the first program size themselves */
         if (g_shellW) install_hook();
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);

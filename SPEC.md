@@ -3001,3 +3001,123 @@ the FM output as a WAV (`audio:shots/x.wav`).
 **No wasm rebuild is needed** — the OPL is pure JavaScript and the page loads `v86/src` modules
 directly. `node tools/tour.mjs --apps MPLAYER,SOUNDREC,NOTEPAD` is green apart from the known
 `dlgfit=fail:604x318` (Notepad's File Open, already on the list).
+
+### 2026-09-03 — the soft keyboard decided by the focused control, not the window title (PVMON v38, PVHOOK, host)
+
+The host used to decide whether to raise the phone keyboard from a regex over window titles
+(`KEYBOARD_TITLES = /MS-DOS|^Notepad\b|…|High Score|Name|Enter /i`) plus a per-app veto list
+(`NO_KEYBOARD`, all the games). That guessed from a string, needed a new entry for every app and
+every dialog — JezzBall's "Jezz Ball High Score" box was the latest — and fought itself: a game on
+the veto list vetoed its own text dialog, which is why `Player Name|Password|High Score|Name` had
+to be checked *before* the veto. **Both tables are deleted.** The guest now reports what actually
+has the focus and the host decides from that; a class the guest cannot classify is *learned* from
+the user's own caption-hold rather than added to a table.
+
+**Protocol.** `PVK` carries the focused window's identity, keeping the old `PVK 0`/`PVK 1` prefix
+so an older host (and `web/selftest.js`, which reads `/^PVK (\d)/`) still works:
+
+```
+PVK <0|1> <class> <flags>
+```
+
+`<class>` is the focused window's class name (`-` if it has none, spaces mapped to `_`), `<flags>`
+a string of letters, each a fact Windows itself exposes:
+
+| flag | meaning |
+|---|---|
+| `e` | class `Edit` |
+| `r` | … with `ES_READONLY` — takes no typing, and vetoes |
+| `c` | class `ComboBox`, or the `Edit` child of one |
+| `t` | class `tty` (WinOldAp's DOS grabber) |
+| `n` | a class that never takes text: `Button`, `Static`, `ScrollBar`, `ListBox`, `ComboLBox`, a `#NNNNN` system class, `MDIClient`, `PMGroup`, `Progman` — vetoes |
+| `k` | the focused window's program is in `[PVMon] KeyboardApps` |
+| `a` | the focused window's top-level window owns the **caret** |
+
+`want = (e|c|t|k|a) && !r && !n`. Two emitters, one format: **PVHOOK** reports from
+`HCBT_SETFOCUS` the instant the focus moves (inside the tap's gesture, which is the only time iOS
+will grant focus), with no `a` — the app creates its caret in its `WM_SETFOCUS` handler, which has
+not run when a CBT hook fires. **PVMON** reports the same line from its poll (`report_focus`,
+every 4th poll), where the caret *is* visible, and sends only when the whole line changes.
+
+**The caret, found the way the screen metrics were.** Win16 has one caret system-wide and no API
+that names its owner (`GetCaretPos` answers the last position whether or not a caret exists), so
+`find_caret()` locates the owner word in USER's DGROUP the same way `find_sysmet()` locates the
+metrics array: plant a caret on PVMON's own window (`CreateCaret`/`ShowCaret`/`SetCaretPos` with a
+signature position `0x3456,0x789A` — all three are `void` in Win16), scan for the position pair,
+take the nearby word that equals our `HWND`, then **prove** the offset — `DestroyCaret()` must
+clear it and a second `CreateCaret` must re-arm it. Ambiguous or unproven ⇒ caret reporting stays
+off and the `KeyboardApps` list carries the load. On this build: `pvmon: caret owner at USER:+0578`
+(USER `ds=0766`). `find_caret` runs once at `WM_CREATE`, after `find_user_state`, and finds USER's
+DGROUP itself if live re-mode is off.
+
+The caret need not be owned by the focused window: **Paintbrush's text tool** puts one in the
+canvas child while the focus stays on `pbParent`, so anything inside the *focused top-level window*
+counts. A caret exists only while a program expects typing, which is exactly the signal wanted.
+
+`[PVMon] KeyboardApps` stays as the fallback behind the caret (Write's document reports `k` and no
+`a`: it creates its caret later than the poll that first sees the focus). No WIN.INI change.
+
+**Host.** `guestFocus = {want, cls, flags}` is the guest's last word; `guestTextFocus()` is true
+when `want`, or when `cls` is a learned class and not `n`-flagged. `tapKeyboard` no longer looks at
+a title at all:
+
+- `?kbtest=1` → always; a caption hold → always (manual override, unchanged).
+- keyboard already up and the focus still text-capable → keep it.
+- a desktop tap outside a shell dialog → never.
+- **`guestTextFocus()` and the tap is in an owned dialog, or in a window's client outside the
+  scrollbar strip → focus.** A dialog's whole window counts because its `Edit` takes the focus when
+  the dialog opens, before any tap.
+- anything else in a client → `lateTapUntil` (as before): if the guest reports a text focus within
+  a second of the tap, focus then.
+
+**Learning replaces the table.** When the user summons the keyboard by hand (caption hold) while a
+class the host has not seen has the focus, that class is remembered as text-capable in
+`localStorage` under `pv.textclasses` and used automatically from then on — Visual Basic text
+boxes, a game's own input box, anything custom. Classes Windows itself calls non-text (`n`) and the
+empty class are never learned. Every step is in the `kbd` diag trace: `learned "TurboWindow" takes
+text (flags=-); known: TurboWindow`, and `report("kbd", "learned class …")`.
+
+**Verified** (guest side in node against the new snapshot, restoring the boot state between cases;
+host side in the pane at 375x812 with synthetic touch through the real handlers). No title matched
+in any row:
+
+| case | guest reported | keyboard |
+|---|---|---|
+| Notepad, client tap | `PVK 1 Edit eka` | `focus try (guest Edit/eka)`, `activeElement === #kbd` |
+| Write, document tap | `PVK 1 MSWRITE_DOC k` | `focus try (guest MSWRITE_DOC/k)`, focused |
+| MS-DOS Prompt | `PVK 1 tty tka` | `focus try (guest tty/tka)`, focused |
+| **Paintbrush text tool** (toolbox r1c1, then the canvas) | `PVK 1 pbParent a` | the caret alone carries it — no Edit, no list entry |
+| **JezzBall "Jezz Ball High Score"** | `PVK 1 Edit ea` | the case that used to need a `High Score` title |
+| TriPeaks "TriPeaks Player Name" | `PVK 1 Edit ea` | focus |
+| Dr. Black Jack "BlackJack Player Name" | `PVK 1 Edit ea` | focus |
+| Program Manager, File → Run | `PVK 1 Edit ea` | focus |
+| File Manager, File → Rename | `PVK 1 Edit ea` | focus |
+| JezzBall play area | `PVK 0 TurboWindow -` | `tap: deferred`, nothing focused |
+| Notepad's scrollbar strip | (focus unchanged, still `Edit eka`) | `tap: deferred`, input released |
+| Notepad's menu row | (focus unchanged) | `tap: no focus (chrome …)` |
+| Program Manager's group client | `PVK 0 PMGroup n` | none |
+| bare desktop | no `PVK` at all (the focus does not move) | none |
+
+Learning, end to end on JezzBall with `pv.textclasses` cleared: tap the play area → `tap: deferred`,
+nothing focused; caption hold → `learned "TurboWindow" takes text (flags=-)` and the input is
+focused; hold off → released; tap the play area again → `focus try (guest TurboWindow/- "JezzBall")`
+and focused, with `localStorage["pv.textclasses"] === ["TurboWindow"]`. So the games' exemption is
+gone and not needed: JezzBall's own window reports no text focus, and the *user* is what turns the
+keyboard on for it.
+
+`window.pvState()` gained `guestFocus`, `learnedText` and `kbdActive`; two new diagnostic hooks
+alongside it drive the guest from a console or harness the way the accessory bar does:
+`window.pvKeys([[0x01]])` (scancode sequences) and `window.pvText("hi")`, plus `window.pvRun(cmd)`
+to launch without a reload. The accessory bar's own rules (`ARROW_GAMES`, the hide key, the
+Ctrl/Alt latches, `keyboardShift`) are untouched.
+
+Note on testing: the emulator in a **hidden** Browser pane is throttled to roughly one tap per
+20 seconds, and `placed` only updates from `requestAnimationFrame`, so pane checks call
+`window.pvPresent()` by hand (as `web/selftest.js` does) and run their taps in a detached async
+routine whose results are polled.
+
+`node tools/tour.mjs --apps NOTEPAD,WRITE,DOSPRMPT,JEZZ`: pass=33 fail=2, the two failures the
+known pre-existing `dlgfit` (Notepad's and Write's COMMDLG Open box, 472x247 at this font).
+`kbd=pass` for NOTEPAD and DOSPRMPT and `kbd=info:wanted` for WRITE now come from the focused
+control, not a title. Image `work-phone-20260903-120421.img` + `boot-20260903-120421.state.gz` (PVMON v38: v37
+was taken by main's window-switch change while this branch was out).
