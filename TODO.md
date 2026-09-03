@@ -76,7 +76,7 @@ refer to one.
    PVMON. Fixes screen-rect intersections (Paintbrush's cursor clip), dialog centring, self
    sizing, default placement. Does not replace host scaling or input translation. Scope as a
    measured experiment with the tour as the yardstick.
-4. ~~**QBasic reboots the guest.**~~ Done 2026-09-03 (SPEC): the stock `QBASIC.PIF` was
+4. [qbasic] ~~**QBasic reboots the guest.**~~ Done 2026-09-03 (SPEC): the stock `QBASIC.PIF` was
    full-screen, so launching it put the display in an 80x25 text mode and the host restarted from
    the snapshot; and running a program (F5) panicked v86 on `INT EFh`, a vector past the DOS VM's
    IDT limit, which is a `#GP` on a real 386. A windowed PIF plus a one-line CPU fix; EDIT and the
@@ -127,7 +127,7 @@ refer to one.
     `[windows] run=` and suppressed afterwards by `[PVMon] AboutShown`; "Read Me First" in Main
     shows it again. Remaining: the `/about` alias in `web/app.js`'s `APPS` table.
 
-14. [qbasic] **First-open latency.** Launching a program takes about a second on the phone, and it is all
+14. [first-open] **First-open latency.** Launching a program takes about a second on the phone, and it is all
     guest work: Windows loading the executable and painting its first window. The driver agent
     measured the cost and it is NOT port-trapped disk I/O (this guest uses ATA DMA; a Paintbrush
     launch does zero IDE data-port reads) — it is INT 13h reflection through WIN386 plus the
