@@ -35,17 +35,25 @@ static char szText[] =
     "\r\n"
     "Tap to click; tap twice for a double-click.  One tap opens an icon in Program Manager.\r\n"
     "\r\n"
+    "Tap with two fingers for a right-click.  (Holding still and lifting works too.)\r\n"
+    "\r\n"
     "Hold, then drag, to move a window, an icon or a selection; a plain drag scrolls a list "
-    "instead.  Hold still, then lift, for a right-click.\r\n"
+    "instead.\r\n"
     "\r\n"
     "Two fingers scroll; pinch to magnify a window's contents, then two fingers move them "
     "about.\r\n"
     "\r\n"
+    "Swipe in from the right edge to bring the window behind to the front; keep swiping to "
+    "cycle through everything open, including Program Manager.\r\n"
+    "\r\n"
     "Drag a title bar to move a window; swipe a menu bar sideways if it runs off the screen.  "
     "A menu or a dialog too big for the screen is dragged with one finger, anywhere on it.\r\n"
     "\r\n"
+    "In Tetris, Chip's Challenge and Rodent's Revenge, swipe to send an arrow key: left and "
+    "right move, up rotates, down drops.  Double-tap to drop at once.\r\n"
+    "\r\n"
     "Hold a title bar for the keyboard.  Its top row adds Esc, Tab, arrows, Ctrl, Alt, Del, "
-    "F1-F10, Home, End, PgUp, PgDn and Ins.";
+    "F1-F10, Home, End, PgUp, PgDn and Ins; in the keyboard games that row appears on its own.";
 
 static char szHide[] = "&Don't show this again";
 static char szOK[] = "OK";
