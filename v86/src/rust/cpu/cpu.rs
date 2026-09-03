@@ -3429,6 +3429,56 @@ pub unsafe fn segment_prefix_op(seg: i32) {
     *prefixes = 0
 }
 
+// responsive-wfw311 (TODO 14, first-open latency): the emulator finishes a disk read on a later JS
+// task, but the guest does not know that. SeaBIOS's INT 13h handler — reflected into V86 mode by
+// WIN386, so every instruction of it is emulated — polls the bus-master status register in a tight
+// loop while it waits, and since a main_loop slice runs for a whole frame the guest burns ~270 000
+// instructions per read waiting for something only JS can deliver. `ide.js` calls `pv_disk_wait()`
+// when the guest polls with a read outstanding: the current slice ends immediately and control
+// returns to JS, which is the only place the read can complete. The read's completion callback
+// calls `cpu.stop_idling()`, so the guest resumes as soon as the data is there rather than after
+// the 1 ms this returns. `pv_disk_wait_enable(0)` restores the spinning behaviour for an A/B.
+pub static mut PV_DISK_WAIT: bool = false;
+pub static mut PV_DISK_WAIT_ENABLE: bool = true;
+#[allow(non_upper_case_globals)]
+static mut pv_disk_yields: u32 = 0;
+
+#[no_mangle]
+pub fn pv_disk_wait() {
+    unsafe {
+        if PV_DISK_WAIT_ENABLE {
+            PV_DISK_WAIT = true;
+            pv_disk_yields = pv_disk_yields.wrapping_add(1);
+        }
+    }
+}
+
+#[no_mangle]
+pub fn pv_disk_wait_enable(enable: u32) {
+    unsafe {
+        PV_DISK_WAIT_ENABLE = enable != 0;
+        if enable == 0 {
+            PV_DISK_WAIT = false;
+        }
+    }
+}
+
+/// 0: slices ended early because the guest was waiting for a disk read
+#[no_mangle]
+pub fn pv_disk_wait_stat(i: u32) -> u32 {
+    unsafe {
+        match i {
+            0 => pv_disk_yields,
+            _ => 0,
+        }
+    }
+}
+
+#[no_mangle]
+pub fn pv_disk_wait_clear() {
+    unsafe { PV_DISK_WAIT = false }
+}
+
 #[no_mangle]
 pub unsafe fn main_loop() -> f64 {
     profiler::stat_increment(stat::MAIN_LOOP);
@@ -3460,6 +3510,13 @@ pub unsafe fn main_loop() -> f64 {
             return t;
         }
 
+        if PV_DISK_WAIT {
+            PV_DISK_WAIT = false;
+            // A short delay, not 0: without it the host would spin through thousands of empty
+            // slices while a 256 KB image part is fetched. ide.js wakes us the moment it lands.
+            return 1.0;
+        }
+
         if now - start > TIME_PER_FRAME {
             break;
         }
@@ -3473,6 +3530,7 @@ pub unsafe fn do_many_cycles_native() {
     let initial_instruction_counter = *instruction_counter;
     while (*instruction_counter).wrapping_sub(initial_instruction_counter) < LOOP_COUNTER as u32
         && !*in_hlt
+        && !PV_DISK_WAIT
     {
         cycle_internal();
     }

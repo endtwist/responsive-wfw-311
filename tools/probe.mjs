@@ -6,6 +6,9 @@
  *   node tools/probe.mjs [--image image/x.img] [--state boot.state.gz] [--save out.state.gz] [--log]
  *                        [--audio-trace] steps...
  *
+ * --save writes the snapshot after the steps have run, so the steps decide what state is saved.
+ * That is how the shipped boot snapshot is warmed for first-open latency (SPEC 2026-09-03).
+ *
  * Steps (in order):
  *   run:NOTEPAD.EXE         WinExec through PVMON (CMD_RUN)
  *   until:W:^Notepad        wait (15 s) for a W layer whose title matches the regex; sets "current"
@@ -165,12 +168,6 @@ while (!st.desktopReady && performance.now() - t0 < 240000) await sleep(100);
 if (!st.desktopReady) { console.error("desktop not ready"); process.exit(1); }
 if (!st.shell.h) { emulator.bus.send("pv-command", [6, 0]); await until(() => st.shell.h, 5000); }
 console.log(`desktop ready in ${Math.round(performance.now() - t0)} ms (${STATE ? "snapshot" : "cold"}); shell ${st.shell.w}x${st.shell.h} pvmon v${st.shell.ver}`);
-if (val("--save")) {
-  await sleep(1500);
-  const raw = await emulator.save_state();
-  fs.writeFileSync(val("--save"), zlib.gzipSync(Buffer.from(raw)));
-  console.log(`saved ${val("--save")} (${fs.statSync(val("--save")).size} bytes)`);
-}
 
 let cur = null;                // current window layer (by slot + title)
 const curWin = () => cur ? st.layers.find(L => L.kind === "W" && L.slot === cur.slot) : null;
@@ -348,6 +345,17 @@ for (const s of steps) {
   }
   else if (op === "dismiss") { for (let i = 0; i < 6 && st.layers.some(L => L.kind !== "S"); i++) { await press(SC.enter); await sleep(600); if (st.layers.some(L => L.kind !== "S")) { await press(SC.esc); await sleep(600); } } console.log(`${ts()} dismiss: ${st.layers.filter(L => L.kind !== "S").length} left`); }
   else console.log("unknown step " + s);
+}
+/* --save runs AFTER the steps, so a snapshot can be taken in a state the steps put the guest in.
+   With no steps this is the plain "boot and save" it has always been; with steps it is how the
+   shipped boot snapshot is warmed (SPEC 2026-09-03, first-open latency): opening and closing the
+   programs the shell offers leaves them in Windows' own file cache, which is part of the saved
+   RAM, so a visitor's first tap needs no disk at all. */
+if (val("--save")) {
+  await sleep(1500);
+  const raw = await emulator.save_state();
+  fs.writeFileSync(val("--save"), zlib.gzipSync(Buffer.from(raw)));
+  console.log(`saved ${val("--save")} (${fs.statSync(val("--save")).size} bytes)`);
 }
 await emulator.stop();
 process.exit(0);

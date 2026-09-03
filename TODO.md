@@ -136,6 +136,31 @@ refer to one.
     programs at boot (SMARTDRV is already loaded, so a second launch is already quicker — do it
     for the first); (c) cut the first paint with the PV blit engine (already in) and by measuring
     what else the launch repaints. Measure with tools/redraw-bench.mjs' cold-launch op.
+14. **First-open latency.** Mostly done 2026-09-03 (SPEC): the measurement (`redraw-bench.mjs
+    --ops cold`, which restores the snapshot before every launch and splits load from paint) found
+    that a quarter to a half of a launch was the guest **emulating SeaBIOS's wait loop** for a disk
+    read the emulator was already fetching — a `main_loop` slice runs for a whole frame, so it
+    burned ~270 000 instructions per read. The guest now gives the slice back (`pv_disk_wait` in
+    `cpu.rs`, raised from `ide.js` when the guest polls with a read in flight, cleared and woken by
+    the completion), and the boot snapshot is warmed by opening and closing the shell's programs
+    before it is saved (`probe.mjs --save` now runs last). First open: Notepad 3.32 → 1.51 M
+    instructions, Paintbrush 13.47 → 9.97, File Manager 19.33 → 14.06, FreeCell 5.42 → 3.70; the
+    phone-equivalent figures 655 → 229 ms, 2084 → 1367, 2896 → 2078, 918 → 463. Two candidates from
+    the original list are closed by measurement: **(c) the first paint was never the problem** (3-11%
+    of a launch), and **(b) the AUTOEXEC/SMARTDRV pre-warm does nothing** — WFW 3.11 loads
+    `ifsmgr.386`/`vcache.386`, so Windows' file reads never reach SMARTDRV's DOS-mode cache; the
+    warming has to happen inside Windows, which is what the snapshot recipe does. Still open:
+    - The remaining cost is guest work. **WIN386's VMM at linear `0x80006ec4` alone is 15-27% of a
+      Paintbrush launch** — identify it; that is the next measurement, not the next patch.
+    - **(a) reflecting INT 13h in the emulator** is now worth much less: BIOS + DOS is 10-30% of a
+      load rather than 50-60% once the spin is gone.
+    - **File Manager cannot be cached**: a fully warm second open still issues 36 disk reads,
+      because it re-enumerates `C:\` every time.
+    - **Part size, not caching, is the rest of the disk cost**: a launch reads 32-413 KB but touches
+      1-8 parts of 256 KB. Smaller parts in `tools/split-image.py` would cut the phone's per-launch
+      disk time roughly in proportion. (Chunk readahead in `buffer.js` was built and measured and
+      rejected: a launch's reads are too scattered to predict — 16 speculative fetches to remove 4
+      of 10 stalls.)
 
 ## Known, not yet scheduled
 
