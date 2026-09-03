@@ -485,6 +485,7 @@ const wd = { lastBeat: 0, beats: 0, lastInput: 0, lastChange: 0, lastBundle: 0, 
 function noteInput(s) { wd.lastInput = performance.now(); wd.inputs.push(`${Math.round(wd.lastInput)} ${s}`); if (wd.inputs.length > 20) wd.inputs.shift(); }
 window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, guestDesktop, wantDesktop: wantDesktop(), mode: lastReq,
                           log: pvLog.slice(-50), wd, wantKeyboard, keyboardHeld, kbd: kbdTrace.slice(-10),
+                          guestFocus, learnedText: [...learnedText], kbdActive: !!($("kbd") && document.activeElement === $("kbd")),
                           firstFrame: !!firstFrame, firstFrameShown, safe, cursorShown: guestCursorShown, cmdQueue: cmdQueue.length });
 emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
@@ -505,8 +506,8 @@ emulator.bus.register("pv-debug", line => {
   if (/^PVP-BEGIN /.test(line)) { printJob = []; return; }
   if (/^PVP /.test(line)) { if (printJob) printJob.push(line.slice(4)); return; }
   if (/^PVP-END/.test(line)) { if (printJob) finishPrintJob(printJob.join("")); printJob = null; return; }
-  m = /^PVK (\d)/.exec(line);
-  if (m) { guestWantsKeyboard(m[1] === "1"); return; }
+  m = /^PVK (\d)(?: (\S+))?(?: (\S+))?/.exec(line);
+  if (m) { guestWantsKeyboard(m[1] === "1", m[2] || "", m[3] || ""); return; }
   if (/^PVA/.test(line)) {
     // A wide viewport with the guest still in the phone layout: not ready yet. PVMON publishes
     // PVA again once it has switched and arranged the desktop (finish_mode_switch).
@@ -571,6 +572,7 @@ function launchFromUrl() {
   const cmd = APPS[key] || (q && /^[A-Z0-9_.\\: -]+$/i.test(q) ? q : null);
   if (cmd) sendCommandString(CMD_RUN, cmd);
 }
+window.pvRun = cmd => sendCommandString(CMD_RUN, cmd);      // diagnostics: launch without a reload
 
 /* Printing: the guest's PostScript driver prints to a file, PVMON ships it here base64-encoded,
    and Ghostscript (WebAssembly, loaded on first use) turns it into a PDF the browser downloads.
@@ -676,6 +678,10 @@ function sendScancodes(codes, down) {
   const seq = down ? codes : codes.map((c, i) => i === codes.length - 1 ? c | 0x80 : c);
   for (const c of seq) emulator.bus.send("keyboard-code", c);
 }
+/* Diagnostics, alongside window.pvState: drive the guest from a console or a test harness the way
+   the accessory bar does. pvKeys([[0x01]]) presses Esc; pvText("hi") types through v86's keyboard. */
+window.pvKeys = seq => { for (const codes of seq) { sendScancodes(codes, true); sendScancodes(codes, false); } };
+window.pvText = s => { for (const ch of s) emulator.keyboard_send_text(ch); };
 function keybarPress(codes) {
   if (sticky.ctrl) sendScancodes([0x1D], true);
   if (sticky.alt) sendScancodes([0x38], true);
@@ -888,10 +894,38 @@ function focusKeyboard(reason) {
   setTimeout(updateKeybar, 100);
   return document.activeElement === inp;
 }
+/* What the guest last said has the focus: `PVK <0|1> <class> <flags>` (see guest/pvhook/pvhook.c).
+   This replaced a regex over window titles plus a per-app veto list -- the host no longer knows or
+   cares which program is in front, only what kind of window owns the focus. */
+let guestFocus = { want: false, cls: "", flags: "" };
+/* Classes the guest could not classify but the user has summoned the keyboard for by hand (the
+   caption hold): a Visual Basic text box, a game's own input box. Remembered by class name, so the
+   next window of that class raises the keyboard on its own. This is the mechanism that replaces
+   the title table: nothing is hardcoded, the host learns. */
+const LEARNED_KEY = "pv.textclasses";
+let learnedText = new Set();
+try { learnedText = new Set(JSON.parse(localStorage.getItem(LEARNED_KEY) || "[]")); } catch (e) {}
+function learnTextClass(cls, flags) {
+  /* Never learn a class Windows itself says takes no text (Button, ListBox, a #NNNNN system class,
+     Progman ...): a hold over one of those is the user asking for the keyboard once, not forever. */
+  if (!cls || cls === "-" || /n/.test(flags || "") || learnedText.has(cls)) return false;
+  learnedText.add(cls);
+  try { localStorage.setItem(LEARNED_KEY, JSON.stringify([...learnedText])); } catch (e) {}
+  kbdLog(`learned "${cls}" takes text (flags=${flags || "-"}); known: ${[...learnedText].join(",")}`);
+  report("kbd", `learned class ${cls}`);
+  return true;
+}
+/* Is the focus, as the guest last described it, text-capable? */
+function guestTextFocus() {
+  if (guestFocus.want) return true;
+  return learnedText.has(guestFocus.cls) && !/n/.test(guestFocus.flags);
+}
 /* The guest's word on whether it wants text (PVK). 1 keeps or refocuses; 0 releases after a short
    debounce, so a tap that moves the focus from one Edit into another does not flicker. A manual
    hold (caption long-press) overrides 0. */
-function guestWantsKeyboard(want) {
+function guestWantsKeyboard(want, cls, flags) {
+  if (cls !== undefined) guestFocus = { want, cls: cls || "", flags: flags || "" };
+  if (!want && guestTextFocus()) { kbdLog(`PVK 0 ${cls} ${flags} -> learned class takes text`); want = true; }
   /* A device with a real keyboard needs no hidden input: v86's own keyboard adapter takes the
      page's key events (scancodes, so Esc, arrows and F-keys work as they do on a PC); focusing the
      contenteditable as well would deliver every character twice. */
@@ -900,13 +934,13 @@ function guestWantsKeyboard(want) {
     wantKeyboard = true;
     clearTimeout(kbdBlurTimer);
     if (performance.now() < kbdSuppressedUntil) { kbdLog("PVK 1 (suppressed after hide)"); return; }
-    kbdLog("PVK 1");
+    kbdLog(`PVK 1 ${guestFocus.cls} ${guestFocus.flags}`);
     if (performance.now() < lateTapUntil && document.activeElement !== $("kbd")) { lateTapUntil = 0; focusKeyboard("late"); return; }
     syncKeyboard();
   } else {
     wantKeyboard = false;
-    if (keyboardHeld) { kbdLog("PVK 0 (held)"); return; }
-    kbdLog("PVK 0");
+    if (keyboardHeld) { kbdLog(`PVK 0 ${guestFocus.cls} (held)`); return; }
+    kbdLog(`PVK 0 ${guestFocus.cls} ${guestFocus.flags}`);
     clearTimeout(kbdBlurTimer);
     kbdBlurTimer = setTimeout(() => { if (!wantKeyboard && !keyboardHeld) syncKeyboard(); }, 400);
   }
@@ -1026,8 +1060,6 @@ function surfacePolicy(L) {
   for (const [re, pol] of SURFACE_POLICY) if (re.test(L.title || "")) return pol;
   return "drag";
 }
-/* Programs that never take text: a tap there does not even try the keyboard speculatively, so the
-   keyboard does not pop up for the guest to send away again on every card. */
 /* What a swipe means in a "keys" game. Arrows are the E0-prefixed set the key bar already sends;
    `drop` is the double-tap. Tetris rotates with Up, so an up-swipe rotates and a down-swipe drops
    slowly, which is how the game itself is keyed. */
@@ -1038,13 +1070,11 @@ const KEY_GAMES = [
   [/^Rodent's Revenge/i,   { left: [0xE0, 0x4B], right: [0xE0, 0x4D], up: [0xE0, 0x48], down: [0xE0, 0x50], drop: null }],
 ];
 function keyGame(title) { for (const [re, map] of KEY_GAMES) if (re.test(title || "")) return map; return null; }
-/* Games driven by the arrow keys: the accessory bar appears for them without the soft keyboard. */
+/* Games driven by the arrow keys: the accessory bar appears for them without the soft keyboard.
+   This is the accessory bar's own rule and has nothing to do with the keyboard decision, which is
+   made entirely from the guest's PVK report (see guestTextFocus) -- the title tables that used to
+   live here (KEYBOARD_TITLES, NO_KEYBOARD) are gone. */
 const ARROW_GAMES = /^(TETRIS|Chip's Challenge|Rodent's Revenge|CHIPS|JezzBall)/i;
-const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi|SkiFree|JezzBall|TETRIS|TetraVex|TriPeaks|Tut's Tomb|FreeCell|Golf|Chip's Challenge|Rodent's Revenge|Pipe Dream|Taipei|Dr\. Black Jack)\b/;
-/* Titles that do take typing. Checked before NO_KEYBOARD, because a few of the games own a dialog
-   that wants text under a title that starts with the game's own name ("TriPeaks Player Name",
-   "BlackJack Player Name", Chip's Challenge's level password). */
-const KEYBOARD_TITLES = /MS-DOS|^Notepad\b|^Write\b|^Terminal\b|^Cardfile\b|^Calendar\b|^Calculator\b|Player Name|Password|High Score|Name|Enter /i;
 
 /* The shell column's height follows the visible viewport (browser toolbars come and go), so the
    desktop fills the phone with no letterbox. PVMON re-arranges Program Manager on request. */
@@ -2381,9 +2411,11 @@ let keySwipe = null, lastKeyTap = 0;
     }
   };
   /* The keyboard decision at the end of a tap, made synchronously inside the gesture (iOS grants
-     focus only there). The guest's last word (PVK) or a manual hold wins; otherwise the input is
-     focused speculatively and released again if the guest does not ask within speculativeRelease's
-     window. Programs that never take text are left alone; ?kbtest=1 focuses on every tap. */
+     focus only there), from the guest's description of the focused window (PVK <want> <class>
+     <flags>) or a manual hold -- never from the window's title. If the guest's last word is that
+     something text-capable has the focus, the tap focuses; if not, the tap is remembered for a
+     second and the focus is tried when the guest's report for this tap's click arrives (a dialog's
+     Edit takes focus only after the click reaches the guest). ?kbtest=1 focuses on every tap. */
   /* Write's (and others') scrollbars are child controls inside the reported client rect, so a
      scrollbar tap looks like a client tap; the strip along the client's right and bottom edges,
      one scrollbar wide (SM_CXVSCROLL at 120 dpi is about 20 px), is treated as chrome here. */
@@ -2398,11 +2430,14 @@ let keySwipe = null, lastKeyTap = 0;
     let why = null;
     if (kbtest) why = "kbtest";
     else if (keyboardHeld) why = "hold";                    // the caption-hold toggle, until it is toggled off
-    else if (wantKeyboard && keyboardUp()) why = "want";    // the guest asked AND the keyboard is up: keep it
+    else if (keyboardUp() && guestTextFocus()) why = "want"; // the guest still has text focus and the keyboard is up: keep it
 
     else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
-    else if (hit && hit.win && KEYBOARD_TITLES.test(title) && (hit.win.kind === "O" || (hit.kind === "client" && !onScrollbar(hit)))) why = "title";   // a dialog's whole window counts; in an app, the client outside its scrollbars
-    else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
+    /* The guest says a text control has the focus (an Edit, a ComboBox, the DOS grabber's tty, a
+       window that owns a caret, or a class the user taught us) — so this tap belongs to it. A
+       dialog's whole window counts, because its Edit already has the focus before the tap; inside
+       an app only the client outside the scrollbar strip does. */
+    else if (guestTextFocus() && hit && hit.win && (hit.win.kind === "O" || (hit.kind === "client" && !onScrollbar(hit)))) why = `guest ${guestFocus.cls}/${guestFocus.flags}`;
     else if (hit && (hit.kind === "client" || hit.kind === "desktop")) {
       /* No speculative focus: it flashed the keyboard up and down on every dialog tap. Instead the
          tap is remembered for a second; if the guest reports PVK 1 in that window (the click landed
@@ -2420,9 +2455,8 @@ let keySwipe = null, lastKeyTap = 0;
     }
     if (performance.now() < kbdSuppressedUntil && why !== "kbtest") { kbdLog("tap: suppressed after hide"); return; }
     focusKeyboard(`${why} "${title.slice(0, 20)}"`);
-    // A known keyboard app (title match) keeps the keyboard until the guest says PVK 0: Write's
-    // text area is not an Edit control, so the guest never says PVK 1 for it, and releasing on the
-    // guest's silence showed the keyboard for 700 ms and took it down again.
+    // The keyboard then stays until the guest says the focus has left a text control (PVK 0),
+    // which is also how it comes down: no title, and no per-app veto, is involved.
   };
   const up = (ev) => {
     window.pvPhase = "up";
@@ -2445,7 +2479,12 @@ let keySwipe = null, lastKeyTap = 0;
       } else if (chromeDrag && chromeDrag.toggled && ev && ev.type === "touchend") {
         // the long-press toggle fired in a timer, outside the gesture: the focus itself happens
         // here, on the release, which is still inside it
-        if (keyboardHeld) focusKeyboard("hold"); else hideKeyboard("hold");
+        if (keyboardHeld) {
+          /* The user asking for the keyboard by hand is the one fact the guest could not supply:
+             remember the class that has the focus so the next window of that class raises it. */
+          learnTextClass(guestFocus.cls, guestFocus.flags);
+          focusKeyboard("hold");
+        } else hideKeyboard("hold");
       }
       consumed = null; chromeDrag = null; return;
     }
