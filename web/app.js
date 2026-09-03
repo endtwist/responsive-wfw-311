@@ -2009,6 +2009,9 @@ function canvasPoint(ev, startOfPress) {
    as smooth as the display and the guest never learns the window moved. */
 let chromeDrag = null;
 
+/* The caption hold that toggles the keyboard. 600 ms was hard to feel; at 350 it is the same beat
+   as hold-to-drag, and a caption drag still wins because any movement cancels it. */
+const CAPTION_HOLD_MS = 350;
 function pressStart(ev) {
   const { px, py } = hostPoint(ev);
   const h = hitTest(px, py);
@@ -2025,8 +2028,14 @@ function pressStart(ev) {
     // holding a caption still toggles the soft keyboard: a gesture, since the guest cannot always
     // tell us it wants text (Paintbrush's text tool, a DOS box)
     chromeDrag.timer = setTimeout(() => {
-      if (chromeDrag && !chromeDrag.moved) { chromeDrag.toggled = true; wantKeyboard = !wantKeyboard; keyboardHeld = wantKeyboard; syncKeyboard(); }
-    }, 600);
+      if (chromeDrag && !chromeDrag.moved) {
+        chromeDrag.toggled = true;
+        keyboardHeld = !keyboardHeld;
+        if (!keyboardHeld) wantKeyboard = false;             // toggled off: the guest's stale request must not keep it up
+        diag(`caption hold: keyboard ${keyboardHeld ? "held" : "released"}`);
+        syncKeyboard();
+      }
+    }, CAPTION_HOLD_MS);
     return "drag";
   }
   /* A transient (menu, drop-down, switcher) or a dialog that does not fit the viewport is panned by
@@ -2314,7 +2323,9 @@ let hoverSurface = false;
     const kbtest = params.get("kbtest") === "1";
     let why = null;
     if (kbtest) why = "kbtest";
-    else if (wantKeyboard || keyboardHeld) why = "want";
+    else if (keyboardHeld) why = "hold";                    // the caption-hold toggle, until it is toggled off
+    else if (wantKeyboard && keyboardUp()) why = "want";    // the guest asked AND the keyboard is up: keep it
+
     else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
     else if (hit && hit.win && hit.kind === "client" && KEYBOARD_TITLES.test(title) && !onScrollbar(hit)) why = "title";   // client only, and not on a scrollbar
     else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
