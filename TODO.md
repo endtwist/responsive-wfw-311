@@ -123,6 +123,16 @@ people hold a phone. Landscape is explicitly not a priority.
     `[windows] run=` and suppressed afterwards by `[PVMon] AboutShown`; "Read Me First" in Main
     shows it again. Remaining: the `/about` alias in `web/app.js`'s `APPS` table.
 
+14. **First-open latency.** Launching a program takes about a second on the phone, and it is all
+    guest work: Windows loading the executable and painting its first window. The driver agent
+    measured the cost and it is NOT port-trapped disk I/O (this guest uses ATA DMA; a Paintbrush
+    launch does zero IDE data-port reads) — it is INT 13h reflection through WIN386 plus the
+    first paint. Candidates, in order: (a) reflect INT 13h in the emulator rather than letting
+    WIN386 emulate it instruction by instruction; (b) pre-warm the disk cache for the shell's own
+    programs at boot (SMARTDRV is already loaded, so a second launch is already quicker — do it
+    for the first); (c) cut the first paint with the PV blit engine (already in) and by measuring
+    what else the launch repaints. Measure with tools/redraw-bench.mjs' cold-launch op.
+
 ## Known, not yet scheduled
 
 - **MIDI is thin, by the mapper's design**: v86 now has an OPL3 and MIDI plays (SPEC 2026-09-03),
