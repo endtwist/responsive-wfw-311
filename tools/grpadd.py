@@ -148,8 +148,14 @@ def main(argv):
     iconpath = cmd.split(" ")[0]
     items = [it for it in grp["items"] if it["cmd"].lower() != cmd.lower()]
     n = len(items)
-    pt = (21 + 75 * (n % 5), 75 * (n // 5))            # the stock groups' 75 px cell grid
-    items.append(dict(pt=pt, iicon=0, hdr=hdr, andp=andp, xorp=xorp, name=name, cmd=cmd, iconpath=iconpath))
+    items.append(dict(pt=(0, 0), iicon=0, hdr=hdr, andp=andp, xorp=xorp, name=name, cmd=cmd, iconpath=iconpath))
+    # Re-flow every item onto a grid that fits the phone's group window. The stock groups store a
+    # 5-across, 75 px grid from a 640x480 desktop; in a 344 px client that put a column off the
+    # right edge (Josh: "why is the games folder 4 cols?" -- it was 5, with the fifth clipped).
+    # COLS x CELL must fit the client, and CELL matches WIN.INI desktop.IconSpacing.
+    COLS, CELLW, CELLH = int(os.environ.get("GRP_COLS", 3)), int(os.environ.get("GRP_CELLW", 100)), int(os.environ.get("GRP_CELLH", 78))
+    for i, it in enumerate(items):
+        it["pt"] = (12 + CELLW * (i % COLS), 4 + CELLH * (i // COLS))
     grp["items"] = items
     out = build(grp)
     parse(out)                                         # round-trips
