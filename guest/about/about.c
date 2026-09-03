@@ -62,7 +62,24 @@ static HWND hText = 0, hHide = 0, hOK = 0;
 static HBRUSH hbrBack = 0;
 static int done = 0;
 
-/* Height of szText when wrapped to cx pixels, at the system font; *pLine gets one row's height. */
+/* The same text with single line breaks instead of blank lines between paragraphs. The roomy
+   version does not fit the phone's 598-row column once every gesture is described, and a note the
+   user cannot read to the end is worse than a dense one, so the tighter form is used when the
+   text would otherwise be clipped. Built once from szText. */
+static char szDense[sizeof szText];
+static char *pText = szText;
+
+static void Densify(void)
+{
+    char *r = szText, *w = szDense;
+    while (*r) {
+        if (r[0] == '\r' && r[1] == '\n' && r[2] == '\r' && r[3] == '\n') { *w++ = '\r'; *w++ = '\n'; r += 4; }
+        else *w++ = *r++;
+    }
+    *w = 0;
+}
+
+/* Height of pText when wrapped to cx pixels, at the system font; *pLine gets one row's height. */
 static int TextHeight(HWND hwnd, int cx, int *pLine)
 {
     HDC hdc;
@@ -73,7 +90,7 @@ static int TextHeight(HWND hwnd, int cx, int *pLine)
     hOld = SelectObject(hdc, GetStockObject(SYSTEM_FONT));
     GetTextMetrics(hdc, &tm);
     rc.left = 0; rc.top = 0; rc.right = cx; rc.bottom = 1;
-    DrawText(hdc, szText, -1, &rc, DT_LEFT | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    DrawText(hdc, pText, -1, &rc, DT_LEFT | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
     SelectObject(hdc, hOld);
     ReleaseDC(hwnd, hdc);
     if (pLine) *pLine = tm.tmHeight + tm.tmExternalLeading;
@@ -154,6 +171,13 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     bw = 5 * lh;
     ch = MARGIN + ty + 2 * GAP + lh + 6 + GAP + bh + MARGIN;
     h = ch + ey;
+    if (h > GetSystemMetrics(SM_CYSCREEN) - 8 && pText == szText) {
+        Densify();                                   /* drop the blank lines and try again */
+        pText = szDense;
+        ty = TextHeight(hwnd, cw - 2 * MARGIN, &lh);
+        ch = MARGIN + ty + 2 * GAP + lh + 6 + GAP + bh + MARGIN;
+        h = ch + ey;
+    }
     if (h > GetSystemMetrics(SM_CYSCREEN) - 8) { h = GetSystemMetrics(SM_CYSCREEN) - 8; ch = h - ey; }
     w = FRAME_W;
     x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2; if (x < 0) x = 0;
@@ -162,7 +186,7 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 
     cy = ch - MARGIN - bh - GAP - (lh + 6);
     by = ch - MARGIN - bh;
-    hText = CreateWindow("static", szText, WS_CHILD | WS_VISIBLE | SS_LEFT,
+    hText = CreateWindow("static", pText, WS_CHILD | WS_VISIBLE | SS_LEFT,
                          MARGIN, MARGIN, cw - 2 * MARGIN, ty, hwnd, (HMENU)-1, hInst, NULL);
     hHide = CreateWindow("button", szHide, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                          MARGIN, cy, cw - 2 * MARGIN, lh + 6, hwnd, (HMENU)ID_HIDE, hInst, NULL);
