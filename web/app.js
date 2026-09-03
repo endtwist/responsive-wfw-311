@@ -2450,7 +2450,7 @@ let hoverSurface = false;
       if (twoFinger.win) {
         const zp = layerZoom[twoFinger.win.key] || (layerZoom[twoFinger.win.key] = { z: 1, px: 0, py: 0 });
         if (Math.abs(d - twoFinger.dist) > 2) {                     // pinch: zoom the client area
-          twoFinger.moved = true;
+          twoFinger.zoomed = true;
           const maxZ = Math.max(1, (twoFinger.win.c * 1.5) / twoFinger.win.s);
           const nz = Math.max(1, Math.min(maxZ, zp.z * d / twoFinger.dist));
           // keep the guest pixel under the fingers where it is
@@ -2468,10 +2468,9 @@ let hoverSurface = false;
           return;
         }
       }
-      if (Math.hypot(m.x - twoFinger.start.x, m.y - twoFinger.start.y) > 10) twoFinger.moved = true;
       twoFinger.accX += m.x - twoFinger.last.x; twoFinger.accY += m.y - twoFinger.last.y;
       twoFinger.last = m;
-      const send = (dir, n) => { if (twoFinger.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); } };
+      const send = (dir, n) => { twoFinger.scrolled = true; if (twoFinger.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); } };
       const ny = Math.trunc(twoFinger.accY / SCROLL_STEP), nx = Math.trunc(twoFinger.accX / SCROLL_STEP);
       if (ny) { send(ny > 0 ? 1 : 2, Math.abs(ny)); twoFinger.accY -= ny * SCROLL_STEP; }   // finger down = content up = line up
       if (nx) { send(nx > 0 ? 3 : 4, Math.abs(nx)); twoFinger.accX -= nx * SCROLL_STEP; }
@@ -2498,9 +2497,11 @@ let hoverSurface = false;
     const wasTwo = !!twoFinger;
     const T = twoFinger;
     twoFinger = null;
-    /* Two fingers down, neither moved, lifted quickly: a right click at that point. Immediate,
-       unlike the hold-and-lift right click, which is what made JezzBall's wall flip awkward. */
-    if (T && !T.moved && T.guest && ev.type === "touchend" && performance.now() - T.t0 < 500) {
+    /* Two fingers down that neither scrolled nor pinched: a right click where they landed.
+       Immediate, unlike the hold-and-lift right click, which made JezzBall's wall flip awkward.
+       The test is what the gesture DID, not how still the fingers were — real fingers wobble and
+       land unevenly, and a 10 px / 500 ms tolerance rejected most genuine taps. */
+    if (T && !T.scrolled && !T.zoomed && T.guest && ev.type === "touchend" && performance.now() - T.t0 < 1200) {
       diag(`two-finger tap: right click at ${T.guest.x},${T.guest.y}`);
       noteInput("two-finger right click");
       queue(async () => { await placePointer(T.guest); button(true, true); await sleep(60); button(false, true); });
