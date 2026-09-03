@@ -421,6 +421,12 @@ CPU.prototype.wasm_patch = function()
     // that an older wasm (?wasm=v86-base.wasm A/B) still loads, with every A000 write in JS
     this.pv_planar_set = get_optional_import("pv_planar_set");
     this.pv_planar_stat = get_optional_import("pv_planar_stat");
+    // PV: end the current main_loop slice when the guest is polling for a disk read the emulator
+    // can only finish from JS (ide.js; TODO 14). Optional so an older wasm still loads.
+    this.pv_disk_wait = get_optional_import("pv_disk_wait");
+    this.pv_disk_wait_clear = get_optional_import("pv_disk_wait_clear");
+    this.pv_disk_wait_enable = get_optional_import("pv_disk_wait_enable");
+    this.pv_disk_wait_stat = get_optional_import("pv_disk_wait_stat");
 
     this.get_pic_addr_master = get_import("get_pic_addr_master");
     this.get_pic_addr_slave = get_import("get_pic_addr_slave");

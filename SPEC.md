@@ -3001,3 +3001,155 @@ the FM output as a WAV (`audio:shots/x.wav`).
 **No wasm rebuild is needed** — the OPL is pure JavaScript and the page loads `v86/src` modules
 directly. `node tools/tour.mjs --apps MPLAYER,SOUNDREC,NOTEPAD` is green apart from the known
 `dlgfit=fail:604x318` (Notepad's File Open, already on the list).
+
+### 2026-09-03 — first-open latency: the guest was spinning while it waited for its own disk (TODO 14)
+
+Opening a program on the phone took about a second. TODO 14 named three candidates in order:
+(a) reflect INT 13h in the emulator, (b) pre-warm the disk cache for the shell's own programs at
+boot, (c) cut the first paint. Measurement chose differently: **most of a launch was the guest
+emulating a wait loop for a disk read the emulator was already fetching**, and the first paint was
+never the problem.
+
+#### How it was measured
+
+`tools/redraw-bench.mjs` grew a **cold-launch** operation (`--ops cold`, or
+`cold@EXE@title-regex@label` for one program of your choice). It restores the boot snapshot before
+**every** launch, so the program is cold in Windows' file cache and in the emulator's disk block
+cache — `AsyncXHRBuffer.set_state` clears the read cache, so a restored snapshot is exactly what a
+visitor's first tap meets. Each launch is split at the moment PVHOOK first reports the program's
+window: **load** (KRNL386's NE loader, WIN386, DOS, the BIOS, USER creating the window) and
+**paint** (GDI/USER and our display driver). New counters: disk DMA reads and bytes, the distinct
+256 KB *image parts* they touch (the unit the deployed image is fetched in), IDE register reads,
+and — the one that mattered — **guest instructions executed while a disk read was outstanding**.
+`--second` follows a cold launch with a warm one; `--phone-mips` (default 8) and `--part-ms`
+(default 40) convert to a phone-equivalent figure, since this Mac runs 40-85 MIPS in these
+operations and Josh's phone runs single digits.
+
+#### Where the second went (before)
+
+| operation | instr (M) load + paint | busy ms | disk DMA reads | 256 KB parts fetched | **instr with a read outstanding** | load attribution |
+|---|---|---|---|---|---|---|
+| notepad | 3.10 + 0.10 | 70 | 6 | 6 | **1.72 M (53%)** | BIOS(F000) 59%, ring0 11%, PVDISP 10%, GDI 10% |
+| paintbrush | 12.33 + 1.00 | 249 | 50 | 10 | **3.34 M (25%)** | ring0 27%, BIOS 22%, KRNL386 17%, DOS(HMA) 13% |
+| winfile | 17.15 + 2.01 | 232 | 46 | 12 | **4.96 M (26%)** | BIOS 30%, DOS(HMA) 19%, KRNL386 16%, PVDISP 11% |
+| freecell | 4.10 + 1.20 | 94 | 9 | 6 | **1.65 M (30%)** | BIOS 53%, PVDISP 27%, GDI 6% |
+
+Two things fall out of that table:
+
+- **The paint is already cheap.** It is 0.10-2.01 M instructions, 5-28 ms of the emulator's time,
+  3-11% of a launch. The 2026-09-03 blit pass did its job; candidate (c) has nothing left in it.
+- **A quarter to a half of a launch was a busy-wait.** The emulator finishes a disk read on a later
+  JS task (a `fetch` of a zstd part file on the phone, an `fs` read in node). The guest does not
+  know that: SeaBIOS's INT 13h handler — reflected into V86 mode by WIN386, so every instruction of
+  it is emulated — polls the bus-master status register until the read lands, and a `main_loop`
+  slice runs for a whole frame, so the guest burned ~270 000 instructions *per read* waiting for
+  something only JavaScript could deliver. That is why the BIOS is the top module in three of the
+  four rows.
+
+#### The fix: give the slice back instead of spinning
+
+- **`v86/src/rust/cpu/cpu.rs`** — a `PV_DISK_WAIT` flag with `pv_disk_wait()`,
+  `pv_disk_wait_clear()`, `pv_disk_wait_enable(0|1)` and `pv_disk_wait_stat(0)`.
+  `do_many_cycles_native` stops on it and `main_loop` returns 1.0 ms when it is set, so control
+  goes back to JS at once. It is a short delay rather than 0 so the host does not spin through
+  thousands of empty slices while a 256 KB part is fetched.
+- **`v86/src/ide.js`** — `IDEChannel.io_outstanding()` and `pv_wait_if_outstanding()`, called from
+  `read_status` and `dma_read_status`: a poll made while a read is in flight raises the flag. The
+  read's completion callback clears it and calls `cpu.stop_idling()`, so the guest resumes the
+  moment the data is there and the wait costs the read's own latency and nothing more.
+- **`v86/src/cpu.js`** — the four imports, optional, so an older wasm (`?wasm=v86-base.wasm`) still
+  loads and simply keeps spinning.
+- **`tools/probe.mjs`** — `--save` now writes the snapshot **after** the steps rather than before,
+  which is what makes the warm boot snapshot below possible (and is what `--save` with steps should
+  always have meant).
+
+#### And the pre-warm, in the only place it works
+
+Candidate (b) as written — read the programs through SMARTDRV during `AUTOEXEC.BAT`, before the
+snapshot is taken — **was built and measured and does nothing**: a Paintbrush launch went from 50
+disk reads to 46 and the part count did not move. The reason is that this is Windows *for
+Workgroups*: `SYSTEM.INI` loads `ifsmgr.386` and `vcache.386`, so Windows' own file reads go
+through VFAT and VCACHE and never consult SMARTDRV's DOS-mode cache. `image/build-image.sh` is
+therefore unchanged (the experiment, with `SMARTDRV 8192 8192` and 38 `COPY x NUL` lines, is
+recorded here and not in the tree).
+
+The cache that does serve a launch is Windows' own, and it is in the guest's RAM, which **is** in
+the snapshot. So the warming belongs at snapshot time, and with `--save` moved it is one command:
+
+```
+node tools/probe.mjs --image image/work-phone-<stamp>.img --save image/boot-<stamp>.state.gz \
+  run:NOTEPAD.EXE until:W:Notepad close  run:PBRUSH.EXE until:W:Paintbrush close \
+  run:WINFILE.EXE until:W:File.Manager close  run:SOL.EXE until:W:Solitaire close \
+  run:WRITE.EXE until:W:Write close  run:CALC.EXE until:W:Calculator close \
+  run:C:\\GAMES\\FREECELL.EXE until:W:FreeCell close
+```
+
+Each program is opened once and closed again; what stays behind is its image in Windows' file
+cache. The snapshot grows from 2 019 978 to 2 416 527 bytes (+397 KB, +20%) — one extra sequential
+download on a cold visit, against five to twelve serialised part fetches on the first tap.
+
+#### Before and after
+
+Same tree, same image (`work-phone-20260903-111928.img`), this Mac, node. "Before" is
+`--nodiskwait` against the unwarmed snapshot, i.e. main as it stood; "after" is the default with the
+warmed one. Instructions are the reliable column — node's busy ms swings with JIT warm-up.
+
+| cold first open | instr (M) | busy ms | disk DMA reads | 256 KB parts | phone ms @8 MIPS + 40 ms/part |
+|---|---|---|---|---|---|
+| notepad | 3.32 -> **1.51** (2.2x) | 70 -> 85 | 6 -> 3 | 6 -> 1 | 655 -> **229** |
+| paintbrush | 13.47 -> **9.97** (1.35x) | 249 -> 217 | 50 -> 18 | 10 -> 3 | 2084 -> **1367** |
+| winfile | 19.33 -> **14.06** (1.37x) | 232 -> 197 | 46 -> 36 | 12 -> 8 | 2896 -> **2078** |
+| freecell (Entertainment Pack) | 5.42 -> **3.70** (1.47x) | 94 -> 69 | 9 -> 0 | 6 -> 0 | 918 -> **463** |
+
+Instructions executed with a disk read outstanding went from 1.65-4.96 M to **0.00 M** in every
+row. The load/paint split after: notepad 1.23 + 0.10, paintbrush 8.73 + 1.10, winfile 12.62 + 1.21,
+freecell 2.32 + 1.20.
+
+#### What is left, and where to aim next
+
+The launch is now guest work, not waiting. Load-phase attribution after the change: Paintbrush
+ring0 34%, KRNL386 23%, PVDISP 16%, DOS(HMA) 10%; File Manager DOS(HMA) 22%, KRNL386 16%,
+PVDISP 15%, GDI 8%, BIOS 8%, ring0 8%; Notepad GDI 49%; FreeCell PVDISP 54%.
+
+- **WIN386's VMM is the single biggest item on the big apps**, and it is concentrated: linear
+  `0x80006ec4` alone is 15-27% of a Paintbrush launch. Identifying that address is the highest-value
+  next measurement.
+- **Candidate (a), intercepting INT 13h in the emulator, is worth much less than it was**: the spin
+  it would have removed is already gone, and BIOS + DOS is now 10-30% of a load rather than 50-60%.
+- **File Manager cannot be warmed.** A *second*, fully warm open still issues 36 disk reads: it
+  re-enumerates `C:\` every time. Its 14 M instructions are directory work through DOS.
+- **The remaining disk stalls are a part-size problem, not a caching one.** A launch reads
+  32-413 KB but touches 1-8 parts of **256 KB**. Smaller parts (or byte ranges) in
+  `tools/split-image.py` would cut the phone's per-launch disk time roughly in proportion; that file
+  and `web/app.js` were not touched here.
+- **Image-chunk readahead was tried and rejected.** Both a fixed depth and an adaptive ramp were
+  implemented in `v86/src/buffer.js` and measured: a launch's reads are scattered (FAT, directory,
+  demand-loaded NE segments), so prediction is poor — at depth 4, Paintbrush issued 16 speculative
+  fetches to remove 4 of its 10 stalls, and the adaptive version 10-19 to remove 2-3. On a phone
+  that is 1.5-4 MB of extra download to save 80-160 ms. Reverted; `buffer.js` is unchanged.
+
+#### Verification
+
+- `node v86/tests/pv/banked-vga.mjs` — **102/102**.
+- `node tools/tour.mjs` — **pass=215 fail=5**, the five known rows: PBRUSH `fit 640x424` (deliberate
+  `Size.PBRUSH`, already on the list), Notepad and Write `dlgfit 604x318`, MSHEARTS `dlgfit
+  531x252`, CALENDAR absent from the image.
+- Frame-buffer hashes are unchanged for every operation between the before and after runs *on the
+  same snapshot*; the warmed snapshot has its own hashes because opening and closing programs leaves
+  different pixels in the unused slots (the host composites only reported layers, and the shell
+  screenshot `shots/warm-shell.png` is the stock Main group).
+- Snapshot restore: desktop ready in 430 ms headless; in the pane (worker path, mobile preset) the
+  warmed snapshot restores, the Welcome note shows, and `PBRUSH.EXE` launches and reports its
+  window.
+- Idle behaviour unchanged: **0.30 MIPS** with the desktop up in the pane, and the tour's own
+  `mips=0.4/0.3`. The guest still halts on the INT 2Fh idle hook; the disk yield only ends a slice
+  that was going to be spent polling.
+
+Risks:
+- A read that never completes now leaves the guest running 1 ms slices doing almost nothing instead
+  of spinning at full speed. Either way it is a hang; the watchdog sees the same missing heartbeat.
+- `pv_disk_wait_enable(0)` (bench flag `--nodiskwait`) is the bisect if a disk-timing problem ever
+  appears.
+- The warm boot snapshot is made by opening and closing seven programs. If one of them ever writes
+  something on exit that matters, it lands in the snapshot; today the shell after the warm boot is
+  the stock Main group.

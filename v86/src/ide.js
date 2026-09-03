@@ -626,6 +626,7 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
 
 IDEChannel.prototype.read_status = function()
 {
+    this.pv_wait_if_outstanding();
     return this.current_interface.drive_connected ? this.current_interface.status_reg : 0;
 };
 
@@ -664,12 +665,32 @@ IDEChannel.prototype.dma_set_addr = function(data)
     this.prdt_addr = data;
 };
 
+/* responsive-wfw311 (TODO 14): true while this channel is waiting for the emulator to finish a
+   read. The guest cannot tell — it polls — so a poll made in this state is pure waste. */
+IDEChannel.prototype.io_outstanding = function()
+{
+    return this.master.in_progress_io_ids.size !== 0 || this.slave.in_progress_io_ids.size !== 0;
+};
+
+/* A poll while a read is outstanding ends the emulator's instruction slice at once: the read can
+   only be finished by JS, and the alternative is the guest emulating SeaBIOS's wait loop (in V86
+   mode, under WIN386) for the rest of the frame — ~270 000 instructions per read, which on a phone
+   is tens of milliseconds of an app launch spent waiting for something already on its way. */
+IDEChannel.prototype.pv_wait_if_outstanding = function()
+{
+    if(this.cpu.pv_disk_wait && this.io_outstanding())
+    {
+        this.cpu.pv_disk_wait();
+    }
+};
+
 IDEChannel.prototype.dma_read_status = function()
 {
     if(LOG_DETAILS & LOG_DETAIL_RW_DMA)
     {
         dbg_log(this.current_interface.name + ": DMA read status: " + h(this.dma_status), LOG_DISK);
     }
+    this.pv_wait_if_outstanding();
     return this.dma_status;
 };
 
@@ -2683,6 +2704,15 @@ IDEInterface.prototype.read_buffer = function(start, length, callback)
         dbg_assert(removed);
 
         callback(data);
+
+        /* responsive-wfw311 (TODO 14): the guest may have given up its time slice waiting for
+           exactly this (see pv_wait_if_outstanding). Take it back now rather than after the 1 ms
+           main_loop asked for, so the wait costs the read's own latency and nothing more. */
+        if(this.cpu.pv_disk_wait_clear && !this.channel.io_outstanding())
+        {
+            this.cpu.pv_disk_wait_clear();
+            this.cpu.stop_idling();
+        }
     }, { signal: abort.signal });
 };
 

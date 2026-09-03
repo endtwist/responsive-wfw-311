@@ -10,7 +10,14 @@
  *     symbols from guest/driver/build/PVDISP.MAP,
  *   - an FNV hash of the visible frame buffer, to compare two runs for pixel-exactness.
  *
- *   node tools/redraw-bench.mjs [--ops progman,notepad,winfile,sol,pbrush] [--nofast] [--json out] [--log]
+ *   node tools/redraw-bench.mjs [--ops progman,notepad,winfile,sol,pbrush,cold] [--nofast] [--json out] [--log]
+ *   --ops cold is the first-open benchmark (TODO 14): the snapshot is restored before EVERY launch,
+ *   so the program is cold in Windows' own file cache and in the emulator's disk block cache, and
+ *   the launch is split into load (up to the window existing) and paint (up to the guest halting).
+ *   cold@EXE@title-regex@label measures one program of your choice (@ because paths contain :).
+ *   --phone-mips N (default 8) and --part-ms N (default 40) price the phone-equivalent figure.
+ *   --second follows each cold launch with a second launch of the same program, warm.
+ *   --nodiskwait restores the pre-TODO-14 behaviour: the guest spins while a read is outstanding.
  *   --nofast keeps every A000 write in JS (vga.pv_planar_disabled), for A/B against the rust path.
  *   --cold cold-boots Windows instead of restoring the snapshot (needed with --noblt).
  *   --pointer leaves the guest pointer visible during the scroll and switch benchmarks (the phone
@@ -74,13 +81,17 @@ const cpu = emulator.v86.cpu, vga = cpu.devices.vga;
 if (flag("--nofast")) { vga.pv_planar_disabled = true; vga.pv_planar_sync(); }
 if (flag("--nochain4")) { vga.pv_planar_chain4_disabled = true; vga.pv_planar_sync(); }   // only the chain-4 A000 writes go back to JS
 if (flag("--noblt")) vga.pv_blt_disabled = true;   // refuse the adapter blit capability: the driver falls back to its banked latch copy
+/* --nodiskwait: keep the guest running while a disk read is outstanding (the state before TODO 14),
+   i.e. let SeaBIOS's INT 13h handler emulate its own wait loop for the rest of the frame. */
+if (flag("--nodiskwait") && cpu.pv_disk_wait_enable) cpu.pv_disk_wait_enable(0);
 const wexp = n => { try { return cpu.wm.exports[n](...[].slice.call(arguments, 1)) >>> 0; } catch (e) { return 0; } };
 const excStat = i => { try { return cpu.wm.exports.pv_exc_stat(i) >>> 0; } catch (e) { return 0; } };
 const planarStat = () => { try { return cpu.wm.exports.pv_planar_stat() >>> 0; } catch (e) { return 0; } };
 const fbhash = () => { const m = vga.svga_mem ? vga.svga_mem() : vga.svga_memory; let h = 0x811c9dc5; for (let y = 0; y < SCREEN_H; y++) { const row = y * 4096; for (let x = 0; x < SCREEN_W; x++) { h ^= m[row + x]; h = Math.imul(h, 0x01000193); } } return (h >>> 0).toString(16); };
 
 /* ---- counters ---- */
-const C = { a000w: 0, a000r: 0, dispiIdx: 0, dispiData: 0, bank: 0, bankSame: 0, cursorReg: 0, other: 0, ide: 0, ideNs: 0 };
+const C = { a000w: 0, a000r: 0, dispiIdx: 0, dispiData: 0, bank: 0, bankSame: 0, cursorReg: 0, other: 0, ide: 0, ideNs: 0,
+            dmaN: 0, dmaBytes: 0, part: 0, partNew: 0, diskInstr: 0, diskMs: 0, ideReg: 0 };
 const lastBank = { 0x18: -1, 0x19: -1 };
 const blk = 0xA0000 >>> 17;
 const ow = cpu.memory_map_write8[blk], orr = cpu.memory_map_read8[blk];
@@ -110,8 +121,58 @@ for (const port of [0x1F0, 0x170]) {
     cpu.io.ports[port][w] = function () { const t = performance.now(); const r = o.call(this); C.ideNs += (performance.now() - t) * 1e6; C.ide++; return r; };
   }
 }
+/* IDE *register* reads (status, alt-status, error, ...). The data-port counters above stay at zero
+   on this guest because it uses DMA; these do not, and a big number here is the BIOS spinning on
+   the status register while the emulator's read is still outstanding. */
+for (const port of [0x1F1, 0x1F2, 0x1F3, 0x1F4, 0x1F5, 0x1F6, 0x1F7, 0x3F6, 0x3F7]) {
+  for (const w of ["read8", "read16", "read32"]) {
+    const o = cpu.io.ports[port][w]; if (!o) continue;
+    cpu.io.ports[port][w] = function () { C.ideReg++; return o.call(this); };
+  }
+}
+
+/* Disk reads the guest actually asks the emulator for (this guest uses ATA READ DMA, so the IDE
+   data-port counters above stay at zero). What matters on the phone is not the JS cost of the
+   read but how many 256 KB *parts* it touches: the deployed image is split into zstd part files
+   (tools/split-image.py) and a part that is not in the buffer's block cache is an HTTP fetch plus
+   a decompress before the guest may continue. restore_state CLEARS the read cache
+   (`AsyncXHRBuffer.prototype.set_state`), so on a cold visit every part a launch needs is fetched.
+     part    = distinct 256 KB parts touched during this measurement
+     partNew = of those, ones not touched since the snapshot was restored (= a real fetch) */
+const PART = 256 * 1024;
+let partSet = new Set(), partEver = new Set(), diskPending = 0, diskT0 = 0, diskI0 = 0;
+{
+  const iface = cpu.devices.ide?.primary?.master;
+  if (iface) {                                  // IDEInterface instances are sealed: patch the prototype
+    const proto = Object.getPrototypeOf(iface), orb = proto.read_buffer;
+    proto.read_buffer = function (start, length, cb) {
+      if (this === iface) {
+        C.dmaN++; C.dmaBytes += length;
+        for (let p = Math.floor(start / PART); p <= Math.floor((start + length - 1) / PART); p++) {
+          if (!partSet.has(p)) { partSet.add(p); C.part++; }
+          if (!partEver.has(p)) { partEver.add(p); C.partNew++; }
+        }
+      }
+      /* How much guest work happens while a read is outstanding. The emulator completes a disk
+         read on a later JS task, and SeaBIOS's INT 13h handler polls the ATA status register in a
+         tight loop meanwhile, so the guest burns whole timeslices waiting: this is the number that
+         says whether a launch is bound by the disk *wait* rather than by any real work. */
+      if (this === iface) {
+        if (!diskPending++) { diskT0 = performance.now(); diskI0 = cpu.instruction_counter[0] >>> 0; }
+        const done = () => {
+          if (--diskPending === 0) { C.diskMs += performance.now() - diskT0; C.diskInstr += ((cpu.instruction_counter[0] >>> 0) - diskI0) >>> 0; }
+        };
+        return orb.call(this, start, length, d => { done(); cb(d); });
+      }
+      return orb.call(this, start, length, cb);
+    };
+  }
+}
+
 /* slice profiler */
-const prof = { on: false, samples: new Map(), t: 0, instr: 0, slices: 0, byRing: [0, 0, 0, 0], haltT: 0 };
+const newPhase = () => ({ t: 0, instr: 0, samples: new Map() });
+const prof = { on: false, samples: new Map(), t: 0, instr: 0, slices: 0, byRing: [0, 0, 0, 0], haltT: 0,
+               phase: 0, ph: [newPhase(), newPhase()] };
 const origLoop = cpu.main_loop;
 cpu.main_loop = function () {
   const t0 = performance.now(), i0 = cpu.instruction_counter[0] >>> 0;
@@ -125,6 +186,10 @@ cpu.main_loop = function () {
     const e = prof.samples.get(k) || { t: 0, n: 0, instr: 0, cs, ip, cpl };
     e.t += dt; e.n++; e.instr += di; prof.samples.set(k, e);
     prof.byRing[cpl] += dt;
+    const P = prof.ph[prof.phase];
+    P.t += dt; P.instr += di;
+    const pe = P.samples.get(k) || { t: 0, n: 0, instr: 0, cs, ip, cpl };
+    pe.t += dt; pe.n++; pe.instr += di; P.samples.set(k, pe);
   }
   return r;
 };
@@ -212,12 +277,12 @@ async function waitIdle(maxMs = 25000) {
 const snapC = () => ({ ...C, gp: excStat(13), pf: excStat(14), irq: excStat(32), fast: planarStat(), blt: vga.pv_blt_count | 0 });
 const diffC = (a, b) => Object.fromEntries(Object.keys(a).map(k => [k, b[k] - a[k]]));
 const results = [];
-async function measure(name, fn) {
+async function measure(name, fn, opts = {}) {
   await waitIdle(); await sleep(150);
   const c0 = snapC(), i0 = cpu.instruction_counter[0] >>> 0, t0 = performance.now();
-  Object.assign(prof, { on: true, samples: new Map(), t: 0, instr: 0, slices: 0, byRing: [0, 0, 0, 0], haltT: 0 }); writeSites.clear(); sampleEvery = 97;
+  Object.assign(prof, { on: true, samples: new Map(), t: 0, instr: 0, slices: 0, byRing: [0, 0, 0, 0], haltT: 0, phase: 0, ph: [newPhase(), newPhase()] }); writeSites.clear(); sampleEvery = 97; partSet = new Set();
   await fn();
-  const quietAt = await waitIdle();
+  const quietAt = await waitIdle(opts.idleMax);
   prof.on = false; sampleEvery = 0;
   const wall = quietAt - t0, instr = ((cpu.instruction_counter[0] >>> 0) - i0) >>> 0, d = diffC(c0, snapC());
   const row = { name, instr, wall: Math.round(wall), busy: Math.round(prof.t), mips: +(prof.instr / Math.max(1, prof.t) / 1000).toFixed(1), ...d, byRing: prof.byRing.map(x => Math.round(x)), fb: fbhash() };
@@ -228,7 +293,7 @@ async function measure(name, fn) {
   row.hot = top.slice(0, 8).map(e => `${where(e.cs, e.ip, e.cpl)} ${(100 * e.t / prof.t).toFixed(1)}%`);
   row.writeSites = [...writeSites.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, n]) => `${where(Math.floor(k / 65536), k % 65536, 3)} ${n}`);
   results.push(row);
-  console.log(`\n== ${name}: ${instr} instr, busy ${row.busy} ms (${row.mips} MIPS) of ${row.wall} ms to idle; fb ${row.fb}; A000 w=${d.a000w} JS +${d.fast} rust, r=${d.a000r}; DISPI bank reg writes=${d.bank} (unchanged ${d.bankSame}) cursor=${d.cursorReg} other=${d.other} idx16=${d.dispiIdx}; PV blits=${d.blt}; IDE data-port reads=${d.ide} (${Math.round(d.ideNs / 1e6)} ms in JS); #GP=${d.gp} #PF=${d.pf} irq/other=${d.irq}; ring time ms ${row.byRing.join("/")}`);
+  console.log(`\n== ${name}: ${instr} instr, busy ${row.busy} ms (${row.mips} MIPS) of ${row.wall} ms to idle; fb ${row.fb}; A000 w=${d.a000w} JS +${d.fast} rust, r=${d.a000r}; DISPI bank reg writes=${d.bank} (unchanged ${d.bankSame}) cursor=${d.cursorReg} other=${d.other} idx16=${d.dispiIdx}; PV blits=${d.blt}; disk DMA reads=${d.dmaN} (${Math.round(d.dmaBytes / 1024)} KB, ${d.part} parts of 256 KB, ${d.partNew} of them not yet cached), ${(d.diskInstr / 1e6).toFixed(2)} M instr / ${Math.round(d.diskMs)} ms with a read outstanding, ${d.ideReg} IDE register reads; IDE data-port reads=${d.ide} (${Math.round(d.ideNs / 1e6)} ms in JS); #GP=${d.gp} #PF=${d.pf} irq/other=${d.irq}; ring time ms ${row.byRing.join("/")}`);
   console.log("  modules: " + row.mods.join(" | "));
   console.log("  hot: " + row.hot.join(" | "));
   console.log("  JS A000 write sites (1/97): " + row.writeSites.join(" | "));
@@ -329,6 +394,88 @@ async function switchBench() {
   await pointer(true);
   await closeWin(/File Manager/); await closeWin(/Notepad/);
 }
+/* ---- cold launch (TODO 14: "opening a program on the phone takes about a second") ----
+ * The point of this op is that it is *cold*: the machine is put back to the shipped snapshot
+ * before every launch, so nothing about the program is in Windows' file cache (VCACHE), in its
+ * module list or in the emulator's disk block cache — the state a visitor's first tap meets.
+ * Each launch is split at the moment PVHOOK first reports the program's window:
+ *   load  = CMD_RUN -> the window exists (KRNL386's NE loader, WIN386 and the BIOS reflecting the
+ *           disk reads, DOS, USER creating the window)
+ *   paint = the window exists -> the guest is halted again (GDI/USER painting it, our driver)
+ * and reported with the phone-equivalent figure, since Josh's phone runs single-digit MIPS while
+ * this Mac runs 40-50: --phone-mips (default 8) converts guest instructions to phone ms, and
+ * --part-ms (default 40) prices each 256 KB image part the launch has to fetch and decompress.  */
+const PHONE_MIPS = +(val("--phone-mips") || 8), PART_MS = +(val("--part-ms") || 40);
+const snapBytes = flag("--cold") ? null : zlib.gunzipSync(fs.readFileSync(STATE));
+async function restoreFresh() {
+  if (!snapBytes) throw new Error("--cold and the cold-launch op are mutually exclusive");
+  await emulator.restore_state(snapBytes.buffer.slice(snapBytes.byteOffset, snapBytes.byteOffset + snapBytes.byteLength));
+  partEver = new Set();                       // restore_state clears the buffer's read cache too
+  await sleep(300);
+  emulator.bus.send("pv-command", [6, 0]);
+  const ok = await until(() => st.layers.some(L => L.kind === "S") && !st.layers.some(L => L.kind === "W" && !/Welcome to Windows/.test(L.title)), 20000);
+  if (!ok) throw new Error("snapshot did not come back to a bare desktop");
+  await waitIdle();
+}
+let phaseArm = null;
+emulator.bus.register("pv-debug", line => {
+  if (!phaseArm) return;
+  const m = /^PVW -?\d+ (?:-?\d+ ){7}\d+ (.*)$/.exec(line);
+  if (m && phaseArm.test(m[1])) { phaseArm = null; prof.phase = 1; coldMark = performance.now(); }
+});
+let coldMark = 0;
+async function coldLaunch(exe, rx, label) {
+  await restoreFresh();
+  phaseArm = rx; coldMark = 0;
+  const c0 = snapC();
+  let cAtWindow = null;
+  const row = await measure(`${label} cold open`, async () => {
+    emulator.bus.send("pv-command-string", [5, exe]);
+    await until(() => coldMark, 25000);
+    cAtWindow = snapC();                      // counters at the moment the window first exists
+    await until(() => winOf(rx), 10000);
+  }, { idleMax: 6000 });
+  phaseArm = null;
+  const load = prof.ph[0], paint = prof.ph[1];
+  const dl = cAtWindow ? diffC(c0, cAtWindow) : null;
+  const modsOf = P => {
+    const by = new Map();
+    for (const e of P.samples.values()) { const m = attribute(e.cs, e.ip, e.cpl).mod; const x = by.get(m) || { t: 0 }; x.t += e.t; by.set(m, x); }
+    return [...by.entries()].sort((a, b) => b[1].t - a[1].t).slice(0, 6).map(([m, x]) => `${m} ${(100 * x.t / Math.max(0.001, P.t)).toFixed(0)}%`);
+  };
+  Object.assign(row, {
+    loadBusy: Math.round(load.t), paintBusy: Math.round(paint.t),
+    loadInstr: load.instr, paintInstr: paint.instr,
+    loadDma: dl ? dl.dmaN : null, loadParts: dl ? dl.partNew : null,
+    /* A stall is a 256 KB image part the launch had to fetch: the guest cannot go on until it
+       lands, and on the deployed image that is an HTTP fetch plus a zstd decompress. */
+    stalls: row.partNew,
+    phoneMs: Math.round(row.instr / PHONE_MIPS / 1000 + row.partNew * PART_MS),
+    loadMods: modsOf(load), paintMods: modsOf(paint),
+  });
+  console.log(`  split: load ${row.loadBusy} ms / ${(row.loadInstr / 1e6).toFixed(2)} M instr / ${row.loadDma} DMA reads / ${row.loadParts} new parts` +
+              `   paint ${row.paintBusy} ms / ${(row.paintInstr / 1e6).toFixed(2)} M instr`);
+  console.log(`  load modules:  ${row.loadMods.join(" | ")}`);
+  console.log(`  paint modules: ${row.paintMods.join(" | ")}`);
+  console.log(`  phone equivalent at ${PHONE_MIPS} MIPS + ${PART_MS} ms/part: ${row.phoneMs} ms ` +
+              `(${Math.round(row.instr / PHONE_MIPS / 1000)} ms guest + ${row.stalls * PART_MS} ms disk stalls)`);
+  await closeWin(rx);
+  /* The same launch again, with everything the first one warmed still warm. The gap between the
+     two is the whole prize: it is what a first open would cost if nothing had to come off the
+     disk, and the DMA-read count says how much of the first open's disk traffic a cache absorbs. */
+  if (flag("--second")) await measure(`${label} second open`, async () => {
+    emulator.bus.send("pv-command-string", [5, exe]);
+    await until(() => winOf(rx), 25000);
+  }, { idleMax: 6000 }).then(() => closeWin(rx));
+  return row;
+}
+const COLD = [
+  ["NOTEPAD.EXE", /Notepad/, "notepad"],
+  ["PBRUSH.EXE", /Paintbrush/, "paintbrush"],
+  ["WINFILE.EXE", /File Manager/, "winfile"],
+  ["C:\\GAMES\\FREECELL.EXE", /Free ?Cell/i, "freecell"],
+];
+
 for (const op of OPS) {
   if (op === "progman") await minRestore("progman restore (repaint)", shellSlot());
   else if (op === "notepad") await openApp("NOTEPAD.EXE", /Notepad/, "notepad");
@@ -340,10 +487,18 @@ for (const op of OPS) {
   else if (op === "scroll-write") await scrollBench("WRITE.EXE C:\\WINDOWS\\README.WRI", /Write/, "write README.WRI");
   else if (op === "moveresize") await moveResizeBench();
   else if (op === "switch") await switchBench();
+  else if (op === "cold") { for (const [exe, rx, label] of COLD) await coldLaunch(exe, rx, label); }
+  else if (op.startsWith("cold@")) { const [, exe, rxs, label] = op.split("@"); await coldLaunch(exe, new RegExp(rxs || "."), label || exe); }
   else console.log("unknown op " + op);
 }
 console.log("\n| operation | instr (M) | busy ms | node MIPS | A000 writes JS | A000 writes rust | A000 reads | bank reg writes | PV blits | #GP | #PF | ring0 ms | fb |");
 console.log("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 for (const r of results) console.log(`| ${r.name} | ${(r.instr / 1e6).toFixed(2)} | ${r.busy} | ${r.mips} | ${r.a000w} | ${r.fast} | ${r.a000r} | ${r.bank} | ${r.blt} | ${r.gp} | ${r.pf} | ${r.byRing[0]} | ${r.fb} |`);
+if (results.some(r => r.loadBusy !== undefined)) {
+  console.log(`\n| cold launch | instr (M) load + paint | busy ms load + paint | DMA reads (load) | 256 KB parts fetched | phone ms @${PHONE_MIPS} MIPS + ${PART_MS} ms/part |`);
+  console.log("|---|---|---|---|---|---|");
+  for (const r of results) if (r.loadBusy !== undefined)
+    console.log(`| ${r.name} | ${(r.loadInstr / 1e6).toFixed(2)} + ${(r.paintInstr / 1e6).toFixed(2)} = ${(r.instr / 1e6).toFixed(2)} | ${r.loadBusy} + ${r.paintBusy} = ${r.busy} | ${r.loadDma} of ${r.dmaN} | ${r.partNew} | ${r.phoneMs} |`);
+}
 if (val("--json")) fs.writeFileSync(val("--json"), JSON.stringify(results, null, 1));
 await emulator.stop(); process.exit(0);
