@@ -8,6 +8,22 @@ people hold a phone. Landscape is explicitly not a priority.
 
 ## Agreed with Josh
 
+0. **Emulator off the main thread (smoothness).** Today one thread runs the guest, converts
+   its pixels and composites, so a busy guest delays both the frame and your finger. Run the
+   emulator in a worker so the composite keeps its own frame budget (60, and 120 on Josh's
+   phone, which is ProMotion and our composite is cheap) and input is never blocked. Modest
+   throughput gain too, from not being interrupted. Blockers to solve: getting guest pixels
+   across without a copy needs a shared buffer, which needs cross-origin isolation headers
+   (we control them on the Vercel deploy, not on the plain-http LAN dev server), so keep a
+   copy-based fallback. This is the single biggest change in how the thing feels under load.
+   Companions to it, both nearly free and worth doing first:
+   - Turn off v86's debug flag (assertion and logging branches live in the hot paths).
+   - Composite only layers whose pixels changed (the emulator already tracks dirty rows; we
+     re-blit every layer every frame).
+   - Stop the per-frame `getImageData` readback in the dialog hole fill: sample once, cache
+     until the layout changes.
+   - Optimistic scrolling: move the layer's pixels with the finger and reconcile with the
+     guest's line scroll afterwards, the way window drag and menu pan already work.
 1. **Blitting for OS-level actions** (window switch, move, resize). The redraw pass fixed
    ordinary painting; moves still repaint whole windows through a sliding 64 KB window into
    video memory. Two driver changes: a screen-to-screen blit fast path so a move is a copy
