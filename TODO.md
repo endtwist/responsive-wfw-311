@@ -23,12 +23,22 @@ people hold a phone. Landscape is explicitly not a priority.
    - Stop the per-frame `getImageData` readback in the dialog hole fill: sample once, cache
      until the layout changes.
    - Optimistic scrolling: move the layer's pixels with the finger and reconcile with the
-     guest's line scroll afterwards, the way window drag and menu pan already work.
+     guest's line scroll afterwards, the way window drag and menu pan already work. The
+     background-filled strip at the leading edge is the fallback for outrunning the guest,
+     not the normal path — the two items below shorten the real latency instead.
+   - Deliver scroll requests without waiting for the poll. A scroll sits in the command
+     register for up to 40 ms before PVMON sees it. Either let the host mark a gesture in
+     progress so PVMON polls fast for a second or two, or deliver scrolls through an
+     interrupt-driven path like the mouse and keyboard (measured at 7-11 ms).
+   - (Rejected by Josh: drawing ahead of the viewport by oversizing scroll windows.)
 1. **Blitting for OS-level actions** (window switch, move, resize). The redraw pass fixed
    ordinary painting; moves still repaint whole windows through a sliding 64 KB window into
    video memory. Two driver changes: a screen-to-screen blit fast path so a move is a copy
    inside the frame buffer, and selector addressing so blits never switch banks. Measure
-   switch/move/resize before and after, as in the redraw pass. In the same pass, two more
+   switch/move/resize before and after, as in the redraw pass. This also covers **scrolling**:
+   Windows scrolls by blitting the client up and repainting only the exposed strip, and that
+   screen-to-screen blit is the case the driver handles worst today — so this is the most
+   direct fix for scroll latency, which raises its priority. In the same pass, two more
    throughput wins found by the redraw agent: serve the boot BIOS's disk reads directly
    instead of port-by-port programmed I/O (a third of an app launch's instructions), and
    ship with v86's debug flag off.
