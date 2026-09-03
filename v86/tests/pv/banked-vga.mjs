@@ -1,7 +1,9 @@
 // responsive-wfw311: unit test of the paravirtual adapter's banked A000 window in vga.js.
 // Exercises separate READ_BANK/WRITE_BANK (DISPI 0x18/0x19), the 256-colour planar
 // ("unchained") path with the V7 fore-latch write mode, write-mode-1 latch copies across a
-// bank boundary, and the chain-4 linear path. Run: node v86/tests/pv/banked-vga.mjs
+// bank boundary, the chain-4 linear path, the PV 2D blit engine (DISPI 0x20-0x26, including that
+// it draws what the latch copy drew) and which states the rust write fast path is claimed for.
+// Run: node v86/tests/pv/banked-vga.mjs
 import { VGAScreen } from "../../src/vga.js";
 
 const LFB = 0xE0000000;
@@ -188,6 +190,96 @@ wr(0x101, 0x5D);
 eq(vga.svga_memory[0x404], 0x5D, "unchained write after wasm memory growth lands in the frame buffer");
 eq(rd(0x101), 0x5D, "unchained read after growth");
 eq(vga.svga_mem().buffer, wasm_memory.buffer, "plain view follows the new buffer");
+
+// --- 11. the PV 2D blit engine (DISPI 0x20-0x26): the adapter copies a rectangle inside the frame
+//     buffer, addressed as the banked path addresses it (pixel (x,y) at y*pitch + x), so a
+//     scroll, a move or raising a window is seven port writes instead of a latch loop
+const pitch = vga.svga_pitch_px();
+const px = (x, y) => vga.svga_mem()[y * pitch + x];
+const setpx = (x, y, v) => { vga.svga_mem()[y * pitch + x] = v; };
+const blt = (sx, sy, dx, dy, w, h) => {
+    // the driver programs each register with one atomic 32-bit write to the index port
+    vga.port1CE_write32(0x20 | sx << 16); vga.port1CE_write32(0x21 | sy << 16);
+    vga.port1CE_write32(0x22 | dx << 16); vga.port1CE_write32(0x23 | dy << 16);
+    vga.port1CE_write32(0x24 | w << 16);  vga.port1CE_write32(0x25 | h << 16);
+    vga.port1CE_write32(0x26 | 1 << 16);
+};
+eq(vga.svga_register_read(0x26) & 1, 1, "CTRL reports the blit capability in 8 bpp");
+vga.port1CE_write(0x20); eq(vga.port1CF_read(), 0, "blit registers read back");
+
+vga.svga_mem().fill(0, 0, 40 * pitch);
+for(let y = 0; y < 8; y++) for(let x = 0; x < 8; x++) setpx(100 + x, 10 + y, 0x40 + y * 8 + x);
+blt(100, 10, 300, 20, 8, 8);
+ok = true;
+for(let y = 0; y < 8; y++) for(let x = 0; x < 8; x++) if(px(300 + x, 20 + y) !== 0x40 + y * 8 + x) ok = false;
+eq(ok, true, "blit copies a disjoint rectangle");
+eq(px(100, 10), 0x40, "blit leaves the source alone");
+eq(px(299, 20), 0, "blit does not write left of the destination");
+eq(px(308, 27), 0, "blit does not write right of the destination");
+eq(px(300, 19), 0, "blit does not write above the destination");
+eq(px(300, 28), 0, "blit does not write below the destination");
+
+// the blit marks the dirty range the compositor reads
+vga.js_dirty_min = 0x7FFFFFFF; vga.js_dirty_max = -1;
+blt(100, 10, 300, 20, 8, 8);
+eq(vga.js_dirty_min, 20 * pitch + 300, "blit marks the first dirty byte");
+eq(vga.js_dirty_max, 27 * pitch + 307, "blit marks the last dirty byte");
+
+// overlapping rectangles: a scroll up, then a scroll down, are memmoves in both directions
+for(let y = 0; y < 16; y++) for(let x = 0; x < 4; x++) setpx(500 + x, y, 0x80 + y);
+blt(500, 4, 500, 0, 4, 12);                       // scroll the client up by four lines
+ok = true; for(let y = 0; y < 12; y++) if(px(500, y) !== 0x80 + y + 4) ok = false;
+eq(ok, true, "overlapping blit upwards (dst above src) copies front to back");
+for(let y = 0; y < 16; y++) for(let x = 0; x < 4; x++) setpx(500 + x, y, 0x80 + y);
+blt(500, 0, 500, 4, 4, 12);                       // scroll the client down by four lines
+ok = true; for(let y = 4; y < 16; y++) if(px(500, y) !== 0x80 + y - 4) ok = false;
+eq(ok, true, "overlapping blit downwards (dst below src) copies back to front");
+
+// a blit is pixel-for-pixel what the driver's write-mode-1 latch loop through the window draws
+seq(4, 0x04); seq(2, 0x0F); gr(5, 0x00); seq(0xFE, 0); gr(3, 0); gr(8, 0xFF);
+dispi(0x18, 0); dispi(0x19, 0);
+for(let i = 0; i < 64; i++) vga.svga_mem()[0x2000 + i] = 0x90 + i;
+vga.svga_mem().fill(0, 0x3000, 0x3040);
+gr(5, 0x01);                                       // write mode 1: the latches carry the data
+for(let i = 0; i < 16; i++) { rd(0x800 + i); wr(0xC00 + i, 0); }   // read loads them, write stores them
+gr(5, 0x00);
+const latched = Array.from(vga.svga_mem().subarray(0x3000, 0x3040));
+vga.svga_mem().fill(0, 0x3000, 0x3040);
+blt(0x2000 % pitch, (0x2000 / pitch) | 0, 0x3000 % pitch, (0x3000 / pitch) | 0, 64, 1);
+eq(Array.from(vga.svga_mem().subarray(0x3000, 0x3040)).join(), latched.join(),
+   "the blit draws the same pixels as the write-mode-1 latch copy");
+
+// the host can refuse the capability, and then the driver keeps to the banked path
+vga.pv_blt_disabled = true;
+eq(vga.svga_register_read(0x26) & 1, 0, "pv_blt_disabled withdraws the capability");
+vga.pv_blt_disabled = false;
+
+// nonsense rectangles clip instead of running off the end of the frame buffer
+blt(0, 0, 0, 0, 0, 0);
+blt(pitch - 4, 0, pitch - 2, 0, 64, 4);
+blt(0, vga.svga_height, 0, ((VGA_MEM / pitch) | 0) - 1, 8, 64);
+eq(true, true, "out-of-range blits are clipped, not fatal");
+
+// --- 12. the rust A000 write fast path is only claimed for states memory.rs actually mirrors:
+//     1 unchained, 2 chain-4 with the V7 fore latches, 3 chain-4 without them, 0 anything else
+const modes = [];
+cpu.pv_planar_set = (mode) => modes.push(mode);
+const mode_now = () => { modes.length = 0; vga.pv_planar_sync(); return modes[modes.length - 1]; };
+seq(4, 0x04); seq(0xFE, 0); gr(5, 0x00); gr(3, 0); gr(1, 0); gr(8, 0xFF);
+eq(mode_now(), 1, "chain-4 off with a plain pipeline is the unchained fast path");
+seq(4, 0x0C); eq(mode_now(), 3, "chain-4 without the fore latches is the linear fast path");
+seq(0xFE, 0x08); eq(mode_now(), 2, "chain-4 with the fore latches is the latch-fill fast path");
+gr(8, 0x0F); eq(mode_now(), 0, "a partial bit mask gives the write back to JS");
+gr(8, 0xFF); gr(5, 0x01); eq(mode_now(), 0, "write mode 1 gives the write back to JS");
+gr(5, 0x00); seq(0xFE, 0); eq(mode_now(), 3, "back to the linear fast path");
+gr(8, 0x0F); eq(mode_now(), 3, "the bit mask does not matter without the fore latches");
+gr(8, 0xFF);
+vga.pv_planar_chain4_disabled = true; eq(mode_now(), 0, "--nochain4 sends chain-4 writes to JS");
+vga.pv_planar_chain4_disabled = false;
+vga.pv_planar_disabled = true; eq(mode_now(), 0, "--nofast sends every write to JS");
+vga.pv_planar_disabled = false;
+seq(4, 0x04); eq(mode_now(), 1, "chain-4 off again");
+delete cpu.pv_planar_set;
 
 console.log(`${checks - failures}/${checks} checks passed`);
 process.exit(failures ? 1 : 0);
