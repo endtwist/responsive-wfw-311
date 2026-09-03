@@ -272,7 +272,7 @@ async function saveFrame() {
     const db = await idb();
     await new Promise((res, rej) => {
       const tx = db.transaction("state", "readwrite");
-      tx.objectStore("state").put({ url, at: Date.now(), w: pres.width, h: pres.height }, FRAME_KEY);
+      tx.objectStore("state").put({ url, at: Date.now(), w: pres.width, h: pres.height, narrow: narrow() }, FRAME_KEY);
       tx.oncomplete = res; tx.onerror = () => rej(tx.error);
     });
   } catch (e) { report("firstframe", "save failed: " + e.message); }
@@ -286,6 +286,12 @@ async function loadFrame() {
       q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
     });
     if (!rec || !rec.url) return;
+    /* Only a frame from this shape of window is worth showing. The saved composite is the phone's
+       column, three times taller than it is wide; stretched across a desktop viewport it is a
+       blurry picture of a layout this window is not even going to use. When the shapes disagree
+       the page simply opens on the guest's own first paint. */
+    const wasNarrow = rec.narrow !== undefined ? rec.narrow : rec.w < rec.h;
+    if (wasNarrow !== narrow()) return;
     const img = new Image();
     await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = rec.url; });
     firstFrame = img;
