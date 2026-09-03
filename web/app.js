@@ -524,6 +524,7 @@ emulator.bus.register("pv-debug", line => {
 /* Applications by URL: /solitaire opens Solitaire. The path (or ?run=) names an entry in this
    table; the command line is handed to the guest the moment the desktop is ready. */
 const APPS = {
+  about: "ABOUT.EXE /show", readme: "ABOUT.EXE /show",
   solitaire: "SOL.EXE", sol: "SOL.EXE", hearts: "MSHEARTS.EXE", minesweeper: "WINMINE.EXE",
   paintbrush: "PBRUSH.EXE", paint: "PBRUSH.EXE", write: "WRITE.EXE", notepad: "NOTEPAD.EXE",
   calc: "CALC.EXE", calculator: "CALC.EXE", clock: "CLOCK.EXE", cardfile: "CARDFILE.EXE",

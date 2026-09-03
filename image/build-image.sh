@@ -38,6 +38,14 @@ if [ "$GAMES" = 1 ] && [ -d changes/games ] && [ -n "$(ls changes/games)" ]; the
     if [ -f "changes/games/$exe" ]; then python3 ../tools/grpadd.py $TMP/GAMES.GRP "$title" "C:\\GAMES\\$exe" --exe "changes/games/$exe"; fi
   done
   mcopy -o $M $TMP/GAMES.GRP ::/WINDOWS/GAMES.GRP
+
+# The first-run note (SPEC 2026-09-03): "Read Me First" in Main shows it again after it has been
+# dismissed (ABOUT.EXE on its own honours [PVMon] AboutShown; the argument overrides it).
+if [ -f changes/windows/ABOUT.EXE ]; then
+  mcopy -n $M ::/WINDOWS/MAIN.GRP $TMP/MAIN.GRP
+  python3 ../tools/grpadd.py $TMP/MAIN.GRP "Read Me First" "ABOUT.EXE /show" --exe changes/windows/ABOUT.EXE
+  mcopy -o $M $TMP/MAIN.GRP ::/WINDOWS/MAIN.GRP
+fi
 fi
 # boot=win (default): AUTOEXEC runs WIN in a loop, so PVMON's exit-to-DOS resize comes straight
 # back up at the new mode. boot=pvtest: run the DOS adapter test first, then WIN. boot=dos: prompt.
