@@ -3272,3 +3272,78 @@ Risks:
 - The warm boot snapshot is made by opening and closing seven programs. If one of them ever writes
   something on exit that matters, it lands in the snapshot; today the shell after the warm boot is
   the stock Main group.
+### 2026-09-03 — the streaked Games group: the host stretched one guest row over a shell dialog's copy
+From Josh's phone: with **Program Manager's Games group** open and a shell dialog over it (*Program
+Item Properties*, and separately *About Program Manager*), the group's client behind and below the
+dialog came out as **tall vertical black/white streaks** instead of icons and labels. The dialog
+itself was right, and so were the icons the dialog did not overlap. It arrived with the 2026-09-03
+blit pass, so the PV blit engine and the new chain-4 rust write path were the suspects.
+
+**Neither was at fault: the guest's own frame buffer is correct, and the fault is the host's fill.**
+
+#### Evidence
+- `tools/probe.mjs` reproduces the sequence cold and headless (`--state none dismiss chord:alt,w
+  key:0x04` opens the Games group, `chord:alt,enter` opens Program Item Properties on Solitaire):
+  `shots/guest-properties-{before,during,after}.png` are the guest frame buffer before, with the
+  dialog up and after it closes. **All three are correct** — the dialog is drawn over intact icons
+  and the group repaints cleanly when it goes.
+- Attribution A/B, same steps, same cold boot: with the blit engine and the chain-4 fast path on
+  (`shots/guest-blt-on.png`) and with both refused (`--noblt --nochain4`,
+  `shots/guest-blt-off.png`) the two PNGs are **byte-identical** (sha256
+  `8e01c4df…`). The adapter's copy is pixel-for-pixel the latch loop's, as it was in the pass that
+  introduced it.
+- The streaks are only in what the **host composites**. Driven in the pane against `#pres`:
+  `shots/host-properties-before.png` and `shots/host-about-before.png` are the bug, exactly as
+  photographed on the phone.
+
+#### Root cause
+`maskShellDialogCopies` in `web/app.js`. A shell dialog wider than the column is drawn as its own
+layer, and its copy in the desktop column has to be covered or there are two dialogs on screen. The
+cover was **one guest row next to the copy, stretched over the whole hole** — so every pixel of that
+row became a full-height column. That is invisible as long as the row is uniform client background,
+which it is in the Main group (three rows of icons, nothing beside the dialog:
+`shots/host-properties-main-group.png` is the same dialog over Main, on the old code, clean). In the Games group the row just below the dialog runs
+through the *Rodent's Revenge / Pipe Dream / Taipei* labels, and each black text pixel became a tall
+black column: the streaks. `About Program Manager` (505 wide, higher up) samples a row through
+another icon row and streaks the same way.
+
+The owned-dialog holes in `drawWindow` had already learned this — *"one solid colour sampled from
+the owner's client next to it … not with a stretched strip (streaks)"* — and this one path was still
+stretching.
+
+#### The fix (host only, `web/app.js`, the masking/fill functions)
+- `maskShellDialogCopies` fills the copy with **one solid colour**, the same rule as the
+  `drawWindow` holes.
+- `shellClientBackground(src, w)` picks it: the **most common colour along one row** of Program
+  Manager's client (from the S layer's client rect), taken just below the copy, or just above it
+  when the copy reaches the bottom of the client. A row's mode is the background even when the row
+  crosses a whole icon row — which is the case a single sampled pixel gets wrong and the stretched
+  strip got spectacularly wrong.
+- `dominantColour(src, x, y, w)` next to `sampleColour`: one readback of the row, cached the same
+  way (by the dirty log's generation, dropped with the sample cache when the guest republishes), so
+  nothing is read per frame.
+
+No guest, driver, `vga.js` or rust change: **nothing to rebuild in the image.**
+
+#### Regression checks
+- `v86/tests/pv/banked-vga.mjs` is **107/107** (was 102). Five new checks model a dialog's exposed
+  region against the blit engine, since that is what the bug looked like: a full-width overlapping
+  copy across the 64K banks the latch path used to switch between, in both directions; that the
+  blit never replicates one source row down the destination (the streak signature itself); and the
+  same-row horizontal overlap a dialog moving sideways makes. All pass, which is the mechanical form
+  of the `--noblt` result above.
+- `tools/probe.mjs` grew the adapter A/B switches `--noblt` / `--nochain4` / `--nofast` that
+  `redraw-bench.mjs` had, so a *rendering* bug can be attributed from a probe run without writing a
+  bench, and the whole scancode set (letters, digits, F-keys) so a step can drive any menu mnemonic —
+  Program Manager's Window menu is how the Games group is opened.
+- `node tools/tour.mjs --apps NOTEPAD,SOL,WINFILE,PBRUSH`: 32 pass / 2 fail, the same two
+  pre-existing geometry checks (PBRUSH fit 640x424, the Notepad dialog fit 604x318).
+- After: `shots/host-properties-after.png`, `shots/host-about-after.png`.
+
+Risks:
+- The fill is the mode of one row of the shell's client. A client whose background is genuinely a
+  minority colour along that row (a dialog sitting over a full-width bitmap) would be filled with
+  the wrong flat colour — still flat, never streaks, and the dialog's own layer covers most of it.
+- `web/app.js` is also being changed for dirty-region compositing. This diff is confined to
+  `maskShellDialogCopies`, the new `shellClientBackground`, `dominantColour` and one line of
+  `dropSampleCache`.

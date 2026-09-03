@@ -249,6 +249,43 @@ blt(0x2000 % pitch, (0x2000 / pitch) | 0, 0x3000 % pitch, (0x3000 / pitch) | 0, 
 eq(Array.from(vga.svga_mem().subarray(0x3000, 0x3040)).join(), latched.join(),
    "the blit draws the same pixels as the write-mode-1 latch copy");
 
+/* A dialog's exposed region. When "Program Item Properties" over Program Manager's Games group is
+   closed, the uncovered part of the client is copied back as a rectangle that is as wide as the
+   whole client, whose rows overlap the source, and which at pitch 4096 covers several of the 64K
+   banks the latch path used to switch between mid-copy. The 2026-09-03 phone bug looked exactly
+   like a blit that got this wrong -- tall vertical black/white streaks through the icons, the
+   signature of one source row replicated down the destination -- and it was not one: the guest's
+   frame buffer was byte-identical with --noblt, and the fault was the host's fill of the masked
+   copy (SPEC 2026-09-03). These lock that answer in: the wide overlapping copy, in both
+   directions, and the same-row horizontal overlap a dialog moving sideways makes. */
+const v = (x, y) => (x * 7 + y * 13) & 0xFF;
+const band = (y0, rows) => { for(let y = y0; y < y0 + rows; y++) for(let x = 0; x < pitch; x++) setpx(x, y, v(x, y)); };
+band(100, 80);
+blt(0, 116, 0, 100, pitch, 60);                    // the strip the dialog uncovered, scrolled up
+ok = true;
+for(let i = 0; i < 60; i++) for(let x = 0; x < pitch; x++) if(px(x, 100 + i) !== v(x, 116 + i)) ok = false;
+eq(ok, true, "full-width overlapping blit across the 64K banks (dst above src)");
+let same = true;
+for(let x = 0; x < pitch; x++) if(px(x, 100) !== px(x, 101)) same = false;
+eq(same, false, "the blit does not replicate one source row down the destination");
+
+band(100, 80);
+blt(0, 100, 0, 116, pitch, 60);                    // and the same strip pushed down
+ok = true;
+for(let i = 0; i < 60; i++) for(let x = 0; x < pitch; x++) if(px(x, 116 + i) !== v(x, 100 + i)) ok = false;
+eq(ok, true, "full-width overlapping blit across the 64K banks (dst below src)");
+
+band(300, 8);                                      // rows shared: the copy is a memmove inside each row
+blt(200, 300, 260, 300, 400, 8);
+ok = true;
+for(let r = 0; r < 8; r++) for(let j = 0; j < 400; j++) if(px(260 + j, 300 + r) !== v(200 + j, 300 + r)) ok = false;
+eq(ok, true, "same-row overlapping blit to the right is a memmove");
+band(300, 8);
+blt(260, 300, 200, 300, 400, 8);
+ok = true;
+for(let r = 0; r < 8; r++) for(let j = 0; j < 400; j++) if(px(200 + j, 300 + r) !== v(260 + j, 300 + r)) ok = false;
+eq(ok, true, "same-row overlapping blit to the left is a memmove");
+
 // the host can refuse the capability, and then the driver keeps to the banked path
 vga.pv_blt_disabled = true;
 eq(vga.svga_register_read(0x26) & 1, 0, "pv_blt_disabled withdraws the capability");

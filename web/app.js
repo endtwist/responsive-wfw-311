@@ -1432,23 +1432,42 @@ function hitTest(px, py) {
 }
 
 /* A shell dialog drawn as its own layer leaves its copy in the column: the part of that copy inside
-   the column is covered with the desktop row just above the dialog, stretched (the desktop's own
-   pixels), so the layer is the only dialog on screen. Applied after the desktop blit and again after
-   the shell copy (Program Manager in front re-blits the same pixels). */
+   the column is covered with one solid colour, the background of Program Manager's own client next
+   to the copy, so the layer is the only dialog on screen. Applied after the desktop blit and again
+   after the shell copy (Program Manager in front re-blits the same pixels).
+
+   This used to stretch the one guest row next to the copy over the whole hole. That is fine as long
+   as the row is uniform background, which it is in the Main group (three rows of icons, nothing
+   beside the dialog) -- and it is not in the Games group, where the row below the dialog runs
+   through the "Rodent's Revenge / Pipe Dream / Taipei" labels: each black text pixel became a tall
+   black column and the hole filled with vertical streaks (2026-09-03). Same rule as the owned-dialog
+   holes in drawWindow: one solid colour, never a stretched strip. */
 function maskShellDialogCopies(g, src) {
   for (const w of placed) if (w.shellDialog) {
     const cx0 = Math.max(view.x, w.wx), cx1 = Math.min(view.x + view.w, w.wx + w.ww);
     const cy0 = Math.max(view.y, w.wy), cy1 = Math.min(view.y + view.h, w.wy + w.wh);
     if (cx1 > cx0 && cy1 > cy0) {
-      // Fill with the row just BELOW the copy when there is one (the dialog sits over Program
-      // Manager's client area, so that row is the client background); the row above is usually
-      // the menu bar with the frame's grey corners, which stretched into grey blocks and a line.
-      const below = w.wy + w.wh, shellBottom = shell.h || SHELL_H;
-      const sy = below < shellBottom - 2 ? below : (w.wy - 1 >= 0 ? w.wy - 1 : below);
-      blit(g, src, cx0, sy, cx1 - cx0, 1, view.ox + (cx0 - view.x) * view.scale, (cy0 - view.y) * view.scale,
-           (cx1 - cx0) * view.scale, (cy1 - cy0) * view.scale);
+      g.fillStyle = shellClientBackground(src, w);
+      g.fillRect(view.ox + (cx0 - view.x) * view.scale, (cy0 - view.y) * view.scale,
+                 (cx1 - cx0) * view.scale, (cy1 - cy0) * view.scale);
     }
   }
+}
+/* The background colour of Program Manager's client beside a shell dialog's copy: the most common
+   colour along one row of the client, taken just below the copy (the dialog sits over the client,
+   so that row is client, not the menu bar and the frame's grey corners) and just above it when the
+   copy reaches the bottom. A row and not a single pixel because that one pixel can land on an icon
+   or its label, and a row's *mode* is the background even when the row crosses a whole icon row. */
+function shellClientBackground(src, w) {
+  const S = layers.find(L => L.kind === "S");
+  const cx0 = S ? S.gx : 0, cx1 = S ? S.gx + S.gw : src.width;
+  const cy0 = S ? S.gy : 0, cy1 = S ? S.gy + S.gh : src.height;
+  let y = w.wy + w.wh + 1;
+  if (y >= cy1) y = w.wy - 2;
+  y = Math.max(0, Math.min(src.height - 1, Math.max(cy0, Math.min(cy1 - 1, y))));
+  const x = Math.max(0, Math.min(src.width - 1, cx0));
+  const width = Math.max(1, Math.min(cx1, src.width) - x);
+  return dominantColour(src, x, y, width);
 }
 function drawWindow(g, src, w) {
   const c = w.c;
@@ -1762,7 +1781,7 @@ window.pvDirty = () => ({ rect: guestDirty, gen: dirtyGen, path: emulator.pixels
    whenever the guest publishes a new layout, since a dialog that came or went moves the points. */
 let sampleCanvas = null;
 const sampleCache = new Map();
-function dropSampleCache() { sampleCache.clear(); }
+function dropSampleCache() { sampleCache.clear(); rowCache.clear(); }
 function sampleColour(src, x, y) {
   x = Math.round(x); y = Math.round(y);
   const key = (x << 12) ^ y;
@@ -1775,6 +1794,42 @@ function sampleColour(src, x, y) {
   const col = `rgb(${d[0]},${d[1]},${d[2]})`;
   if (sampleCache.size > 512) sampleCache.clear();
   sampleCache.set(key, { c: col, gen: dirtyGen });
+  return col;
+}
+/* The most common colour along one guest row: the background of a client whose row crosses icons
+   and text. One readback of the row, cached exactly like sampleColour above (a handful of rows at
+   most, and only while a shell dialog is up). The cache rides on the dirty log where there is one;
+   without it the row is read per composite, which is what sampleColour did before the log landed. */
+let rowCanvas = null;
+const rowCache = new Map();
+function dominantColour(src, x, y, w) {
+  x = Math.round(x); y = Math.round(y); w = Math.max(1, Math.round(w));
+  const key = x + ":" + y + ":" + w;
+  const cacheable = typeof rectDirtySince === "function";
+  const had = cacheable ? rowCache.get(key) : undefined;
+  if (had !== undefined && !rectDirtySince(had.gen, x, y, w, 1)) return had.c;
+  if (!rowCanvas) rowCanvas = document.createElement("canvas");
+  if (rowCanvas.width < w) rowCanvas.width = w;
+  rowCanvas.height = 1;
+  const rg = rowCanvas.getContext("2d", { willReadFrequently: true });
+  let col = "rgb(255,255,255)";
+  try {
+    rg.drawImage(src, x, y, w, 1, 0, 0, w, 1);
+    const d = rg.getImageData(0, 0, w, 1).data;
+    const count = new Map();
+    let best = -1, bestN = 0;
+    for (let i = 0; i < w; i++) {
+      const v = (d[i * 4] << 16) | (d[i * 4 + 1] << 8) | d[i * 4 + 2];
+      const n = (count.get(v) || 0) + 1;
+      count.set(v, n);
+      if (n > bestN) { bestN = n; best = v; }
+    }
+    if (best >= 0) col = `rgb(${best >> 16 & 255},${best >> 8 & 255},${best & 255})`;
+  } catch (e) { /* empty source rect: keep the default */ }
+  if (cacheable) {
+    if (rowCache.size > 64) rowCache.clear();
+    rowCache.set(key, { c: col, gen: dirtyGen });
+  }
   return col;
 }
 /* drawImage throws on an empty source rectangle; a window can legitimately have one (a zero-size

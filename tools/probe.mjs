@@ -4,7 +4,12 @@
  * guest reports (PVMON/PVHOOK protocol lines, layer rects, the pointer). No browser pane needed.
  *
  *   node tools/probe.mjs [--image image/x.img] [--state boot.state.gz] [--save out.state.gz] [--log]
- *                        [--audio-trace] steps...
+ *                        [--audio-trace] [--noblt] [--nochain4] [--nofast] steps...
+ *
+ * --noblt / --nochain4 / --nofast are the adapter A/B switches redraw-bench has: no PV blit, no
+ * chain-4 rust fast path, no rust A000 fast path at all. They make a rendering bug attributable
+ * from a probe run; --noblt needs a cold boot (--state none), since the driver reads the blit
+ * capability at set_board_flags and setmode.
  *
  * --save writes the snapshot after the steps have run, so the steps decide what state is saved.
  * That is how the shipped boot snapshot is warmed for first-open latency (SPEC 2026-09-03).
@@ -77,7 +82,15 @@ if (STATE === "none") STATE = null;
 if (STATE && !fs.existsSync(STATE)) { console.error("no state " + STATE + ", cold boot"); STATE = null; }
 
 const SCREEN_W = 640 * 4, SCREEN_H = 970;
-const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, space: 0x39, shift: 0x2A, f: 0x21, o: 0x18, x: 0x2D, n: 0x31, r: 0x13, f4: 0x3E, s: 0x1F, a: 0x1E, h: 0x23, e: 0x12, down: 0x50, right: 0x4D, left: 0x4B, up: 0x48 };
+/* Scancode set 1. The whole alphabet and the digit row are here so a step can drive any menu
+   mnemonic (Program Manager's Window menu, a group by number) without editing this table again. */
+const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, space: 0x39, shift: 0x2A,
+  q: 0x10, w: 0x11, e: 0x12, r: 0x13, t: 0x14, y: 0x15, u: 0x16, i: 0x17, o: 0x18, p: 0x19,
+  a: 0x1E, s: 0x1F, d: 0x20, f: 0x21, g: 0x22, h: 0x23, j: 0x24, k: 0x25, l: 0x26,
+  z: 0x2C, x: 0x2D, c: 0x2E, v: 0x2F, b: 0x30, n: 0x31, m: 0x32,
+  "1": 0x02, "2": 0x03, "3": 0x04, "4": 0x05, "5": 0x06, "6": 0x07, "7": 0x08, "8": 0x09, "9": 0x0A, "0": 0x0B,
+  f1: 0x3B, f2: 0x3C, f3: 0x3D, f4: 0x3E, f5: 0x3F, f6: 0x40, f7: 0x41, f8: 0x42, f9: 0x43, f10: 0x44,
+  down: 0x50, right: 0x4D, left: 0x4B, up: 0x48, home: 0x47, end: 0x4F, del: 0x53, back: 0x0E };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const emulator = new V86({
@@ -150,6 +163,17 @@ const fmt = L => `${L.kind}${L.slot} win ${L.wx},${L.wy} ${L.ww}x${L.wh} client 
 const dump = () => { for (const L of st.layers) console.log("  " + fmt(L)); };
 
 await new Promise(res => emulator.add_listener("emulator-ready", res));
+/* The same adapter A/B switches tools/redraw-bench.mjs has, so a rendering bug can be attributed
+   from a probe run without writing a bench: --noblt refuses the PV blit capability (the driver
+   falls back to its banked latch copy), --nochain4 sends the chain-4 A000 writes back to JS and
+   --nofast sends every A000 write back to JS. The driver reads the blit capability at
+   set_board_flags and at every setmode, so --noblt needs a cold boot (STATE=none) to take. */
+{
+  const vga = emulator.v86.cpu.devices.vga;
+  if (flag("--nofast")) { vga.pv_planar_disabled = true; vga.pv_planar_sync(); }
+  if (flag("--nochain4")) { vga.pv_planar_chain4_disabled = true; vga.pv_planar_sync(); }
+  if (flag("--noblt")) vga.pv_blt_disabled = true;
+}
 emulator.bus.send("pv-set-dpi", 120);
 emulator.bus.send("sb16-dsp-version", [2, 1]);
 if (flag("--audio-trace")) emulator.bus.send("sb16-trace", true);   // DSP/DMA/IRQ and OPL register writes
