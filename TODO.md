@@ -74,13 +74,6 @@ people hold a phone. Landscape is explicitly not a priority.
     opens once and explains the gestures: hold to drag, swipe the menu bar, long-press for
     right-click, the keyboard bar. Built with the Watcom toolchain like PVMON.
 
-13. **Desktop: no page chrome at the bottom.** Josh still sees something website-like along the
-    bottom of the page on a desktop browser. The old dev toolbar is already gone unless
-    `?dev=1`, so the likely candidates are the letterboxed black strip left when the re-moded
-    guest screen does not divide evenly into the viewport (`computeMode` floors width to 8 and
-    height to 2), the body's own scroll area, or a stale deploy in a cached tab. Find what it
-    actually is and make the desktop fill edge to edge with nothing of the page showing.
-
 ## Known, not yet scheduled
 
 - **JezzBall**: not on the install media and not free to download. Dropping JEZZ.EXE and
