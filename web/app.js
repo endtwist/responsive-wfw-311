@@ -520,6 +520,15 @@ emulator.bus.register("pv-debug", line => {
     launchFromUrl();
     return;
   }
+  /* A top-level window is being destroyed, reported from the hook BEFORE Windows erases the area
+     to the desktop colour. The shell's next publish is ~200 ms behind that erase, which is exactly
+     the grey flash on a close, so the compositor keeps showing what it last had for that rectangle
+     until the guest paints it again (or a short deadline passes). */
+  if (/^PVZ /.test(line)) {
+    const [x, y, w, h] = line.slice(4).split(" ").map(Number);
+    if (w > 0 && h > 0) holdRegion(x, y, w, h);
+    return;
+  }
   if (/^PVB /.test(line)) { pendingLayers = []; pendingDock = []; return; }
   m = /^PV([WOTXS]) (-?\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
   if (m && pendingLayers) {
@@ -1979,6 +1988,27 @@ window.pvComposite = reset => {
   if (reset !== false) { comp.frames = comp.empty = comp.full = comp.dmgPx = comp.viewPx = comp.draws = comp.skips = comp.bg = comp.pieces = comp.pieceSkips = comp.planMs = 0; }
   return out;
 };
+/* A closing window's rectangle, held out of the composite until something real paints there.
+   Windows erases to the desktop colour first and repaints from behind ~200 ms later; drawing the
+   erase is the flash. While a hold is live the region is composited from the pixels of the frame
+   before the erase, which the visible canvas still has, so the window appears to stay until its
+   replacement is ready. Deadline so a hold can never wedge the composite. */
+const holds = [];
+const CLOSE_HOLD_MS = 400;
+function holdRegion(gx, gy, gw, gh) {
+  holds.push({ gx, gy, gw, gh, until: performance.now() + CLOSE_HOLD_MS, gen: dirtyGen });
+  diag(`hold ${gw}x${gh} at ${gx},${gy} (closing window)`);
+}
+/* A hold ends when its deadline passes or when the guest has painted inside it since it started
+   — that paint is the window behind coming back, which is what we were waiting for. */
+function liveHolds() {
+  const now = performance.now();
+  for (let i = holds.length - 1; i >= 0; i--) {
+    const H = holds[i];
+    if (now > H.until || rectDirtySince(H.gen, H.gx, H.gy, H.gw, H.gh)) holds.splice(i, 1);
+  }
+  return holds;
+}
 /* Anything the compositor cannot see for itself says so here: the next frame is a full one. */
 let needFull = true;
 function invalidate() { needFull = true; }
@@ -2042,7 +2072,7 @@ function planDamage(vw, vh, shift) {
   const add = (x, y, w, h) => {
     const x0 = Math.max(0, Math.floor(x) - 1), y0 = Math.max(0, Math.floor(y) - 1);
     const x1 = Math.min(vw, Math.ceil(x + w) + 1), y1 = Math.min(vh, Math.ceil(y + h) + 1);
-    if (x1 > x0 && y1 > y0) rects.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+    if (x1 > x0 && y1 > y0 && !inHold(x0, y0, x1 - x0, y1 - y0)) rects.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
   };
   const mapInto = (src, sx, sy, sw, sh, dx, dy, kx, ky) => {
     for (const r of src) {
@@ -2057,6 +2087,16 @@ function planDamage(vw, vh, shift) {
     rectsByGen.set(gen, r);
     return r;
   };
+  /* A closing window's rectangle is held: the guest is erasing it to the desktop colour and the
+     window behind will not repaint for another ~200 ms, so we keep what is already on the canvas
+     there rather than compositing the erase. `add` drops anything inside a live hold. */
+  const held = liveHolds();
+  const heldHost = held.length ? held.map(H => {
+    const x = view.ox + (H.gx - view.x) * view.scale, y = (H.gy - view.y) * view.scale;
+    return { x, y, w: H.gw * view.scale, h: H.gh * view.scale };
+  }) : null;
+  const inHold = (x, y, w, h) => heldHost && heldHost.some(r =>
+    x >= r.x - 1 && y >= r.y - 1 && x + w <= r.x + r.w + 1 && y + h <= r.y + r.h + 1);
   planSums(vw, vh, shift);
   const moved = planA !== lastPlanA || planB !== lastPlanB;
   lastPlanA = planA; lastPlanB = planB;

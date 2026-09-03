@@ -581,7 +581,20 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             if (lstrcmpi(mod, "USER") == 0) fix_msgbox(h);        /* a MessageBox */
         }
     }
-    if (code == HCBT_DESTROYWND && wParam && !(GetWindowLong((HWND)wParam, GWL_STYLE) & WS_CHILD)) { mark_dead((HWND)wParam); forget((HWND)wParam); }
+    if (code == HCBT_DESTROYWND && wParam && !(GetWindowLong((HWND)wParam, GWL_STYLE) & WS_CHILD)) {
+        /* Tell the host the moment a top-level window is going, BEFORE Windows erases the area to
+           the desktop colour: the compositor measured the erase reaching it ~200 ms before the
+           shell's next publish, which is the grey flash on a close. The rectangle is what will be
+           uncovered; the host holds those pixels until the window behind has actually painted. */
+        HWND dw = (HWND)wParam;
+        if (IsWindowVisible(dw) && !IsIconic(dw)) {
+            RECT dr; char db[80];
+            GetWindowRect(dw, &dr);
+            wsprintf(db, "PVZ %d %d %d %d", dr.left, dr.top, dr.right - dr.left, dr.bottom - dr.top);
+            pv_dbg(db);
+        }
+        mark_dead(dw); forget(dw);
+    }
     if ((code == HCBT_ACTIVATE || code == HCBT_DESTROYWND || code == HCBT_SETFOCUS) && shell_w()) {
         char cls[24];
         HWND h = (HWND)wParam;
