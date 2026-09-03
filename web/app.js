@@ -978,6 +978,10 @@ const SURFACE_POLICY = [
   [/^Calendar\b/, "scroll"], [/^Character Map/, "scroll"], [/^Media Player/, "scroll"], [/^Clipboard/, "scroll"],
   [/^Solitaire/, "drag"], [/^Paintbrush/, "drag"], [/^Minesweeper/, "drag"], [/^Hearts/, "drag"], [/MS-DOS/, "drag"],
   [/^Terminal/, "drag"], [/^Reversi/, "drag"], [/^SkiFree/, "hover"],   // hover: the skier follows the pointer; a swipe moves it without pressing
+  /* "keys": games played on the keyboard, where a tap on the play area does nothing at all in the
+     guest. A swipe becomes the arrow key it looks like and a double-tap becomes the drop key, so
+     the game is playable with a thumb; the key bar is still there for anything else. */
+  [/^TETRIS/i, "keys"], [/^Chip's Challenge/i, "keys"], [/^CHIPS/i, "keys"], [/^Rodent's Revenge/i, "keys"],
   /* Entertainment Pack: every one is a pointer surface (JezzBall draws a wall from the tap, the
      card games and Rodent's Revenge drag, Pipe Dream / Taipei / TetraVex place a piece per tap).
      "drag" is also the fallback, so these lines are the record, not a behaviour change. */
@@ -1003,6 +1007,16 @@ function surfacePolicy(L) {
 }
 /* Programs that never take text: a tap there does not even try the keyboard speculatively, so the
    keyboard does not pop up for the guest to send away again on every card. */
+/* What a swipe means in a "keys" game. Arrows are the E0-prefixed set the key bar already sends;
+   `drop` is the double-tap. Tetris rotates with Up, so an up-swipe rotates and a down-swipe drops
+   slowly, which is how the game itself is keyed. */
+const KEY_GAMES = [
+  [/^TETRIS/i,             { left: [0xE0, 0x4B], right: [0xE0, 0x4D], up: [0xE0, 0x48], down: [0xE0, 0x50], drop: [0x39] }],
+  [/^Chip's Challenge/i,   { left: [0xE0, 0x4B], right: [0xE0, 0x4D], up: [0xE0, 0x48], down: [0xE0, 0x50], drop: null }],
+  [/^CHIPS/i,              { left: [0xE0, 0x4B], right: [0xE0, 0x4D], up: [0xE0, 0x48], down: [0xE0, 0x50], drop: null }],
+  [/^Rodent's Revenge/i,   { left: [0xE0, 0x4B], right: [0xE0, 0x4D], up: [0xE0, 0x48], down: [0xE0, 0x50], drop: null }],
+];
+function keyGame(title) { for (const [re, map] of KEY_GAMES) if (re.test(title || "")) return map; return null; }
 /* Games driven by the arrow keys: the accessory bar appears for them without the soft keyboard. */
 const ARROW_GAMES = /^(TETRIS|Chip's Challenge|Rodent's Revenge|CHIPS|JezzBall)/i;
 const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi|SkiFree|JezzBall|TETRIS|TetraVex|TriPeaks|Tut's Tomb|FreeCell|Golf|Chip's Challenge|Rodent's Revenge|Pipe Dream|Taipei|Dr\. Black Jack)\b/;
@@ -2168,6 +2182,7 @@ function installTouch() {
      drag. A finger that never travels is still a click. */
   let oneScroll = null, shellPan = null;
 let hoverSurface = false;
+let keySwipe = null, lastKeyTap = 0;
 
   /* Swipe in from the right edge: the window at the back of the z-order comes to the front
      (CMD_ACTIVATE), so a repeated swipe cycles through what is open, front to back. The right
@@ -2246,6 +2261,7 @@ let hoverSurface = false;
       else if (insideShellClient(h0)) { pol = "scroll"; slot = SHELL_SCROLL_SLOT; title = "Program Manager"; }   // PVMON targets the active group
       shellPan = pol === "pan" ? { startY: py, base: shellPanY, panning: false } : null;
       hoverSurface = pol === "hover";
+      keySwipe = pol === "keys" ? { startX: px, startY: py, map: keyGame(title), title, fired: 0, t0: performance.now() } : null;
       oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, t0: performance.now() } : null;
       // The finger is on a surface a drag would scroll: tell the guest to watch the command
       // register closely, so the first line of scroll is not 55 ms behind the finger.
@@ -2281,6 +2297,21 @@ let hoverSurface = false;
   const move = ev => {
     window.pvPhase = "move";
     if (dragMove(ev)) return;
+    /* A "keys" game: a swipe is the arrow key it looks like, repeated as the finger keeps going,
+       so holding a drag to the left walks the piece left. No pointer, no button. */
+    if (keySwipe && keySwipe.map) {
+      const { px, py } = hostPoint(ev);
+      const dx = px - keySwipe.startX, dy = py - keySwipe.startY;
+      const STEP = 26;
+      if (Math.max(Math.abs(dx), Math.abs(dy)) >= STEP) {
+        const horiz = Math.abs(dx) >= Math.abs(dy);
+        const code = horiz ? (dx > 0 ? keySwipe.map.right : keySwipe.map.left)
+                           : (dy > 0 ? keySwipe.map.down : keySwipe.map.up);
+        if (code) { sendScancodes(code, true); sendScancodes(code, false); keySwipe.fired++; noteInput(`key swipe ${horiz ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up")}`); }
+        keySwipe.startX = px; keySwipe.startY = py;
+      }
+      return;
+    }
     const G = g;
     if (consumed || !G || G.longFired) return;
     clearTimeout(G.timer);
@@ -2401,6 +2432,16 @@ let hoverSurface = false;
     if (S && S.scrolling) return;                       // a scroll ends with nothing pressed
     if (!G.dragging && !G.longFired && !G.mouse && ev && ev.type === "touchend" && performance.now() - G.t0 >= LONG_PRESS_MS) {   // a hold released still: right button
       queue(async () => { button(true, true); await sleep(60); button(false, true); });
+      return;
+    }
+    if (keySwipe) {
+      const K = keySwipe; keySwipe = null;
+      if (!K.fired && ev && ev.type === "touchend") {
+        // a tap: the second of a quick pair is the drop key (Tetris' space), a single tap is nothing
+        const now = performance.now();
+        if (K.map && K.map.drop && lastKeyTap && now - lastKeyTap < 400) { sendScancodes(K.map.drop, true); sendScancodes(K.map.drop, false); noteInput("key double-tap drop"); lastKeyTap = 0; }
+        else lastKeyTap = now;
+      }
       return;
     }
     if (!G.dragging && !G.longFired && ev && ev.type === "touchend") tapKeyboard(G.hit);
