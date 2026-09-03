@@ -2199,12 +2199,12 @@ let keySwipe = null, lastKeyTap = 0;
   const EDGE_SLOP = 30;         // px of vertical wander before it is not an edge swipe at all
   let edgeSwipe = null;
   const cycleWindows = () => {
-    /* The shell is part of the cycle: with one application open, the thing you want to switch to
-       is Program Manager (slot 15, as for scrolling). Published back to front, so the first entry
-       is the one furthest back — activate that. */
-    const ws = layers.filter(L => L.kind === "W").map(L => ({ slot: L.slot, title: L.title }));
-    const shell = layers.find(L => L.kind === "S");
-    if (shell && ws.length >= 1) ws.unshift({ slot: SHELL_SCROLL_SLOT, title: shell.title });
+    /* The shell takes part in the cycle in its real z-order position (PVMON publishes it there),
+       not pinned to the back: pinning it meant that once Program Manager was in front, every
+       further swipe re-activated the shell and nothing moved. Published back to front, so the
+       first entry is the one furthest back — activate that. */
+    const ws = layers.filter(L => L.kind === "W" || L.kind === "S")
+                     .map(L => ({ slot: L.kind === "S" ? SHELL_SCROLL_SLOT : L.slot, title: L.title }));
     if (ws.length < 2) { diag(`edge swipe: ${ws.length} window(s), nothing to cycle`); return false; }
     const back = ws[0];
     sendCommand(CMD_ACTIVATE, back.slot);
