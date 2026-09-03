@@ -365,6 +365,20 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.js_dirty_max = -1;
     this.svga_full_redraw = true;
     /**
+     * PV 2D blit engine (DISPI 0x20-0x26). Windows moves, resizes, switches and above all
+     * *scrolls* by blitting a rectangle of the frame buffer onto another part of itself and
+     * repainting only what that uncovered. Through the banked A000 window that costs the
+     * driver one CPU read plus one CPU write per four pixels (VGA write mode 1, latch copy),
+     * every one of them a wasm->JS memory-map call, plus a bank-register port write whenever
+     * either rectangle crosses a 64K boundary: a three-line Notepad scroll was 2.1 million
+     * such accesses. The driver programs the six coordinate registers and writes CTRL to have
+     * the adapter do the copy with the pitch it already knows, so the same scroll is seven
+     * port writes. See guest/driver/port/SRC/PVBLT.ASM.
+     */
+    this.pv_blt = new Int32Array(6);  // src_x, src_y, dst_x, dst_y, width, height
+    this.pv_blt_count = 0;            // blits executed (tools/redraw-bench.mjs reports it)
+    this.pv_blt_disabled = false;     // set to refuse the capability, for A/B testing
+    /**
      * responsive-wfw311: Video Seven VRAM-style extended sequencer registers (index >= 5).
      * The V7VGA-derived display driver relies on a small subset:
      *   EC..EF  foreground latches (one colour byte per plane)
@@ -538,6 +552,7 @@ VGAScreen.prototype.get_state = function()
     state[86] = this.svga_read_bank_offset;
     state[87] = this.v7_seq;
     state[88] = this.pv_text_mem;
+    state[89] = this.pv_blt;
 
     return state;
 };
@@ -619,6 +634,7 @@ VGAScreen.prototype.set_state = function(state)
     this.svga_read_bank_offset = state[86] || this.svga_bank_offset;
     if(state[87]) this.v7_seq.set(state[87]);
     if(state[88]) this.pv_text_mem.set(state[88]);
+    if(state[89]) this.pv_blt.set(state[89]);
 
     this.screen.set_mode(this.graphical_mode);
 
@@ -821,10 +837,16 @@ VGAScreen.prototype.svga_unchained_read = function(off)
 VGAScreen.prototype.pv_planar_sync = function()
 {
     if(!this.cpu.pv_planar_set) return;
-    const fast = this.svga_enabled && this.svga_bpp === 8 && !(this.sequencer_memory_mode & 0x8) &&
-        (this.planar_mode & 3) === 0 && this.planar_rotate_reg === 0 && this.planar_setreset_enable === 0 &&
-        this.planar_bitmap === 0xFF && !this.pv_planar_disabled;
-    this.cpu.pv_planar_set(fast ? 1 : 0, this.svga_bank_offset >>> 0, this.plane_write_bm & 0xF,
+    const pipeline_is_plain = (this.planar_mode & 3) === 0 && this.planar_rotate_reg === 0 &&
+        this.planar_setreset_enable === 0 && this.planar_bitmap === 0xFF;
+    const eight_bit = this.svga_enabled && this.svga_bpp === 8 && !this.pv_planar_disabled;
+    // 1: unchained (chain-4 off), which needs the plain write pipeline because it runs the CPU byte
+    // through it. 2 and 3: chain-4 with and without the V7 fore latches, one pixel per CPU byte --
+    // the driver's colour output routines write through 3. See memory.rs pv_planar_enabled.
+    const mode = !eight_bit ? 0 :
+        !(this.sequencer_memory_mode & 0x8) ? (pipeline_is_plain ? 1 : 0) :
+        (this.v7_seq[0xFE] & 0x08) ? (pipeline_is_plain ? 2 : 0) : 3;
+    this.cpu.pv_planar_set(mode, this.svga_bank_offset >>> 0, this.plane_write_bm & 0xF,
         (this.v7_seq[0xFE] & 0x08) ? 1 : 0, this.v7_fore_latch_dword() >>> 0);
 };
 
@@ -902,6 +924,52 @@ VGAScreen.prototype.svga_unchained_write = function(off, value)
     if(base < this.js_dirty_min) this.js_dirty_min = base;
     if(base + 3 > this.js_dirty_max) this.js_dirty_max = base + 3;
     this.planar_write_at(this.svga_mem(), base, value);
+};
+
+/**
+ * PV 2D blit: copy the programmed rectangle inside the frame buffer (DISPI 0x26 bit 0).
+ * Addresses are built exactly as the banked path builds them -- pixel (x, y) is byte
+ * y * pitch + x from the base of the frame buffer, ignoring svga_offset, the same as the
+ * driver's own `y * bmWidthBytes + x` -- so a blit and a banked write address the same
+ * pixel. Rectangles may overlap: rows are copied away from the overlap and each row with
+ * copyWithin, which is a memmove.
+ */
+VGAScreen.prototype.pv_blt_screen_copy = function()
+{
+    const p = this.pv_blt;
+    const sx = p[0], sy = p[1], dx = p[2], dy = p[3];
+    let w = p[4], h = p[5];
+    const pitch = this.svga_pitch_px();
+    if(w <= 0 || h <= 0) return;
+    // clip to the frame buffer: a rectangle the driver never clips is a driver bug, not a crash
+    const maxw = Math.min(pitch - sx, pitch - dx);
+    if(maxw <= 0) return;
+    if(w > maxw) w = maxw;
+    const rows = Math.min(h, Math.min(
+        ((this.vga_memory_size - sx) / pitch | 0) - sy,
+        ((this.vga_memory_size - dx) / pitch | 0) - dy));
+    if(rows <= 0) return;
+    const mem = this.svga_mem();
+    if(dy > sy)
+    {
+        for(let i = rows - 1; i >= 0; i--)
+        {
+            const s = (sy + i) * pitch + sx;
+            mem.copyWithin((dy + i) * pitch + dx, s, s + w);
+        }
+    }
+    else
+    {
+        for(let i = 0; i < rows; i++)
+        {
+            const s = (sy + i) * pitch + sx;
+            mem.copyWithin((dy + i) * pitch + dx, s, s + w);
+        }
+    }
+    const lo = dy * pitch + dx, hi = (dy + rows - 1) * pitch + dx + w - 1;
+    if(lo < this.js_dirty_min) this.js_dirty_min = lo;
+    if(hi > this.js_dirty_max) this.js_dirty_max = hi;
+    this.pv_blt_count++;
 };
 
 /** Planar (chain-4 off) write of one CPU byte through the write-mode pipeline to the four plane bytes at `base` of `mem`. */
@@ -2534,6 +2602,17 @@ VGAScreen.prototype.port1CF_write = function(value)
         case 0x1B:
             this.pv_cmd_arg = value;
             break;
+        case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25:
+            // PV BLT src_x, src_y, dst_x, dst_y, width, height (pixels)
+            this.pv_blt[this.dispi_index - 0x20] = value & 0xFFFF;
+            break;
+        case 0x26:
+            // PV BLT CTRL: bit 0 executes a screen-to-screen copy of the programmed rectangle
+            if(value & 1)
+            {
+                this.pv_blt_screen_copy();
+            }
+            break;
         case 8:
             // x offset
             dbg_log("SVGA X offset: " + h(value), LOG_VGA);
@@ -2748,6 +2827,11 @@ VGAScreen.prototype.svga_register_read = function(n)
             return this.pv_mouse_y;
         case 0x1F:
             return this.pv_mouse_flags;
+        case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25:
+            return this.pv_blt[n - 0x20];
+        case 0x26:
+            // PV BLT capability: bit 0 = screen-to-screen copy. 0 when disabled for A/B.
+            return (this.svga_enabled && this.svga_bpp === 8 && !this.pv_blt_disabled) ? 1 : 0;
 
         case 8:
             // x offset

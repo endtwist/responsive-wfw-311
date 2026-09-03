@@ -272,6 +272,18 @@ pub unsafe fn memcpy_into_svga_lfb(src_addr: u32, dst_addr: u32, count: u32) {
 // JS (vga_memory_write -> planar_write_at), which cost a wasm->JS transition per pixel group.
 // Everything else (other write modes, reads, the hypervisor's text-store accesses) still goes to
 // JS, whose emulation stays the reference.
+//
+// pv_planar_enabled says which addressing the window is in:
+//   0  nothing to do here, hand every write to JS
+//   1  unchained (chain-4 off): CPU address A is plane address A in all four planes, so it covers
+//      four pixels at 4*A within the 256K bank
+//   2  chain-4 with the V7 foreground latches on: CPU address A is pixel A within the 64K bank,
+//      the low two address bits pick which latch byte lands and which map-mask bit gates it, and
+//      the CPU's own data is ignored
+//   3  chain-4 with the latches off: CPU address A is pixel A within the 64K bank and the CPU byte
+//      is the pixel, nothing else applies. This is what the driver's colour output routines
+//      (ppsd_color, color_opaque_output_386, blt_dst_nibbles) write through, and it was every
+//      remaining JS A000 write once the screen-to-screen copies moved to the adapter's blit.
 #[allow(non_upper_case_globals)]
 static mut pv_planar_enabled: u32 = 0;
 #[allow(non_upper_case_globals)]
@@ -289,7 +301,10 @@ static mut pv_planar_count: u32 = 0;
 pub fn pv_planar_set(enabled: u32, bank_offset: u32, mask: u32, fore: u32, fore_dword: u32) {
     unsafe {
         pv_planar_enabled = enabled;
-        pv_planar_bank = bank_offset & !0x3FFFF;
+        // unchained ignores the 64K page bits of the bank (as on the V7 chips the driver targets);
+        // chain-4 addresses pixels straight through the 64K window, so it needs the whole offset
+        pv_planar_bank =
+            if enabled == 2 || enabled == 3 { bank_offset } else { bank_offset & !0x3FFFF };
         pv_planar_mask = mask & 0xF;
         pv_planar_fore = fore;
         pv_planar_fore_dword = fore_dword;
@@ -314,6 +329,29 @@ unsafe fn pv_planar_fast(addr: u32) -> bool {
 
 #[inline]
 unsafe fn pv_planar_write(off: u32, value: i32) {
+    if pv_planar_enabled >= 2 {
+        // chain-4: one pixel per CPU byte in the 64K bank. With the V7 fore latches on the pixel
+        // comes from the latch byte for this address's plane, gated by that plane's map-mask bit;
+        // with them off the CPU byte is the pixel and nothing gates it.
+        let base = pv_planar_bank | off;
+        if base >= vga_memory_size {
+            return;
+        }
+        let byte = if pv_planar_enabled == 2 {
+            let plane = off & 3;
+            if pv_planar_mask & 1 << plane == 0 {
+                return;
+            }
+            (pv_planar_fore_dword >> plane * 8) as u8
+        }
+        else {
+            value as u8
+        };
+        pv_planar_count += 1;
+        *vga_mem8.offset(base as isize) = byte;
+        vga::mark_dirty(VGA_LFB_ADDRESS + base);
+        return;
+    }
     let base = pv_planar_bank + off * 4;
     if base + 3 >= vga_memory_size {
         return;

@@ -33,12 +33,14 @@ include blt88.inc
 include blt216.inc
 include bltstos.inc
 include bltpat.inc
+include pvblt.inc
 
 externFP PrestoChangeoSelector	; CS <--> DS conversion (hopefully CS <-> SS)
 EXTRN	unexclude_far:FAR
 EXTRN	exclude_far:FAR
 EXTRN   PaletteModified:byte
 EXTRN	set_bank_select:near
+EXTRN	pv_dispi_out:near		;responsive-wfw311: adapter blit (INC/PVBLT.INC)
 
 sBegin	Data
 EXTRN   ScratchSel:word
@@ -614,8 +616,9 @@ bitblt_dispatch PROC	NEAR
         mov     es,ax
 
 	test	word ptr device_flags,DEVFLAG_DST_SCREEN ;blts to screen can
-	je	dispatch_dst_memory		; be handled quicker by hard-
-	test	rop_flags,SOURCE_PRESENT	; code, if only the dst and a
+	jne	@F				; be handled quicker by hard-
+	jmp	dispatch_dst_memory
+@@:	test	rop_flags,SOURCE_PRESENT	; code, if only the dst and a
 	jne	dispatch_src_to_screen		; pattern (but no src) are
 	cmp	word ptr background_mode,OPAQUE ; are involved and if bgmode
 	je	@F				; is OPAQUE because the vga
@@ -626,8 +629,19 @@ bitblt_dispatch PROC	NEAR
 dispatch_src_to_screen:
 
 	test	word ptr device_flags,DEVFLAG_SRC_SCREEN  ;if both src and dst
-	je	dispatch_memory_to_screen	; are the screen and we are
+	jne	@F				; are the screen and we are
+	jmp	dispatch_memory_to_screen
 
+;	responsive-wfw311: the paravirtual adapter copies a rectangle inside the
+;	frame buffer itself, so a scroll, a move, a resize or raising a window
+;	costs seven port writes instead of the latch loop's read-plus-write per
+;	four pixels. Conditions as for the latch path below, decided out of line
+;	at dispatch_pv_blt. See INC/PVBLT.INC.
+@@:	test	word ptr local_board_flags,BOARD_FLAG_PV_BLT
+	je	dispatch_216_or_latches
+	jmp	dispatch_pv_blt
+
+dispatch_216_or_latches:
 	test	word ptr local_board_flags,BOARD_FLAG_ENABLE_216  ;on a 216
 	je	@F				; and the rop
 	mov	bl,byte ptr Rop[2]		; only involves the src and
@@ -717,7 +731,65 @@ bitblt_hardcode_done:
 	clc					;flag that blt was executed
 	ret
 
+;	responsive-wfw311: SRCCOPY in opaque mode is what Windows scrolls, moves
+;	and raises with; anything else (a real rop 3, transparent mode) still goes
+;	through the compiled screen-to-screen code. Unlike the latch path the
+;	adapter needs no nibble alignment between src and dst.
+dispatch_pv_blt:
+	cmp	byte ptr Rop[2],11001100B
+	jne	dispatch_pv_blt_no
+	cmp	word ptr background_mode,OPAQUE
+	jne	dispatch_pv_blt_no
+	call	pv_blt_scr2scr
+	jmp	bitblt_hardcode_done
+
+dispatch_pv_blt_no:
+	jmp	dispatch_216_or_latches
+
 bitblt_dispatch ENDP				;
+
+
+;
+;	pv_blt_scr2scr
+;
+;	responsive-wfw311: hand a screen-to-screen SRCCOPY to the paravirtual
+;	adapter. The rectangle is the clipped one BitBlt already computed for the
+;	software-cursor exclusion, taken before blt_set_directions moved the origins
+;	to the far edge of an overlapping blt: the adapter copies away from the
+;	overlap itself, so directions do not matter here. Six coordinate registers
+;	and the execute bit, each one atomic 32-bit OUT, so no VGA register is
+;	touched, no bank is switched and no pixel crosses the A000 window.
+;	See INC/PVBLT.INC for the register numbers.
+;
+
+PUBLIC	pv_blt_scr2scr
+pv_blt_scr2scr	PROC	NEAR
+
+	mov	ax,src_left_edge
+	mov	cx,PV_BLT_SRC_X
+	call	pv_dispi_out
+	mov	ax,src_top_edge
+	mov	cx,PV_BLT_SRC_Y
+	call	pv_dispi_out
+	mov	ax,dst_left_edge
+	mov	cx,PV_BLT_DST_X
+	call	pv_dispi_out
+	mov	ax,dst_top_edge
+	mov	cx,PV_BLT_DST_Y
+	call	pv_dispi_out
+	mov	ax,xExt
+	mov	cx,PV_BLT_WIDTH
+	call	pv_dispi_out
+	mov	ax,yExt
+	mov	cx,PV_BLT_HEIGHT
+	call	pv_dispi_out
+	mov	ax,1
+	mov	cx,PV_BLT_CTRL
+	call	pv_dispi_out
+	ret
+
+pv_blt_scr2scr	ENDP
+
 
 
 
