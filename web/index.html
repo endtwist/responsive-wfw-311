@@ -24,8 +24,10 @@
                font:12px/1.4 ui-monospace, monospace; overflow:hidden; overscroll-behavior:none; }
   /* The guest's own canvas is never shown: it is the source the compositor draws slices from. */
   #screen_container { position:absolute; left:-10000px; top:0; }
-  /* The browser's own arrow is hidden over the canvas: the guest draws its own pointer, and two
-     pointers a few pixels apart is worse than none. The page's cursor comes back outside it. */
+  /* cursor:none is the phone's setting and the starting point everywhere: the guest draws its own
+     pointer there and two pointers a few pixels apart is worse than none. On a desktop app.js
+     replaces this with the CSS shape the guest reports (PVC), and the guest's drawn pointer is the
+     one that goes away -- the browser's is the real mouse, so it never lags. */
   #pres { position:fixed; inset:0; z-index:1; touch-action:none; display:block; image-rendering: pixelated; cursor:none; }
   #screen_container canvas { display:block; touch-action:none;
                              transition: width .18s ease-out, height .18s ease-out; }

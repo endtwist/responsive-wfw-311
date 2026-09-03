@@ -516,6 +516,9 @@ emulator.bus.register("pv-debug", line => {
     desktopReady = true;
     shellHeightSent = 0;
     if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
+    /* Desktop: the browser's pointer takes over from here (see applyCursorShape). PVMON resends
+       PVC with every PVA, so the shape arrives right behind this. */
+    applyCursorShape();
     if (params.get("mkstate") && !restored) { uploadBootState(); return; }
     launchFromUrl();
     return;
@@ -529,6 +532,9 @@ emulator.bus.register("pv-debug", line => {
     if (w > 0 && h > 0) holdRegion(x, y, w, h);
     return;
   }
+  /* PVC <name>: the shape Windows currently wants, classified by PVMON from GetCursor (v39). */
+  m = /^PVC (\S+)/.exec(line);
+  if (m) { guestCursorName = m[1]; applyCursorShape(); return; }
   if (/^PVB /.test(line)) { pendingLayers = []; pendingDock = []; return; }
   m = /^PV([WOTXS]) (-?\d+) (-?\d+) (-?\d+) (\d+) (\d+) (-?\d+) (-?\d+) (\d+) (\d+) ?(.*)$/.exec(line);
   if (m && pendingLayers) {
@@ -1037,6 +1043,57 @@ function setGuestCursor(show, force) {
   sendCommand(CMD_CURSOR, show ? 1 : 0);
   diag(`cursor ${show ? "shown" : "hidden"}`);
 }
+
+/* ------------------------------------------------------------------- the pointer, on a desktop
+ * On a wide viewport the visible pointer is the *browser's own*: it is the real mouse, so it moves
+ * with zero latency, and the guest's drawn one is hidden (CMD_CURSOR 0). What makes that honest is
+ * the shape: PVMON classifies whatever Windows currently wants (PVC, see pvmon.c) and the CSS
+ * cursor on #pres is set from the name, so the two agree without the host guessing from geometry.
+ *
+ * `app` is a program's own cursor -- Paintbrush's brush and its tool cursors, a game's pointer,
+ * File Manager's drag glyph. CSS has nothing equivalent, so for those the guest's own drawn cursor
+ * comes back and the browser's goes away: correct rather than approximately right.
+ * `none` is Windows itself wanting no pointer (an application drawing with a NULL cursor), and is
+ * honoured as a deliberate absence.
+ *
+ * The order of a handover is chosen so there is never a moment with *no* pointer: the guest is
+ * asked to show its cursor first and the browser's is only taken away once that command can have
+ * landed (the command register is read on PVMON's poll). Going the other way the CSS shape appears
+ * at once and the guest's is dismissed. Both cursors sit at the same guest point, so the brief
+ * overlap is two arrows on top of each other, not two pointers in two places.
+ *
+ * The phone is untouched by all of this: applyCursorShape() does nothing on a narrow viewport,
+ * where the finger is the pointer and #pres keeps the stylesheet's `cursor:none`. */
+const CURSOR_CSS = {
+  arrow: "default", ibeam: "text", wait: "wait", cross: "crosshair",
+  sizens: "ns-resize", sizewe: "ew-resize", sizenwse: "nwse-resize", sizenesw: "nesw-resize",
+  sizeall: "move", uparrow: "n-resize", no: "not-allowed", none: "none",
+};
+const CURSOR_HANDOVER = 300;     // ms: PVMON's poll is the 55 ms tick, plus the guest's own repaint
+let guestCursorName = "arrow";
+let cursorHandover = 0, cursorApplied = null;
+/* Called on every PVC line and from pump() sixty times a second, so it must do nothing at all when
+   nothing has changed: a repeated call would otherwise clear the handover timer before it fires. */
+function applyCursorShape() {
+  const el = $("pres");
+  if (!el) return;
+  const want = `${narrow() ? "phone" : "desktop"}:${guestCursorName}:${desktopReady ? 1 : 0}`;
+  if (want === cursorApplied) return;
+  cursorApplied = want;
+  clearTimeout(cursorHandover);
+  /* Phone: back to the stylesheet's cursor:none and to the guest drawing its own pointer, which on
+     a touch screen the first touch hides again. Coming back from the desktop is the only way to
+     get here with the guest's cursor hidden, and a mouse would otherwise have no pointer at all
+     until it moved. */
+  if (narrow()) { el.style.cursor = ""; if (!touchDevice) setGuestCursor(true); return; }
+  const own = guestCursorName === "app";                     // the guest must draw this one itself
+  const css = own ? "none" : (CURSOR_CSS[guestCursorName] || "default");
+  setGuestCursor(own);
+  if (own) cursorHandover = setTimeout(() => { if (guestCursorName === "app") el.style.cursor = "none"; }, CURSOR_HANDOVER);
+  else el.style.cursor = css;
+  diag(`cursor shape ${guestCursorName} -> css ${css}`);
+}
+window.pvCursor = () => ({ name: guestCursorName, css: $("pres") ? $("pres").style.cursor : null, guestShown: guestCursorShown });
 
 /* Per-surface policy for one finger on a window's client area.
      scroll  read-only / content surfaces: a drag scrolls the window (CMD_SCROLL, like two fingers)
@@ -2378,6 +2435,7 @@ function pump() {
   fitCanvas();
   document.documentElement.classList.toggle("phone", narrow());
   syncDesktopMode();                                   // the viewport crossed the phone/desktop line
+  applyCursorShape();                                  // and with it, which pointer is the visible one
   const m = computeMode();
   if (!pending || pending.w !== m.w || pending.h !== m.h) { pending = m; pendingSince = performance.now(); return; }
   if (performance.now() - pendingSince < 300) return;                     // still settling
@@ -3362,7 +3420,10 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
   // The same gestures with a mouse, since the v86 canvas itself is off-screen in this mode. A real
   // mouse brings the guest pointer back (a finger hides it).
   let mouseDown = false;
-  c.addEventListener("mousedown", ev => { if (ev.button !== 0 && ev.button !== 2) return; ev.preventDefault(); mouseDown = true; setGuestCursor(true); down(ev); });
+  /* A real mouse brings the guest's pointer back only on the phone (where a finger hid it). On a
+     desktop the browser's own pointer is the visible one and the guest's stays hidden: bringing it
+     back here would be the second pointer this whole exercise removes. */
+  c.addEventListener("mousedown", ev => { if (ev.button !== 0 && ev.button !== 2) return; ev.preventDefault(); mouseDown = true; if (narrow()) setGuestCursor(true); down(ev); });
   /* Desktop mode: the guest pointer follows the mouse while no button is down (menus highlight,
      the cursor takes the shape of what it is over), through the same absolute placement a press
      uses, coalesced so a fast sweep never queues up behind the guest. Never while a press pipeline
@@ -3381,7 +3442,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
   };
   window.addEventListener("mousemove", ev => { if (mouseDown) move(ev); else if (ev.target === c) hover(ev); });
   window.addEventListener("mouseup", ev => { if (!mouseDown) return; mouseDown = false; up(ev); });
-  window.addEventListener("pointermove", ev => { if (ev.pointerType === "mouse") setGuestCursor(true); }, { passive: true });
+  window.addEventListener("pointermove", ev => { if (ev.pointerType === "mouse" && narrow()) setGuestCursor(true); }, { passive: true });
   c.addEventListener("contextmenu", ev => ev.preventDefault());
 
   /* The wheel scrolls whatever is under the pointer, in either mode: the window under it if there

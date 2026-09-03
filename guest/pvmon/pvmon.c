@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 38     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 39     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 /* Windows 3.x rounds SetTimer up to the 18.2 Hz PC tick, so the 40 ms poll really fires every
@@ -89,6 +89,9 @@ static void dbgnum(const char *s, unsigned a, unsigned b)
 }
 
 static BOOL is_transient(HWND hwnd, char *cls, int len);
+static void report_cursor(void);
+static void resend_cursor(void);
+static void dump_cursor_table(void);
 
 static HINSTANCE g_hInst;
 static HINSTANCE g_hookDll;
@@ -237,6 +240,16 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
         (g_prevW && g_prevH &&
          w >= (int)(g_prevW - g_prevW / 20) && h >= (int)(g_prevH - g_prevH / 20))) {
         SetWindowPos(hwnd, NULL, 0, 0, g_fitW, g_fitH, SWP_NOZORDER | SWP_NOACTIVATE);
+        /* SetWindowPos gives the frame the right size at once, without waiting for a cooperative
+           task to pump, but USER still holds the maximised rectangle it worked out for the screen
+           this window was maximised on, so the next restore-and-maximise would put the old size
+           back. On the desktop, where the screen really has changed, ask USER to redo the maximise
+           as well -- only when the rectangle actually disagreed, so this never runs in the ordinary
+           case of a window that is already the right size. */
+        if (g_desktop && IsZoomed(hwnd) && (w != g_fitW || h != g_fitH)) {
+            ShowWindow(hwnd, SW_RESTORE);
+            ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        }
         repaint_tree(hwnd);
         return TRUE;
     }
@@ -247,11 +260,20 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
        own size and pinned to the top left than resized into nonsense. */
     if (isShell && !g_desktop) { x = 0; y = 0; }
     else if (g_shellW) return TRUE;   /* applications are placed by publish_layout, not here */
+    /* Desktop mode: moving is not enough for a window that is simply bigger than the screen the
+       host is showing. Its scroll bars, its bottom edge and its resize corner are off the viewport
+       and there is no way to reach them -- "on desktop I can't use the scrollbars". Shrink it. */
+    if (g_desktop) {
+        if (w > (int)g_fitW) w = (int)g_fitW;
+        if (h > (int)g_fitH) h = (int)g_fitH;
+    }
     if (x + w > (int)g_fitW) x = (int)g_fitW - w;
     if (y + h > (int)g_fitH) y = (int)g_fitH - h;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
-    if (x != rc.left || y != rc.top)
+    if (w != rc.right - rc.left || h != rc.bottom - rc.top)
+        SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    else if (x != rc.left || y != rc.top)
         SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
     repaint_tree(hwnd);
     return TRUE;
@@ -781,6 +803,7 @@ static void finish_mode_switch(BOOL remoded)
     arrange_shell();
     if (g_desktop) ArrangeIconicWindows(GetDesktopWindow());   /* icons back along the real bottom */
     g_lastPub[0] = 0;
+    resend_cursor();                     /* desktop mode: the host needs the shape from the start */
     dbg("PVA");
     heartbeat();
 }
@@ -1376,6 +1399,62 @@ static void report_focus(void)
     if (lstrcmp(line, g_lastKbdLine) != 0) { lstrcpy(g_lastKbdLine, line); g_lastKbd = text && !no; dbg(line); }
 }
 
+/* ------------------------------------------------- desktop mode: a new window fits the screen
+ * Measured (1280x800, the phone snapshot switched to desktop mode): Notepad opens 2552x892 and
+ * Paintbrush 2513x849 -- both far wider and taller than the screen, so their scroll bars and their
+ * bottom edges are a thousand pixels off the viewport. That is not stale state carried over the
+ * switch: USER's screen metrics are patched to 1280x800 and the desktop window really is
+ * 0,0-1280,800, but the rectangle USER hands a CW_USEDEFAULT window comes from a copy of the boot
+ * screen it keeps elsewhere, which the metrics patch does not reach. Rather than chase that copy,
+ * every window is fitted to the screen once, when it is first seen -- which also catches a program
+ * that sizes itself from something else we have not patched.
+ *
+ * Once, not every publish: a window may legitimately be dragged half off the right edge, and
+ * pulling it back four times a second would fight the drag. The ring of handles is the same
+ * arrangement the slot table uses; a recycled handle at worst skips one fit. */
+static HWND g_fitSeen[32];
+static int g_fitAt;
+static BOOL fit_seen(HWND h)
+{
+    int i;
+    for (i = 0; i < 32; i++) if (g_fitSeen[i] == h) return TRUE;
+    g_fitSeen[g_fitAt++ & 31] = h;
+    return FALSE;
+}
+static void desktop_fit(HWND hwnd)
+{
+    RECT rc;
+    int w, h, x, y, cx = (int)g_realW, cy = (int)g_realH;
+    char b[112], t[40];
+    if (!IsWindow(hwnd) || is_dead(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return;
+    GetWindowRect(hwnd, &rc);
+    w = rc.right - rc.left; h = rc.bottom - rc.top; x = rc.left; y = rc.top;
+    if (x >= 0 && y >= 0 && x + w <= cx && y + h <= cy) return;      /* already on the screen */
+    t[0] = 0; GetWindowText(hwnd, t, sizeof(t));
+    if (IsZoomed(hwnd)) {                    /* let USER recompute the maximised frame */
+        SetWindowPos(hwnd, NULL, 0, 0, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(hwnd, SW_RESTORE);
+        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        GetWindowRect(hwnd, &rc);
+        wsprintf(b, "pvmon: refit zoomed \"%s\" -> %d,%d %dx%d", (LPSTR)t,
+                 rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+        dbg(b);
+        InvalidateRect(hwnd, NULL, TRUE);
+        return;
+    }
+    if (w > cx) w = cx;
+    if (h > cy) h = cy;
+    if (x + w > cx) x = cx - w;
+    if (y + h > cy) y = cy - h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    wsprintf(b, "pvmon: refit \"%s\" %d,%d %dx%d -> %d,%d %dx%d", (LPSTR)t,
+             rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, x, y, w, h);
+    dbg(b);
+    InvalidateRect(hwnd, NULL, TRUE);
+}
+
 static void publish_layout(void)
 {
     RECT wr;
@@ -1383,6 +1462,14 @@ static void publish_layout(void)
     int i, slot;
 
     collect_apps();
+
+    /* Desktop mode: every window that has just appeared is fitted to the screen once (see
+       desktop_fit). Owned windows -- dialogs and message boxes -- as well as applications: a
+       dialog whose owner opened at 2552 wide is placed relative to it and lands off screen too. */
+    if (g_desktop)
+        for (i = 0; i < g_nWnds; i++)
+            if ((g_wnds[i].kind == 'A' || g_wnds[i].kind == 'O') && !fit_seen(g_wnds[i].hwnd))
+                desktop_fit(g_wnds[i].hwnd);
 
     /* First pass: assign slots and park applications, so the second pass reports where they
        actually ended up. Owned windows go into their owner's column too: Windows usually centres
@@ -1627,6 +1714,98 @@ static void fast_extend(void)
     if ((long)(g_fastUntil - now) < 500) g_fastUntil = now + 500;
 }
 
+/* ------------------------------------------------------------------ cursor shape (PVC)
+ * Desktop mode hides the guest's drawn pointer (CMD_CURSOR 0) and lets the browser's own cursor
+ * be the visible one: it is the real mouse, so it moves with no latency at all. For that to be
+ * honest it must take the shape Windows currently wants, so the shape is reported here.
+ *
+ * How it is classified, and why this way. The ground truth is the cursor USER is displaying,
+ * which is `GetCursor()` — one call, no polling of window classes, no guessing from what is under
+ * the pointer, and correct for every route a cursor can be set by (WM_SETCURSOR, an application's
+ * own SetCursor during a drag, the hourglass a program shows while it loads). Comparing the
+ * handle it returns against the handles `LoadCursor(NULL, IDC_*)` gives for the eleven standard
+ * cursors is exact: in Win16 those are cached resources in USER's own module, so a standard
+ * cursor is always the same handle, and an application's own cursor can never collide with one.
+ * Hashing the CURSORSHAPE bits was the alternative; it buys nothing here (two cursors with the
+ * same bits are the same cursor either way) and costs a GlobalLock of an undocumented layout.
+ * The one thing handle comparison must survive is a system cursor being discarded and reloaded
+ * under a different handle, so a miss reloads the table once before it is called an application
+ * cursor -- unknown shapes report `app`, never a guess.
+ *
+ * Windows 3.11 has no standard "no drop" cursor (File Manager carries its own), so `no` is a name
+ * the host can map but the guest never sends: those report `app`, which is the honest answer and
+ * makes the host show the guest's own drawn cursor for them.
+ */
+static HCURSOR g_stdCur[12];
+static const char *g_stdName[12];
+static int g_nStd;
+static HCURSOR g_lastCur = (HCURSOR)1;      /* not a valid handle: the first look always reports */
+static char g_lastCurName[16];
+
+static void load_std_cursors(void)
+{
+    /* IDC_* from the 3.1 SDK; MAKEINTRESOURCE of the ordinal, so no windows.h spelling is needed. */
+    static const struct { WORD id; const char *name; } tab[] = {
+        { 32512, "arrow" }, { 32513, "ibeam" }, { 32514, "wait" }, { 32515, "cross" },
+        { 32516, "uparrow" }, { 32640, "sizeall" }, { 32642, "sizenwse" },
+        { 32643, "sizenesw" }, { 32644, "sizewe" }, { 32645, "sizens" }
+        /* IDC_ICON (32641) is the empty cursor of an icon being dragged: left to `app`. */
+    };
+    int i;
+    g_nStd = 0;
+    for (i = 0; i < (int)(sizeof(tab) / sizeof(tab[0])); i++) {
+        HCURSOR h = LoadCursor(NULL, MAKEINTRESOURCE(tab[i].id));
+        if (!h) continue;
+        g_stdCur[g_nStd] = h; g_stdName[g_nStd] = tab[i].name; g_nStd++;
+    }
+}
+
+static const char *classify_cursor(HCURSOR h)
+{
+    int i;
+    if (!h) return "none";
+    for (i = 0; i < g_nStd; i++) if (g_stdCur[i] == h) return g_stdName[i];
+    load_std_cursors();                    /* a system cursor may have been discarded and reloaded */
+    for (i = 0; i < g_nStd; i++) if (g_stdCur[i] == h) return g_stdName[i];
+    return "app";
+}
+
+/* PVC <name>: only on a change, and only in desktop mode -- the phone shows a finger, not a
+   pointer, and its path is left exactly as it was. */
+static void report_cursor(void)
+{
+    HCURSOR h;
+    const char *name;
+    char b[40];
+    if (!g_desktop) return;
+    h = GetCursor();
+    if (h == g_lastCur) return;
+    g_lastCur = h;
+    name = classify_cursor(h);
+    if (lstrcmp(name, g_lastCurName) == 0) return;   /* a different handle, the same shape */
+    lstrcpy(g_lastCurName, name);
+    wsprintf(b, "PVC %s", (LPSTR)name);
+    dbg(b);
+}
+/* The host has just (re)connected or the mode changed: say the shape again even if it has not. */
+static void resend_cursor(void)
+{
+    g_lastCur = (HCURSOR)1; g_lastCurName[0] = 0;
+    report_cursor();
+}
+/* Diagnostics: the whole table, so a run can be checked against what the host was told. */
+static void dump_cursor_table(void)
+{
+    char b[96]; int i;
+    if (!g_nStd) load_std_cursors();
+    for (i = 0; i < g_nStd; i++) {
+        wsprintf(b, "pvmon: cursor %s = %04X", (LPSTR)g_stdName[i], (unsigned)g_stdCur[i]);
+        dbg(b);
+    }
+    wsprintf(b, "pvmon: cursor now %04X %s", (unsigned)GetCursor(), (LPSTR)classify_cursor(GetCursor()));
+    dbg(b);
+}
+
 static BOOL g_hideCursor = FALSE;
 static void enforce_cursor(void)
 {
@@ -1685,6 +1864,7 @@ static void run_host_command_1(void)
     }
     if (cmd == CMD_REPUBLISH) {
         send_pvd();
+        resend_cursor();                 /* the host is (re)building its picture: include the shape */
         dbg("PVA");
         g_lastPub[0] = 0;
         return;
@@ -1756,6 +1936,7 @@ static void run_host_command_1(void)
             wsprintf(b, "pvmon: probe ClipCursor(NULL) -> clip %d,%d-%d,%d", rc.left, rc.top, rc.right, rc.bottom); dbg(b);
             return;
         }
+        dump_cursor_table();             /* which handle is which shape, and what is up right now */
         GetClipCursor(&rc); GetCursorPos(&pt); cap = GetCapture();
         wsprintf(b, "pvmon: probe metrics %dx%d clip %d,%d-%d,%d cursor %d,%d capture %04X show %d",
                  GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), rc.left, rc.top, rc.right, rc.bottom,
@@ -1961,6 +2142,7 @@ static void poll(HWND hwnd)
            what we see is what we last said, or the host keeps the hook's snapshot (a closed DOS
            box "still published") */
         if (g_takeDirty && g_takeDirty()) g_lastPub[0] = 0;
+        report_cursor();                 /* desktop only, and only when the shape changed */
         if (++n % LAYOUT_EVERY == 0 || g_lastPub[0] == 0) { publish_layout(); report_focus(); enforce_cursor(); keep_cursor_free(); }
         if (n % HEARTBEAT_POLLS == 0) { heartbeat(); ship_print_job(); }   /* about once a second */
     }
@@ -2023,6 +2205,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (g_live) dbg("pvmon: live re-mode enabled");
         if (g_live || g_fakeScreen) find_user_state();
         find_caret(hwnd);                           /* the focused window's caret: PVK's 'a' flag */
+        load_std_cursors();                         /* the handle -> shape table PVC is classified against */
         if (g_shellW) apply_fake_screen();          /* before the shell and the first program size themselves */
         if (g_shellW) install_hook();
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
@@ -2103,6 +2286,7 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
                 continue;
             }
             if (g_shellW || g_desktop) run_host_command();
+            report_cursor();             /* a drag changes the shape: keep up with it */
             Yield();
             continue;
         }

@@ -3468,3 +3468,131 @@ first draft: one `undefined` made every frame a full one). `window.pvComposite()
 empty frames, full frames, damage percentage, layer and chrome-piece skips, blits per frame and
 plan time; `window.pvInvalidate()` forces the next frame to be full, which is also how the drift
 check works.
+
+### 2026-09-03 — the browser's own pointer takes the shape Windows wants (PVMON v39, `PVC`)
+
+Desktop mode showed the guest's *drawn* pointer and hid the browser's (`#pres { cursor:none }`), so
+the visible pointer lagged the real mouse by however long it took a placement to reach the guest and
+come back. It is now the other way round: the guest's software cursor is hidden (`CMD_CURSOR 0`,
+which already existed for touch) and **the browser's own cursor is the visible pointer** — it is the
+real mouse, so it has no latency at all — with its CSS shape kept in step with whatever Windows
+currently wants. Nothing about the phone changes: there the finger is the pointer and the guest's
+drawn cursor is hidden during touch, exactly as before.
+
+**Where the shape comes from, and why `GetCursor` rather than the driver.** The display driver's
+`SetCursor` entry point (`guest/driver/port/SRC/CURSOR.ASM`) is the obvious ground truth, and it was
+the first design — until the thing that makes this feature work rules it out: with the pointer
+hidden, USER stops handing the driver shapes and passes it `NULL`, so a driver-side classifier would
+see nothing at all in exactly the mode that needs it. PVMON's `GetCursor()` is the cursor USER is
+*logically* displaying, which survives `ShowCursor(FALSE)` — measured: every shape below was
+reported with the guest cursor hidden — and it is one call, with no polling of window classes and no
+guessing from what is under the pointer, correct for every route a cursor can be set by.
+
+**How it is classified.** The handle `GetCursor()` returns is compared against the handles
+`LoadCursor(NULL, IDC_*)` gives for the ten standard cursors, loaded once at startup. In Win16 those
+are cached resources in USER's own module, so a standard cursor is always the same handle and an
+application's cursor can never collide with one; the table this run built was
+
+```
+arrow 03A6  ibeam 17EE  wait 03AE  cross 1446  uparrow 17FE
+sizeall 144E  sizenwse 03B6  sizenesw 03BE  sizewe 03C6  sizens 03CE
+```
+
+(`CMD_PROBE` prints it, with the current cursor and its name). Hashing the `CURSORSHAPE` planes was
+the alternative and buys nothing here — two cursors with the same bits *are* the same cursor — at the
+cost of a `GlobalLock` of an undocumented layout. The one thing identity has to survive is a system
+cursor being discarded and reloaded under a new handle, so a miss reloads the table once before the
+cursor is called an application cursor. Unknown shapes report `app`; nothing is ever guessed.
+`PVC <name>` goes out on the debug channel only when the name changes, only in desktop mode, from
+`poll()` (the 55 ms tick) and from the fast-poll loop, and is resent on `CMD_REPUBLISH` and with
+every `PVA` so a host that has just connected knows the shape.
+
+**The host** maps the name to a CSS cursor on `#pres` (`applyCursorShape`): `arrow`→`default`,
+`ibeam`→`text`, `wait`→`wait`, `cross`→`crosshair`, `sizens`→`ns-resize`, `sizewe`→`ew-resize`,
+`sizenwse`→`nwse-resize`, `sizenesw`→`nesw-resize`, `sizeall`→`move`, `uparrow`→`n-resize`,
+`no`→`not-allowed`, `none`→`none`. `app` is the one CSS has no answer for, so for those the guest's
+own drawn cursor is brought back (`CMD_CURSOR 1`) and the browser's is set to `none` — correct rather
+than approximately right. The handover is ordered so there is never a moment with *no* pointer: the
+guest is asked to show its cursor first and the browser's is only dropped 300 ms later, once that
+command can have landed; the reverse direction sets the CSS shape immediately. Both pointers are at
+the same guest point, so the overlap is two arrows on top of each other, not two pointers in two
+places. `applyCursorShape` is called from `pump()` sixty times a second and must therefore be a
+no-op when nothing changed — the first draft cleared its own handover timer every frame, so the
+browser's cursor never went away over an `app` cursor.
+
+**Measured, 1280x800, guest cursor hidden throughout** (headless probe over the four apps, and the
+same points driven with a real mouse in a browser pane):
+
+| where | `PVC` | CSS on `#pres` |
+|---|---|---|
+| desktop, captions, menu bars, scroll bars, list boxes, Solitaire's tableau | `arrow` | `default` |
+| Notepad's text area | `ibeam` | `text` |
+| left / right window edge | `sizewe` | `ew-resize` |
+| bottom window edge | `sizens` | `ns-resize` |
+| top-left / bottom-right corner | `sizenwse` | `nwse-resize` |
+| top-right / bottom-left corner | `sizenesw` | `nesw-resize` |
+| the system menu's Move, in progress | `app` | `none`, guest cursor shown |
+| Paintbrush's picture | `none` | `none` |
+
+Eight of the thirteen names were seen on the wire; the pane run agrees with the headless one point
+for point (`window.pvCursor()` reports the name, the CSS and whether the guest's cursor is shown).
+Three notes on the other five:
+
+- **`wait` was never observed**, in five staged launches (File Manager and an MS-DOS box from
+  Program Manager, File Manager's Search across C:, Tree → Expand All, and a launch with
+  `CMD_FASTPOLL` armed so PVMON polled continuously). The hourglass on this guest is shorter than
+  the window PVMON gets to look; the mapping is in place and the handle is in the table, but the
+  host will only show it for an hourglass that actually lingers. Reporting it the instant it is set
+  needs the driver, and the driver cannot see it while the cursor is hidden — that trade is the
+  first paragraph.
+- **`no` is a name the guest can never send.** Windows 3.11 has no standard "no drop" cursor; File
+  Manager carries its own, so a drag over an illegal target reports `app` and shows File Manager's
+  own glyph. The host keeps the mapping for the day something does report it.
+- **Paintbrush is `none`, not `app`.** Over its picture Windows has no cursor at all: un-hiding the
+  guest's cursor and hovering there draws nothing, while the same cursor is drawn normally two
+  centimetres away over the tool box, which is the proof that this is the guest's own choice and not
+  our hiding. `none` → CSS `none` reproduces it exactly. Program Manager's Move *is* `app`, and
+  there the guest's drawn cursor comes back as designed.
+
+Program Manager's own top edge reports `arrow` at every y from +1 to +6 while its bottom edge and
+all four corners report correctly; every other window's top edge is untested and its bottom edge and
+corners are right, so this looks like Windows' hit testing on that one frame rather than the
+classifier, which never sees a position at all.
+
+#### Windows carried on to the desktop were sized for the phone's screen (Josh: "on desktop I can't
+use the scrollbars")
+
+Reproduced and A/B'd against main's shipped image at 1280x800: **on main (PVMON v38) Notepad opens
+`4,0 2552x892` and Paintbrush `43,43 2513x849`** — a thousand pixels of each is off the viewport,
+scroll bars, bottom edge and resize corner included. It is not stale state carried over the mode
+switch: USER's metrics are patched to 1280x800 and the desktop window really is `0,0-1280,800`
+(`CMD_PROBE`), but the rectangle USER hands a `CW_USEDEFAULT` window comes from a copy of the boot
+screen that the metrics patch does not reach. Rather than chase that copy, every top-level window
+and every owned dialog is now fitted to the screen **once, when PVMON first sees it** in desktop
+mode (`desktop_fit`): a zoomed window is resized and then restored and re-maximised so USER
+recomputes the frame, anything else keeps its position where it fits and is shrunk only where it
+does not. Once, not every publish, because a window may legitimately be dragged half off the right
+edge and pulling it back four times a second would fight the drag. `FitWindow` — the pass that runs
+over every window on a mode switch or a re-mode — grew the same shrink, which it never had: it
+moved oversized windows but never resized them.
+
+After: `PVW 1 0 0 1280 800` for Notepad and Paintbrush, File Manager and Solitaire unchanged (they
+already fitted), and in the pane a real drag of the Search Results scroll-bar thumb at 1280x800
+scrolls the list. `pvmon: refit "<title>" <old> -> <new>` records each one.
+
+**Verified.** `node v86/tests/pv/banked-vga.mjs` 107/107. `node tools/tour.mjs --apps
+NOTEPAD,SOL,WINFILE,PBRUSH` pass=32 fail=2 — the two pre-existing failures (`dlgfit 604x318`,
+PBRUSH `fit 640x424`), identical to main. `tools/desktop-probe.mjs --size 1280x800` passes its
+checks and then panics v86 with `Unimplemented: #TS handler`; **that panic is pre-existing** — main's
+own shipped image and snapshot panic at the same step, which places the pointer at 1633,64 on a
+1280x800 screen, i.e. outside the frame buffer the driver's software cursor is saving under. The
+phone was re-checked at 375x812: `#pres` has no inline cursor and computes to the stylesheet's
+`none`, and the guest is back in the phone layout.
+
+**Rebuild in main:** `guest/pvmon/build.sh` (PVMON v39, staged as
+`image/changes/windows/PVMON.EXE`), then `image/build-image.sh display=pvdisp dpi=120
+sysfont=PVSYS.FON mouse=PVMOUSE.DRV sound=1 load=PVMON.EXE live=1 shellw=352 shellh=760 spooler=no
+printer=PSCRIPT out=work-phone.img` and a fresh warmed boot snapshot (`node tools/probe.mjs --image
+image/<img> --state none --save image/<state> run:NOTEPAD.EXE until:W:Notepad close run:PBRUSH.EXE
+until:W:Paintbrush close run:WINFILE.EXE until:W:File.Manager close run:SOL.EXE until:W:Solitaire
+close`). **No driver rebuild:** `PVDISP.DRV` is untouched, and `guest/pvhook` too.
