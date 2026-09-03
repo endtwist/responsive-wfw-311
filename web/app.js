@@ -787,12 +787,13 @@ function updateKeybar() {
      typing, and the soft keyboard would eat half the screen. When one of them is in front the
      accessory bar shows on its own, docked at the bottom of the viewport. */
   const front = layers.filter(l => l.kind === "W" || l.kind === "O").slice(-1)[0];
-  const keysOnly = !!(front && ARROW_GAMES.test(front.title || "")) && !keyboardUp();
+  const keysOnly = narrow() && !!(front && ARROW_GAMES.test(front.title || "")) && !keyboardUp();
   const up = keyboardUp() || keysOnly;
   // Folded by default: with the keyboard up only a small tab shows; tapping it opens the bar.
   const tab = $("keybartab");
-  bar.classList.toggle("show", up && keybarOpen);
-  if (tab) { tab.classList.toggle("show", up); tab.classList.toggle("open", keybarOpen); }
+  const phone = narrow();                       // desktop has a real keyboard: no bar, no tab
+  bar.classList.toggle("show", phone && up && keybarOpen);
+  if (tab) { tab.classList.toggle("show", phone && up); tab.classList.toggle("open", keybarOpen); }
   if (up) {
     const vv = window.visualViewport;
     // dock to the bottom of the visible viewport, i.e. the top edge of the keyboard (on Chrome for
@@ -3081,6 +3082,27 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
   window.addEventListener("mouseup", ev => { if (!mouseDown) return; mouseDown = false; up(ev); });
   window.addEventListener("pointermove", ev => { if (ev.pointerType === "mouse") setGuestCursor(true); }, { passive: true });
   c.addEventListener("contextmenu", ev => ev.preventDefault());
+
+  /* The wheel scrolls whatever is under the pointer, in either mode: the window under it if there
+     is one, otherwise Program Manager's active group (slot 15). Windows scrolls by lines, so the
+     wheel's pixels are accumulated into line steps; a trackpad's fine deltas therefore behave. */
+  let wheelAcc = 0, wheelAccX = 0;
+  c.addEventListener("wheel", ev => {
+    ev.preventDefault();
+    const { px, py } = hostPoint(ev);
+    const win = layerUnder({ x: ev.clientX, y: ev.clientY });
+    let slot = win && win.slot >= 0 ? win.slot : -1;
+    if (slot < 0) {
+      const h = hitTest(px, py);
+      if (h && (h.kind === "desktop" || h.kind === "client")) slot = h.win && h.win.slot >= 0 ? h.win.slot : SHELL_SCROLL_SLOT;
+    }
+    if (slot < 0) return;
+    const step = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? 320 : 1;   // lines / pages / pixels
+    wheelAcc += ev.deltaY * step; wheelAccX += ev.deltaX * step;
+    const ny = Math.trunc(wheelAcc / 40), nx = Math.trunc(wheelAccX / 40);
+    if (ny) { armFastPoll(); sendCommand(CMD_SCROLL, slot | (ny > 0 ? 1 : 2) << 8 | Math.min(15, Math.abs(ny)) << 12); wheelAcc -= ny * 40; }
+    if (nx) { armFastPoll(); sendCommand(CMD_SCROLL, slot | (nx > 0 ? 3 : 4) << 8 | Math.min(15, Math.abs(nx)) << 12); wheelAccX -= nx * 40; }
+  }, { passive: false });
 }
 
 /* ------------------------------------------------------------- on-screen keyboard (SPEC 2.5)
