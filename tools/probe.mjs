@@ -84,6 +84,9 @@ emulator.bus.register("pv-debug", line => { if (log || /^(pvmon|pvhook):/.test(l
 const beats = [];
 emulator.bus.register("pv-debug", line => { if (/^PVH /.test(line)) beats.push(performance.now()); });
 const beatGaps = () => { const g = []; for (let i = 1; i < beats.length; i++) g.push(Math.round(beats[i] - beats[i - 1])); return g; };
+/* Display mode changes. bpp 0 is a text mode: Windows exited (or a full-screen DOS session took
+   the display), which is what the page turns into a restart from the snapshot (web/app.js). */
+emulator.add_listener("screen-set-size", s => console.log(`[mode] ${s[0]}x${s[1]} bpp ${s[2]}`));
 let cursor = null, cursorSeq = 0;
 emulator.bus.register("pv-cursor", xy => { cursor = { x: xy[0], y: xy[1] }; cursorSeq++; });
 

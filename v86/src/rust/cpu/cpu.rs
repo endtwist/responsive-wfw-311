@@ -854,7 +854,14 @@ pub unsafe fn call_interrupt_vector(
         if interrupt_nr << 3 | 7 > *idtr_size {
             dbg_log!("interrupt_nr={:x} idtr_size={:x}", interrupt_nr, *idtr_size);
             dbg_trace();
-            panic!("Unimplemented: #GP handler");
+            // responsive-wfw311: a vector past the IDT limit is a #GP with the selector-style error
+            // code (vector * 8 + 2), not a dead CPU. Windows 3.x runs its 386 enhanced DOS boxes in
+            // V86 mode with IOPL 3 and an IDT of 96 entries, so a DOS program's INT with a vector
+            // above 5Fh (QBasic issues INT EFh while running a program) reaches here; WIN386's own
+            // #GP handler then reflects it into the VM's real-mode vector table, which is what a
+            // real 386 does. v86 used to panic, taking the whole emulator down.
+            trigger_gp(interrupt_nr << 3 | 2);
+            return;
         }
 
         let descriptor_address = return_on_pagefault!(translate_address_system_read(

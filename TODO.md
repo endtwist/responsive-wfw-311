@@ -49,9 +49,11 @@ people hold a phone. Landscape is explicitly not a priority.
    PVMON. Fixes screen-rect intersections (Paintbrush's cursor clip), dialog centring, self
    sizing, default placement. Does not replace host scaling or input translation. Scope as a
    measured experiment with the tour as the yardstick.
-4. **QBasic reboots the guest.** Running it restarts Windows. Diagnose (DOS box PIF? memory?
-   the idle hook? our display driver in a full-screen text mode?) and fix, or remove it from
-   the image and its group if it cannot be made to work.
+4. ~~**QBasic reboots the guest.**~~ Done 2026-09-03 (SPEC): the stock `QBASIC.PIF` was
+   full-screen, so launching it put the display in an 80x25 text mode and the host restarted from
+   the snapshot; and running a program (F5) panicked v86 on `INT EFh`, a vector past the DOS VM's
+   IDT limit, which is a `#GP` on a real 386. A windowed PIF plus a one-line CPU fix; EDIT and the
+   other DOS programs run under the already-windowed `_DEFAULT.PIF`.
 5. **Files in and out.** Nothing can enter or leave today except a printed PDF. Give the guest
    a second disk the host reads and writes (a FAT image mounted as a drive), so a file dropped
    on the page appears in File Manager, and anything saved there comes back to the phone. The
