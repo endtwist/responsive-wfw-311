@@ -22,10 +22,10 @@ people hold a phone. Landscape is explicitly not a priority.
      re-blit every layer every frame).
    - Stop the per-frame `getImageData` readback in the dialog hole fill: sample once, cache
      until the layout changes.
-   - Optimistic scrolling: move the layer's pixels with the finger and reconcile with the
-     guest's line scroll afterwards, the way window drag and menu pan already work. The
-     background-filled strip at the leading edge is the fallback for outrunning the guest,
-     not the normal path — the two items below shorten the real latency instead.
+   - (Rejected by Josh: optimistic scrolling, i.e. sliding the layer's own pixels with the
+     finger and filling the leading edge with a sampled background colour. No faked pixels
+     standing in for the guest's real scroll; fix the latency instead — the driver blit pass
+     and fast delivery below are the real fixes.)
    - Deliver scroll requests without waiting for the poll. A scroll sits in the command
      register for up to 40 ms before PVMON sees it. Either let the host mark a gesture in
      progress so PVMON polls fast for a second or two, or deliver scrolls through an
