@@ -88,7 +88,8 @@ python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitl
   "Ports.C:\\PRINT.PRN=" \
   "PSCRIPT,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \
   "PostScript,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \
-  "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )"
+  "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )" \
+  "windows.run=$( [ -f changes/windows/ABOUT.EXE ] && echo ABOUT.EXE )"
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
 # File Manager remembers its window from its last run, which on this image was a 1024x768 session;
 # opened in a 640-column slot that makes it a tall sliver scaled to nothing. Give it a sane default.
