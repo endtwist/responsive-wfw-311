@@ -2144,6 +2144,85 @@ function planDamage(vw, vh, shift) {
   }
   return { rects, full: false };
 }
+
+/* ------------------------------------------------------------------- app switcher (SPEC iOS) */
+/* An iOS-style card switcher, entered by a swipe up from the bottom edge (bottomStart/bottomMove,
+   with the touch pipeline below). Every card is a live scaled copy of a window's own pixels --
+   its real frame and client, straight out of the guest frame buffer -- so the switcher never asks
+   the guest to draw anything it would not have drawn anyway, and never draws a pixel of its own.
+   `pos` is a float card index eased toward `target` once a frame (see the `if (switcher)` branch
+   in presentOnce below); it is set equal to `target` while a finger is actively panning, so the
+   easing only shows once a drag lets go and the strip settles onto the nearest card. */
+let switcher = null;   // { cards, pos, target, drag } while open, null otherwise
+
+/* Every real window, reversed so the front-most one -- the one an ordinary edge swipe would have
+   raised -- is card 0, under the finger where the switcher opened. The shell has no "W" layer of
+   its own but is always represented, addressed the same way the right-edge cycle addresses it:
+   SHELL_SCROLL_SLOT. */
+function switcherCards() {
+  return layers.filter(L => (L.kind === "W" || L.kind === "S") && L.ww > 0 && L.wh > 0)
+               .map(L => ({ L, slot: L.kind === "S" ? SHELL_SCROLL_SLOT : L.slot, title: L.title, lift: 0 }))
+               .reverse();
+}
+
+function switcherBox(vw, vh) { return { boxW: Math.round(vw * 0.72), boxH: Math.round(vh * 0.58) }; }
+
+/* Which card, if any, sits under a host point: used on the way down to decide whether a
+   subsequent drag lifts a particular card or just pans the strip. Slots are boxW+16 apart and
+   each box is boxW wide, so at most one card can claim a given point. */
+function switcherCardAt(px, py, vw, vh) {
+  const { boxW, boxH } = switcherBox(vw, vh);
+  for (let i = 0; i < switcher.cards.length; i++) {
+    const cx = vw / 2 + (i - switcher.pos) * (boxW + 16);
+    if (px >= cx - boxW / 2 && px <= cx + boxW / 2 && py >= vh / 2 - boxH / 2 && py <= vh / 2 + boxH / 2) return i;
+  }
+  return -1;
+}
+
+/* Draws the desktop exactly as presentOnce always has, then every card on top of it, back to
+   front so the centred card -- the one nearest `pos`, which a tap or a release lands on -- is
+   drawn last. A card is its window's own frame and client scaled to fit the box, never magnified
+   past 1: blowing a window's pixels up past their own size would be the host inventing detail the
+   guest never painted. */
+/* The cards are re-read from the layer list every frame: a program that repaints, resizes, or
+   closes itself while the switcher is open would otherwise be drawn from the rectangle it had
+   when the switcher opened -- live pixels at a stale address. A card keeps its lift (a finger is
+   flicking it away) and the strip keeps its position when nothing has come or gone. */
+function refreshCards() {
+  const now = switcherCards();
+  if (now.length === switcher.cards.length && now.every((c, i) => c.slot === switcher.cards[i].slot)) {
+    for (let i = 0; i < now.length; i++) now[i].lift = switcher.cards[i].lift;
+  } else if (!now.length) { closeSwitcher(); return false; }
+  else switcher.target = Math.max(0, Math.min(now.length - 1, Math.round(switcher.target)));
+  switcher.cards = now;
+  return true;
+}
+
+function drawSwitcher(g, src, vw, vh) {
+  const dw0 = view.w * view.scale, dh0 = view.h * view.scale;
+  blit(g, src, view.x, view.y, view.w, view.h, view.ox, 0, Math.round(dw0), Math.round(dh0));
+  const { boxW, boxH } = switcherBox(vw, vh);
+  const order = switcher.cards.map((c, i) => i)
+    .sort((a, b) => Math.abs(b - switcher.pos) - Math.abs(a - switcher.pos));   // farthest first, centred card last
+  for (const i of order) {
+    const card = switcher.cards[i];
+    const cx = vw / 2 + (i - switcher.pos) * (boxW + 16);
+    if (cx + boxW / 2 < 0 || cx - boxW / 2 > vw) continue;      // fully off-screen: nothing to draw
+    const s = Math.min(1, boxW / card.L.ww, boxH / card.L.wh);
+    const dw = Math.round(card.L.ww * s), dh = Math.round(card.L.wh * s);
+    const dx = Math.round(cx - dw / 2), dy = Math.round(vh / 2 - dh / 2 - card.lift);
+    blit(g, src, card.L.wx, card.L.wy, card.L.ww, card.L.wh, dx, dy, dw, dh);
+  }
+}
+
+/* Leaving the switcher always costs a full repaint: none of the ordinary compositor's per-layer
+   damage bookkeeping applies to a stack of scaled snapshots that were never really layers. */
+function closeSwitcher() {
+  switcher = null;
+  needFull = true;
+  diag("switcher closed");
+}
+
 function presentOnce() {
   /* One place where guest pixels reach this thread: the rows the worker says changed are copied
      out of shared memory (or drawn from the ImageBitmaps it transferred) into the source canvas.
@@ -2175,6 +2254,20 @@ function presentOnce() {
   }
   if (src && src.width) {
     view = chooseView(src);
+    /* The switcher owns the whole frame while it is open: draw it here and return before any of
+       the ordinary per-layer damage planning runs, since a stack of scaled card snapshots is not
+       the layer stack that planning reasons about. */
+    if (switcher) {
+      if (!refreshCards()) { needFull = true; return; }
+      switcher.pos += (switcher.target - switcher.pos) * 0.25;
+      g.fillStyle = "#000"; g.fillRect(0, 0, fw, fh);
+      g.save();
+      g.translate(safe.l, safe.t);
+      drawSwitcher(g, src, vw, vh);
+      g.restore();
+      needFull = true;
+      return;
+    }
     /* Until the shell has been arranged, show the whole guest screen (DOS, the Windows logo)
        rather than the desktop column: the user should not watch Program Manager being resized,
        and nothing drawn here is ever the host's own. A long timeout guards a guest that never
@@ -2723,7 +2816,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     return true;
   };
   const edgeStart = t => {
-    if (!narrow() || !desktopReady) return false;
+    if (switcher || !narrow() || !desktopReady) return false;   // the switcher owns input while it is open
     const { px, py } = hostPoint(t);
     const [vw] = viewport();
     if (px < vw - EDGE_W) return false;
@@ -2756,8 +2849,68 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     if (dx <= -EDGE_TRAVEL) { edgeSwipe.fired = true; cycleWindows(); }
     return true;
   };
+
+  /* Swipe up from the bottom edge: the iOS-style app switcher (drawSwitcher, above). Mirrors the
+     right-edge cycle swipe exactly -- a thin arming margin, a travel threshold that commits, and a
+     wander limit that hands the gesture back to the ordinary pipeline the moment it looks like
+     something else (a scroll started near the bottom chrome, a drag on a window docked there) --
+     except that what it commits to is not animated by the guest at all: opening the switcher is
+     purely a host-side state change, so the frame after `fired` draws the switcher itself. */
+  /* Taller than the right edge's margin: iOS keeps the bottom strip for its own home-indicator
+     gesture, so a swipe that starts on the last few pixels is often eaten before the page sees
+     it. Arming higher up gives the finger somewhere to start that is still unmistakably "the
+     bottom edge". */
+  const BOTTOM_H = 44;          // host px from the bottom edge in which a swipe may start
+  const BOTTOM_TRAVEL = 60;     // px of upward travel that commits to opening the switcher
+  const BOTTOM_SLOP = 40;       // px of horizontal wander before it is not this swipe at all
+  let bottomSwipe = null;
+  const openSwitcher = () => {
+    const cards = switcherCards();
+    if (!cards.length) { diag("bottom swipe: no windows to switch"); return false; }
+    switcher = { cards, pos: 0, target: 0, drag: null };
+    needFull = true;
+    diag(`switcher open: ${cards.length} card(s)`);
+    noteInput("switcher open");
+    return true;
+  };
+  const bottomStart = t => {
+    if (switcher || !narrow() || !desktopReady || keyboardUp()) return false;
+    const { px, py } = hostPoint(t);
+    const [, vh] = viewport();
+    if (py < vh - BOTTOM_H) return false;
+    const h = hitTest(px, py);
+    if (h.win && h.win.transient) return false;          // a popup must not be dismissed by this swipe
+    bottomSwipe = { startX: px, startY: py, t0: performance.now(), fired: false, tap: { clientX: t.clientX, clientY: t.clientY } };
+    diag(`bottom swipe armed at ${Math.round(px)},${Math.round(py)} over ${h.kind}`);
+    return true;
+  };
+  /* Returns true while the gesture is still the bottom edge's; false once it has been handed over. */
+  const bottomMove = t => {
+    const { px, py } = hostPoint(t);
+    const dx = px - bottomSwipe.startX, dy = py - bottomSwipe.startY;
+    if (Math.hypot(dx, dy) > 8) bottomSwipe.tap = null;             // travelled: no longer a tap
+    if (bottomSwipe.fired) return true;                             // opened already: ignore the rest
+    if (Math.abs(dx) > BOTTOM_SLOP) {                               // too much sideways wander: not this swipe
+      diag(`bottom swipe handed over (dx=${Math.round(dx)})`);
+      bottomSwipe = null;
+      down(t); move(t);
+      return false;
+    }
+    if (dy <= -BOTTOM_TRAVEL) { bottomSwipe.fired = true; openSwitcher(); }
+    return true;
+  };
   const down = ev => {
     window.pvPhase = "down";
+    /* The switcher is modal: while it is open every touch is its own, panning or lifting cards,
+       never the guest's. */
+    if (switcher) {
+      const { px, py } = hostPoint(ev);
+      const [vw, vh] = viewport();
+      const cardIndex = switcherCardAt(px, py, vw, vh);
+      switcher.drag = { startX: px, startY: py, startPos: switcher.pos, cardIndex, mode: null, moved: false, dx: 0, dy: 0, t0: performance.now() };
+      diag(`switcher down at ${Math.round(px)},${Math.round(py)} card=${cardIndex}`);
+      return;
+    }
     consumed = pressStart(ev);
     if (consumed) { diag(`down consumed=${consumed}`); noteInput(`down ${consumed}`); return; }
     let pt = canvasPoint(ev, true);
@@ -2833,6 +2986,25 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
   };
   const move = ev => {
     window.pvPhase = "move";
+    if (switcher) {
+      const D = switcher.drag;
+      if (!D) return;
+      const [vw, vh] = viewport();
+      const { boxW } = switcherBox(vw, vh);
+      const { px, py } = hostPoint(ev);
+      const dx = px - D.startX, dy = py - D.startY;
+      D.dx = dx; D.dy = dy;
+      if (!D.moved && Math.hypot(dx, dy) > 8) D.moved = true;
+      if (!D.mode && D.moved) {
+        if (Math.abs(dx) >= Math.abs(dy)) D.mode = "pan";
+        else if (dy < 0 && D.cardIndex >= 0) D.mode = "lift";
+        else if (dy > 0) D.mode = "dismiss";
+        else D.mode = "none";
+      }
+      if (D.mode === "pan") switcher.pos = switcher.target = D.startPos - dx / (boxW + 16);
+      else if (D.mode === "lift") switcher.cards[D.cardIndex].lift = Math.max(0, -dy);
+      return;
+    }
     if (dragMove(ev)) return;
     if (aimSwipe && !aimSwipe.decided) {
       const { px, py } = hostPoint(ev);
@@ -2955,6 +3127,39 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
   };
   const up = (ev) => {
     window.pvPhase = "up";
+    if (switcher) {
+      const D = switcher.drag; switcher.drag = null;
+      if (!D) return;
+      const dx = D.dx || 0, dy = D.dy || 0;
+      const isTap = !D.moved && performance.now() - D.t0 < 400;
+      if (isTap) {
+        if (D.cardIndex >= 0) {
+          const card = switcher.cards[D.cardIndex];
+          sendCommand(CMD_ACTIVATE, card.slot);
+          diag(`switcher activate slot ${card.slot} "${card.title}"`);
+          noteInput(`switcher activate ${card.title}`);
+        } else diag("switcher tap missed every card: closing");
+        closeSwitcher();
+        return;
+      }
+      if (D.mode === "lift" && D.cardIndex >= 0 && -dy > 100) {
+        const card = switcher.cards[D.cardIndex];
+        sendCommand(CMD_CLOSE, card.slot);
+        diag(`switcher close slot ${card.slot} "${card.title}"`);
+        noteInput(`switcher close ${card.title}`);
+        switcher.cards.splice(D.cardIndex, 1);
+        if (!switcher.cards.length) { closeSwitcher(); return; }
+        let want = switcher.pos;
+        if (D.cardIndex < want) want -= 1;               // the removed card shifted everything after it down by one
+        switcher.target = Math.max(0, Math.min(switcher.cards.length - 1, Math.round(want)));
+        return;
+      }
+      if (D.mode === "dismiss" && dy > 80) { diag("switcher dismissed (swipe down)"); closeSwitcher(); return; }
+      if (D.mode === "lift" && D.cardIndex >= 0) switcher.cards[D.cardIndex].lift = 0;   // released without closing: settle back
+      // an ordinary pan (or anything else) release: snap to the nearest card
+      switcher.target = Math.max(0, Math.min(switcher.cards.length - 1, Math.round(switcher.target)));
+      return;
+    }
     pressActive = false;
     releaseFastPoll();
     const G = g;
@@ -3031,6 +3236,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     // on this tap's release is a fresh one and brings the keyboard back.
     { const k = $("kbd"); if (k && document.activeElement === k && !softKeyboardShowing()) { k.blur(); kbdLog("touchstart: blur stale focus"); } }
     setGuestCursor(false);
+    if (switcher && ev.touches.length !== 1) { ev.preventDefault(); return; }   // modal: no pinch/scroll behind it
     if (ev.touches.length === 2) {
       noteInput("two-finger start");
       clearHold(); oneScroll = null;
@@ -3057,10 +3263,12 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     }
     if (ev.touches.length !== 1) { clearTimeout(pressTimer); return; }
     ev.preventDefault();
+    if (bottomStart(ev.touches[0])) return;             // bottom edge: the app switcher, decided on the move
     if (edgeStart(ev.touches[0])) return;              // right edge: a window switch, decided on the move
     down(ev.touches[0]);
   }, { passive: false });
   c.addEventListener("touchmove", ev => {
+    if (switcher && ev.touches.length !== 1) { ev.preventDefault(); return; }   // modal: no pinch/scroll behind it
     if (twoFinger && ev.touches.length === 2) {
       ev.preventDefault();
       const m = mid(ev.touches);
@@ -3097,6 +3305,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     }
     if (ev.touches.length !== 1) return;
     ev.preventDefault();
+    if (bottomSwipe && bottomMove(ev.touches[0])) return;
     if (edgeSwipe && edgeMove(ev.touches[0])) return;
     move(ev.touches[0]);
   }, { passive: false });
@@ -3104,6 +3313,15 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     ev.preventDefault();
     if (ev.touches.length > 0) return;      // a finger is still down: nothing ends yet
     releaseFastPoll();                      // the gesture is over: the guest goes back to its timer
+    if (bottomSwipe) {
+      const B = bottomSwipe; bottomSwipe = null;
+      /* Armed but never a swipe: it was a tap in the bottom margin (a taskbar icon, a button
+         docked against the bottom edge). Play it back as the click it would have been. */
+      if (!B.fired && ev.type === "touchend" && B.tap) { down(B.tap); up({ type: "touchend" }); }
+      else if (!B.fired) diag("bottom swipe cancelled");
+      unlockAudio("touchend");
+      return;
+    }
     if (edgeSwipe) {
       const E = edgeSwipe; edgeSwipe = null;
       /* Armed but never a swipe: it was a tap in the edge margin (a scroll bar arrow, a button

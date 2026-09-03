@@ -816,6 +816,19 @@ LRESULT CALLBACK __export PvCwpProc(int code, WPARAM wParam, LPARAM lParam)
             /* a resizable program that has just sized itself past the frame (Terminal fits 80
                columns of its font: 1916 wide): tell PVMON at once rather than at its next poll */
             WINDOWPOS FAR *wp = (WINDOWPOS FAR *)m->lParam;
+            /* A menu or drop-down has just been shown or hidden. Nothing activates when a menu
+               pops up, so the CBT hook never fires and the host only learns of it at PVMON's next
+               poll -- a couple of hundred milliseconds during which the popup is already painted
+               in the frame buffer and is composited as part of the window it popped up over, at
+               the guest's own coordinates: off the right edge of a phone-wide column. When the
+               report finally lands the host draws it as its own layer, shifted left to fit, and
+               the menu appears to jump. The same delay in reverse leaves a ghost behind when it
+               closes. Publishing here costs one window walk and happens before the popup paints. */
+            char pcls[24];
+            if ((wp->flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW)) && g_shellW &&
+                GetClassName(m->hwnd, pcls, sizeof(pcls)) > 0 &&
+                (lstrcmp(pcls, "#32768") == 0 || lstrcmp(pcls, "ComboLBox") == 0))
+                hook_publish(NULL);
             if (!(wp->flags & SWP_NOSIZE) && (wp->cx > shell_w() || wp->cy > shell_h()) &&
                 !(GetWindowLong(m->hwnd, GWL_STYLE) & WS_CHILD) && !GetWindow(m->hwnd, GW_OWNER)) {
                 HWND mon = FindWindow("PVMonitor", NULL);
