@@ -2596,6 +2596,40 @@ function installTouch() {
   // Two fingers scroll whatever is under them (or zoom/pan a layer): each SCROLL_STEP of travel
   // is a line message to the guest window under the midpoint.
   const SCROLL_STEP = 24;
+  /* Momentum. A scroll that ends with the finger still moving keeps going, decaying, the way a
+     phone list does. Windows scrolls by whole lines, so the glide is a decaying stream of line
+     commands rather than a smooth offset — with the driver's block copy a scrolled line is cheap
+     enough that it reads as a glide. It stops when the velocity falls below a line's worth, when
+     the guest stops changing (the end of a list: nothing to scroll), on any new touch, or after a
+     second and a half, so it can never run away. */
+  let glide = null;
+  const stopGlide = () => { if (glide) { cancelAnimationFrame(glide.raf); glide = null; } };
+  const startGlide = (slot, vx, vy) => {
+    stopGlide();
+    if (slot < 0 || Math.max(Math.abs(vx), Math.abs(vy)) < 0.35) return;   // a slow lift just stops
+    const g0 = { slot, vx, vy, accX: 0, accY: 0, t: performance.now(), until: performance.now() + 1500, gen: dirtyGen, still: 0, raf: 0 };
+    glide = g0;
+    const step = () => {
+      if (glide !== g0) return;
+      const now = performance.now(), dt = Math.min(50, now - g0.t);
+      g0.t = now;
+      const decay = Math.pow(0.94, dt / 16);              // ~6% per frame
+      g0.vx *= decay; g0.vy *= decay;
+      g0.accX += g0.vx * dt; g0.accY += g0.vy * dt;
+      const ny = Math.trunc(g0.accY / SCROLL_STEP), nx = Math.trunc(g0.accX / SCROLL_STEP);
+      if (ny) { armFastPoll(); sendCommand(CMD_SCROLL, g0.slot | (ny > 0 ? 1 : 2) << 8 | Math.min(15, Math.abs(ny)) << 12); g0.accY -= ny * SCROLL_STEP; }
+      if (nx) { armFastPoll(); sendCommand(CMD_SCROLL, g0.slot | (nx > 0 ? 3 : 4) << 8 | Math.min(15, Math.abs(nx)) << 12); g0.accX -= nx * SCROLL_STEP; }
+      // nothing painted for a quarter of a second while we are asking it to scroll: it has hit the end
+      if (ny || nx) { g0.still = rectDirtySince(g0.gen, 0, 0, 2560, 970) ? 0 : g0.still + 1; g0.gen = dirtyGen; }
+      if (Math.max(Math.abs(g0.vx), Math.abs(g0.vy)) < 0.05 || now > g0.until || g0.still > 15) {
+        diag(`glide ended after ${Math.round(now - (g0.until - 1500))} ms`);
+        releaseFastPoll(); glide = null; return;
+      }
+      g0.raf = requestAnimationFrame(step);
+    };
+    diag(`glide start slot ${slot} v=${vy.toFixed(2)}`);
+    g0.raf = requestAnimationFrame(step);
+  };
   let twoFinger = null;
   const mid = t => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
   const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
@@ -2806,6 +2840,13 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
         }
       }
       if (oneScroll && oneScroll.scrolling) {
+        { const now = performance.now(), dt = now - (oneScroll.vT || oneScroll.t0);
+          if (dt > 4) {                                   // smoothed velocity, host px per ms
+            const vy = (py - oneScroll.lastY) / dt, vx = (px - oneScroll.lastX) / dt;
+            oneScroll.vy = oneScroll.vy === undefined ? vy : oneScroll.vy * 0.6 + vy * 0.4;
+            oneScroll.vx = oneScroll.vx === undefined ? vx : oneScroll.vx * 0.6 + vx * 0.4;
+            oneScroll.vT = now;
+          } }
         oneScroll.accX += px - oneScroll.lastX; oneScroll.accY += py - oneScroll.lastY;
         const ny = Math.trunc(oneScroll.accY / SCROLL_STEP), nx = Math.trunc(oneScroll.accX / SCROLL_STEP);
         const send = (dir, n) => { if (oneScroll.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, oneScroll.slot | dir << 8 | Math.min(15, n) << 12); } noteInput(`scroll ${dir} ${n}`); };
@@ -2904,7 +2945,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
       consumed = null; chromeDrag = null; return;
     }
     if (!G) return;
-    if (S && S.scrolling) return;                       // a scroll ends with nothing pressed
+    if (S && S.scrolling) { startGlide(S.slot, S.vx || 0, S.vy || 0); return; }   // a scroll ends with nothing pressed, and glides
     if (!G.dragging && !G.longFired && !G.mouse && ev && ev.type === "touchend" && performance.now() - G.t0 >= LONG_PRESS_MS) {   // a hold released still: right button
       queue(async () => { button(true, true); await sleep(60); button(false, true); });
       return;
@@ -2945,6 +2986,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
 
   c.addEventListener("touchstart", ev => {
     unlockAudio("touchstart");
+    stopGlide();                                          // a finger down stops the glide, as it should
     // The user dismissed the keyboard with the keyboard's own key: the input is still focused but
     // nothing shows, and iOS ignores focus() on an already-focused element. Blur now so the focus
     // on this tap's release is a fresh one and brings the keyboard back.
@@ -3005,6 +3047,13 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
           return;
         }
       }
+      { const now = performance.now(), dt = now - (twoFinger.vT || twoFinger.t0);
+        if (dt > 4) {
+          const vy = (m.y - twoFinger.last.y) / dt, vx = (m.x - twoFinger.last.x) / dt;
+          twoFinger.vy = twoFinger.vy === undefined ? vy : twoFinger.vy * 0.6 + vy * 0.4;
+          twoFinger.vx = twoFinger.vx === undefined ? vx : twoFinger.vx * 0.6 + vx * 0.4;
+          twoFinger.vT = now;
+        } }
       twoFinger.accX += m.x - twoFinger.last.x; twoFinger.accY += m.y - twoFinger.last.y;
       twoFinger.last = m;
       const send = (dir, n) => { twoFinger.scrolled = true; if (twoFinger.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); } };
@@ -3033,6 +3082,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     }
     const wasTwo = !!twoFinger;
     const T = twoFinger;
+    if (T && T.scrolled && T.slot >= 0) startGlide(T.slot, T.vx || 0, T.vy || 0);
     twoFinger = null;
     /* Two fingers down that neither scrolled nor pinched: a right click where they landed.
        Immediate, unlike the hold-and-lift right click, which made JezzBall's wall flip awkward.
