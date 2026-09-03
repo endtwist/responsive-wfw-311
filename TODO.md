@@ -28,7 +28,10 @@ people hold a phone. Landscape is explicitly not a priority.
    ordinary painting; moves still repaint whole windows through a sliding 64 KB window into
    video memory. Two driver changes: a screen-to-screen blit fast path so a move is a copy
    inside the frame buffer, and selector addressing so blits never switch banks. Measure
-   switch/move/resize before and after, as in the redraw pass.
+   switch/move/resize before and after, as in the redraw pass. In the same pass, two more
+   throughput wins found by the redraw agent: serve the boot BIOS's disk reads directly
+   instead of port-by-port programmed I/O (a third of an app launch's instructions), and
+   ship with v86's debug flag off.
 2. **Edge swipe to switch windows.** Swipe in from the right cycles windows front to back
    (CMD_ACTIVATE; z-order already works). Must not fight iOS's own left-edge back gesture.
 3. **Per-app screen rectangle = its slot.** On each task switch, write that app's slot into
@@ -73,8 +76,6 @@ people hold a phone. Landscape is explicitly not a priority.
   snapshot boot keeps the phone's 120 dpi fonts.
 - **Hearts' welcome dialog** is wider than the phone; **Notepad/Write File Open** is 604 wide.
 - **Calendar** is not on the image (the tour reports it every run).
-- **Two findings from the redraw pass**: a third of an app launch's instructions are BIOS
-  disk I/O port traps, and the page runs v86 with its debug flag on.
 - **Tour check for the screen-rect gap**: after a press, assert no app has a pinned cursor or
   an off-screen placement, so mismatches surface automatically rather than in use.
 - **Sessions that survive** (raised, not yet agreed): periodic snapshots plus a reliable
