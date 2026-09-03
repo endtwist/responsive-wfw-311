@@ -30,6 +30,9 @@
  *   close                   CMD_CLOSE the current slot, wait for it to go (N to a save box)
  *   shellsize:700           CMD_SHELLSIZE
  *   republish               CMD_REPUBLISH
+ *   fast:1500               CMD_FASTPOLL: PVMON polls the command register fast for that many ms
+ *   slat:slot,n[,dir,pace]  command delivery latency: n CMD_SCROLLs, ms from the send to the ack
+ *   mips:1000               instructions per second over that window (the idle check)
  *   dismiss                 Enter/Esc until only the shell is left
  */
 import fs from "node:fs";
@@ -228,6 +231,33 @@ for (const s of steps) {
   }
   else if (op === "shellsize") { emulator.bus.send("pv-command", [8, +arg]); await sleep(800); console.log(`${ts()} shellsize ${arg} -> shell ${st.shell.w}x${st.shell.h}`); }
   else if (op === "republish") { emulator.bus.send("pv-command", [6, 0]); await sleep(600); }
+  /* Command delivery latency: the register is single-slot and PVMON clears it the moment it sees
+     it, so the time from the send to `pv_cmd === 0` is exactly how long the command sat waiting
+     for a poll. `fast:<ms>` arms PVMON's fast poll (CMD_FASTPOLL, v36+) for that many ms. */
+  else if (op === "fast") { emulator.bus.send("pv-command", [13, +arg || 0]); await sleep(120); console.log(`${ts()} fastpoll ${+arg || 0} ms`); }
+  /* Instructions per second over a window: the idle check. A guest in its INT 2F idle executes a
+     fraction of what a spinning one does, so this tells whether the fast poll has been left on. */
+  else if (op === "mips") {
+    const ms = +arg || 1000, i0 = emulator.get_instruction_counter() >>> 0, t = performance.now();
+    await sleep(ms);
+    const d = ((emulator.get_instruction_counter() >>> 0) - i0) >>> 0;
+    console.log(`${ts()} mips over ${Math.round(performance.now() - t)} ms: ${(d / (performance.now() - t) / 1000).toFixed(1)}`);
+  }
+  else if (op === "slat") {
+    const [slotn, n, dirn, pace] = arg.split(",").map(Number);
+    const vga = emulator.v86.cpu.devices.vga;
+    const dir = dirn || 2, N = n || 10, ms = [];
+    for (let i = 0; i < N; i++) {
+      while (vga.pv_cmd !== 0) await sleep(1);
+      const t = performance.now();
+      emulator.bus.send("pv-command", [7, (slotn & 0xFF) | dir << 8 | 1 << 12]);
+      while (vga.pv_cmd !== 0 && performance.now() - t < 1000) await sleep(1);
+      ms.push(Math.round(performance.now() - t));
+      if (pace) await sleep(pace);
+    }
+    const sorted = [...ms].sort((a, b) => a - b);
+    console.log(`${ts()} slat slot=${slotn} dir=${dir} n=${N}: ${ms.join(" ")} ms  min=${sorted[0]} median=${sorted[Math.floor(N / 2)]} max=${sorted[N - 1]} mean=${(ms.reduce((a, b) => a + b, 0) / N).toFixed(1)}`);
+  }
   else if (op === "dismiss") { for (let i = 0; i < 6 && st.layers.some(L => L.kind !== "S"); i++) { await press(SC.enter); await sleep(600); if (st.layers.some(L => L.kind !== "S")) { await press(SC.esc); await sleep(600); } } console.log(`${ts()} dismiss: ${st.layers.filter(L => L.kind !== "S").length} left`); }
   else console.log("unknown step " + s);
 }

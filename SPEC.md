@@ -2394,3 +2394,76 @@ TODO 12. Not a Write document and not HTML: a 4 KB Win16 NE built from `guest/ab
   therefore contains the note open, which is what a fresh boot should look like — but it also means
   `tools/tour.mjs` and anything else that expects only the shell at boot now sees one extra W layer
   in slot 0.
+
+### 2026-09-03 — scroll commands delivered in 2 ms not 54 (PVMON v36 fast poll), right-edge swipe switches windows, sampled colours cached
+Three host/PVMON items from TODO 0 and 2. Optimistic scrolling was **dropped by Josh** part way
+through this round: no faked pixels standing in for the guest's real scroll (nothing of it was
+written), so the leading-edge background strip and the client-rectangle offset are off the list
+for good; scroll smoothness is the driver's screen-to-screen blit pass instead. What is left here
+is the honest half — the command gets to the guest at once, and the compositor stops reading pixels
+back every frame.
+
+- **Why a scroll waited 54 ms.** Windows 3.x rounds `SetTimer` up to the 18.2 Hz PC tick, so
+  PVMON's "40 ms" poll really fires every 55 ms and a `CMD_SCROLL` sat in the single-slot register
+  until it came round. Measured with a new probe step (`slat:<slot>,<n>`: the ms from the send to
+  `vga.pv_cmd === 0`, which is PVMON clearing the register the moment it sees the command) —
+  **median 54 ms, max 114** on the shipped image.
+- **Fix: the host says when a gesture is running.** `CMD_FASTPOLL` (13, arg = ms, 0 = stop, PVMON
+  clamps to 3 s). While it is armed PVMON's message loop stops blocking in `GetMessage`: it peeks,
+  reads the register, and `Yield()`s so the program being scrolled keeps its timeslice. Armed from
+  the touch that lands on a scroll surface (one finger, and at the start of a two-finger scroll),
+  re-armed while the finger keeps moving (`FASTPOLL_MS` = 1200, at most every 600 ms), cancelled on
+  the release; a `CMD_SCROLL` that arrives while it is armed extends it by 500 ms, and PVMON's own
+  box is the backstop if the page goes away mid-gesture. Older PVMONs are not sent the command
+  (`shell.ver < 36`) and would ignore it anyway.
+- **Measured, same run, cold-booted `work-phone-20260903-102727.img`:**
+  `slat` on an empty slot **54 ms median → 2 ms** (min 2, max 2 over 10); on a real window
+  (the note in slot 0) 54 → 2; after the box expires, back to 54. `mips:1200` around it:
+  **0.4 idle → 86 while armed → 0.4 after**, i.e. the guest leaves its INT 2F idle only for the
+  gesture and comes straight back — which is the whole reason the fast loop is time-boxed and
+  cancelled on the release rather than left on.
+  A second reading worth keeping: with **Notepad** as the target the ack was 37 ms even with fast
+  delivery, because the loop is blocked by the previous line's `SendMessage` while Notepad repaints.
+  Delivery is 2 ms; the 35 ms is the guest's own repaint of a scrolled client — exactly the
+  screen-to-screen blit the driver pass is fixing, and now clearly separated from delivery.
+- **Right-edge swipe cycles the z-order.** A one-finger gesture starting within `EDGE_W` = 24 px of
+  the right edge, travelling `EDGE_TRAVEL` = 44 px left with less than `EDGE_SLOP` = 30 px of
+  vertical wander, sends `CMD_ACTIVATE` for the **back-most** `W` layer (`layers` is published back
+  to front), so repeated swipes cycle front to back. The right edge only — iOS owns the left one.
+  Not armed over chrome that clicks (the caption boxes) or over the menu row (which is panned by
+  exactly this motion) or over a popup; armed over a client, the desktop, or a window frame,
+  because a full-width window's right border is what lies under the margin. Anything that turns out
+  not to be a swipe is handed to the ordinary pipeline: past 30 px of vertical travel the gesture is
+  replayed into `down()`/`move()` (so scrolling with a thumb by the scroll bar still scrolls, just
+  decided 30 px later), and a tap that never travels is replayed as the click it would have been
+  (a scroll-bar arrow against the edge still works). No animation — the guest brings the window
+  forward and the next composite shows it.
+- **Pane (mobile preset, synthetic TouchEvents through the real handlers, `?diag=1`):** with
+  "Welcome to Windows", Notepad and Solitaire open, three swipes at x=369 gave
+  `S-1,W0,W1,W2 → S-1,W1,W2,W0 → S-1,W2,W0,W1 → S-1,W0,W1,W2` (a full cycle of three windows);
+  shots `shots/edge-before-sol-front.png` (Solitaire in front) and
+  `shots/edge-after-notepad-front.png` (one swipe later, Notepad in front, nothing else moved).
+  Trace: `edge swipe armed at 369,400 over client "File Manager…"` then
+  `edge swipe: activate slot 0 "Notepad - (Untitled)" (of 0,1,2)`. Hand-over:
+  `edge swipe handed over (dy=-36)` → `fastpoll armed 1200 ms` → `scroll start slot=1 File Manager`.
+  Tap in the margin: `button down`/`button up` at the mapped guest pixel. A swipe starting on the
+  caption row is not armed at all (`down host=369,60 hit=chrome`) and the z-order does not change.
+  Paintbrush's menu bar still pans from the right edge (`mpan` 0 → 75, z-order unchanged).
+  Gesture end to end: the guest's own log shows `pvmon: fastpoll 1200 ms` on the touch that starts
+  a scroll and `pvmon: fastpoll 0 ms` on the release.
+- **Sampled colours cached.** `sampleColour` (the dialog hole fill and the menu-strip fill) did a
+  `drawImage` + `getImageData` per point per frame. It is now memoised per point, dropped on every
+  `PVE` publish (the layout it belonged to is gone) and after 500 ms. Measured in the pane with
+  Paintbrush and an open menu (one hole plus the menu strip, i.e. 2 points): **2 readbacks per 30
+  composited frames**, against 2 per frame before (20 over 10 frames spaced past the TTL).
+  Note for the worker agent: the readback that is left in `present()` is the watchdog's frame
+  signature — 25 full rows every 8th frame, much heavier than this was — untouched here because it
+  is not the compositor's.
+- Tour: `node tools/tour.mjs --apps NOTEPAD,WINFILE,SOL` **pass=22 fail=1**, the one failure the
+  pre-existing `dlgfit 604x318` (Notepad's File Open). PVMON v36 rebuilt (`guest/pvmon/build.sh`,
+  23360 bytes) and staged; image `work-phone-20260903-102727.img` + `boot-20260903-102727.state.gz`
+  built in the worktree.
+- **Rebuild in main:** `image/build-image.sh display=pvdisp dpi=120 sysfont=PVSYS.FON
+  mouse=PVMOUSE.DRV sound=1 load=PVMON.EXE live=1 shellw=352 shellh=760 spooler=no printer=PSCRIPT
+  out=work-phone.img` and a fresh boot snapshot (the staged `PVMON.EXE` is v36; nothing else in
+  `image/changes/` changed).

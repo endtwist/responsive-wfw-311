@@ -20,16 +20,18 @@ people hold a phone. Landscape is explicitly not a priority.
    - Turn off v86's debug flag (assertion and logging branches live in the hot paths).
    - Composite only layers whose pixels changed (the emulator already tracks dirty rows; we
      re-blit every layer every frame).
-   - Stop the per-frame `getImageData` readback in the dialog hole fill: sample once, cache
-     until the layout changes.
+   - ~~Stop the per-frame `getImageData` readback in the dialog hole fill.~~ Done 2026-09-03
+     (SPEC): `sampleColour` caches per point, dropped on every publish and after 500 ms — 2
+     readbacks per 30 frames where it was 2 per frame. The heavy readback left in the composite
+     loop is the watchdog's frame signature (25 rows every 8th frame), which belongs to whoever
+     lands the worker.
    - (Rejected by Josh: optimistic scrolling, i.e. sliding the layer's own pixels with the
      finger and filling the leading edge with a sampled background colour. No faked pixels
      standing in for the guest's real scroll; fix the latency instead — the driver blit pass
      and fast delivery below are the real fixes.)
-   - Deliver scroll requests without waiting for the poll. A scroll sits in the command
-     register for up to 40 ms before PVMON sees it. Either let the host mark a gesture in
-     progress so PVMON polls fast for a second or two, or deliver scrolls through an
-     interrupt-driven path like the mouse and keyboard (measured at 7-11 ms).
+   - ~~Deliver scroll requests without waiting for the poll.~~ Done 2026-09-03 (SPEC, PVMON v36):
+     the host arms `CMD_FASTPOLL` for the length of a gesture and PVMON's message loop peeks
+     instead of blocking — 54 ms median delivery down to 1-2 ms, idle unchanged at 0.4 MIPS.
    - (Rejected by Josh: drawing ahead of the viewport by oversizing scroll windows.)
 1. **Blitting for OS-level actions** (window switch, move, resize). The redraw pass fixed
    ordinary painting; moves still repaint whole windows through a sliding 64 KB window into
@@ -42,8 +44,10 @@ people hold a phone. Landscape is explicitly not a priority.
    throughput wins found by the redraw agent: serve the boot BIOS's disk reads directly
    instead of port-by-port programmed I/O (a third of an app launch's instructions), and
    ship with v86's debug flag off.
-2. **Edge swipe to switch windows.** Swipe in from the right cycles windows front to back
-   (CMD_ACTIVATE; z-order already works). Must not fight iOS's own left-edge back gesture.
+2. ~~**Edge swipe to switch windows.**~~ Done 2026-09-03 (SPEC): a level leftward swipe starting in
+   the right 24 px brings the back-most window forward (CMD_ACTIVATE), so repeated swipes cycle;
+   the right edge only, never over chrome (the menu-bar pan and the caption boxes keep their
+   gestures), and a vertical wander or a tap in the margin is handed to the ordinary pipeline.
 3. **Per-app screen rectangle = its slot.** On each task switch, write that app's slot into
    the screen size and desktop rectangle USER keeps in memory; real values for the shell and
    PVMON. Fixes screen-rect intersections (Paintbrush's cursor clip), dialog centring, self

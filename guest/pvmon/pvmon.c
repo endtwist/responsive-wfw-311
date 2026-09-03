@@ -46,9 +46,16 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 35     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 36     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
+/* Windows 3.x rounds SetTimer up to the 18.2 Hz PC tick, so the 40 ms poll really fires every
+   55 ms and a scroll asked for by a finger waits that long to be seen. While a gesture is running
+   the host says so (CMD_FASTPOLL) and the message loop stops blocking in GetMessage: it peeks,
+   reads the command register, and yields, which delivers a command in a few milliseconds. Strictly
+   time-boxed — a busy loop keeps the system VM out of its INT 2F idle, so the emulator would run
+   the guest flat out and the phone's battery with it. */
+#define FASTPOLL_MAX  3000   /* ms: the longest the host can arm the fast loop for in one go */
 #define LAYOUT_EVERY  4      /* the layout scan (EnumWindows etc.) runs every Nth poll: a phone's guest is slow */
 #define SETTLE_POLLS  3      /* host request must be stable this many polls before acting */
 #define IDT_POLL      1
@@ -1522,6 +1529,29 @@ static void ship_print_job(void)
 #define CMD_CURSOR   10    /* arg 0: hide the pointer (touch screen), 1: show it */
 #define CMD_DESKTOP  11    /* arg 1: desktop mode (whole screen 1:1, no columns or clamps), 0: phone layout */
 #define CMD_PROBE    12    /* diagnostics to pv_dbg: metrics, cursor clip, pointer, capture, children (tools/probe.mjs "probe") */
+#define CMD_FASTPOLL 13    /* arg: ms to poll the command register in the message loop (0 = stop) */
+
+/* When the fast loop stops blocking in GetMessage. GetTickCount is the 55 ms BIOS tick, which is
+   plenty for a one-to-three second box. Zero = off, and off is the state whenever nothing is
+   happening: the loop is back in GetMessage and the system VM idles as before. */
+static DWORD g_fastUntil = 0;
+static void fast_poll(unsigned ms)
+{
+    char b[48];
+    if (ms > FASTPOLL_MAX) ms = FASTPOLL_MAX;
+    g_fastUntil = ms ? GetTickCount() + ms : 0;
+    wsprintf(b, "pvmon: fastpoll %u ms", ms);
+    dbg(b);
+}
+/* A scroll that arrives while the loop is already fast keeps it fast a little longer, so a long
+   drag does not fall back to the timer half way through; the host re-arms as well. */
+static void fast_extend(void)
+{
+    DWORD now;
+    if (!g_fastUntil) return;
+    now = GetTickCount();
+    if ((long)(g_fastUntil - now) < 500) g_fastUntil = now + 500;
+}
 
 static BOOL g_hideCursor = FALSE;
 static void enforce_cursor(void)
@@ -1585,6 +1615,7 @@ static void run_host_command_1(void)
         return;
     }
     if (cmd == CMD_DESKTOP) { set_desktop_mode(arg != 0); return; }
+    if (cmd == CMD_FASTPOLL) { fast_poll(arg); return; }
     if (cmd == CMD_SCROLL) {
         /* Two-finger scrolling from the host: arg = slot | direction << 8 | lines << 12, slot byte
            15 meaning the shell (Program Manager's active group). The thing that scrolls is found in order: the
@@ -1599,6 +1630,7 @@ static void run_host_command_1(void)
         if (slotn == 15) top = FindWindow("Progman", NULL);
         else if (slotn >= MAX_SLOTS) return;
         else top = g_slotWnd[slotn];
+        fast_extend();
         if (!top || !IsWindow(top) || IsIconic(top)) return;
         target = scroll_target(top, (msg == WM_VSCROLL) ? WS_VSCROLL : WS_HSCROLL);
         if (!lines) lines = 3;
@@ -1976,6 +2008,25 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     if (!RegisterClass(&wc)) return 0;
     hwnd = CreateWindow("PVMonitor", "PV Monitor", WS_OVERLAPPED, 0, 0, 0, 0, NULL, NULL, hInst, NULL);
     if (!hwnd) return 0;                       /* hidden: never shown */
-    while (GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+    /* Two loops. Idle (the normal state): block in GetMessage, so the system VM reaches its INT 2F
+       idle and the emulator throttles the guest. Fast (CMD_FASTPOLL, armed by the host for the
+       length of a scroll gesture): peek instead of blocking, read the command register, and Yield
+       so the program being scrolled gets its timeslice back. The box expires on its own, so a host
+       that goes away (a closed tab) cannot leave the guest spinning. */
+    for (;;) {
+        if (g_fastUntil) {
+            if ((long)(GetTickCount() - g_fastUntil) >= 0) { g_fastUntil = 0; dbg("pvmon: fastpoll off"); continue; }
+            if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+                if (msg.message == WM_QUIT) break;
+                TranslateMessage(&msg); DispatchMessage(&msg);
+                continue;
+            }
+            if (g_shellW || g_desktop) run_host_command();
+            Yield();
+            continue;
+        }
+        if (!GetMessage(&msg, NULL, 0, 0)) break;
+        TranslateMessage(&msg); DispatchMessage(&msg);
+    }
     return msg.wParam;
 }

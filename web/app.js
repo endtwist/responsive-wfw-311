@@ -514,6 +514,7 @@ emulator.bus.register("pv-debug", line => {
   if (m && pendingDock) { pendingDock.push({ slot: +m[1], title: m[2] || "Window" }); return; }
   if (/^PVE/.test(line) && pendingLayers) {
     layers = pendingLayers; dock = pendingDock; pendingLayers = pendingDock = null;
+    dropSampleCache();                 // the sampled background points belong to the old layout
     const live = new Set(layers.map(layerKey));
     for (const k of Object.keys(layerPos)) if (!live.has(k)) delete layerPos[k];
     for (const k of Object.keys(menuPan)) if (!live.has(k)) delete menuPan[k];
@@ -1018,6 +1019,33 @@ function sendCommandString(cmd, str) { cmdQueue.push({ cmd, str }); pumpCommands
 setInterval(pumpCommands, 20);
 window.pvCommandQueue = () => cmdQueue.slice();
 const CMD_ACTIVATE = 1, CMD_RESTORE = 2, CMD_CLOSE = 3, CMD_MINIMIZE = 4, CMD_RUN = 5, CMD_REPUBLISH = 6;
+const CMD_FASTPOLL = 13;
+
+/* A scroll command used to sit in the register until PVMON's timer came round. Windows 3.x rounds
+   SetTimer up to the 18.2 Hz PC tick, so "every 40 ms" is really every 55 ms and a line of scroll
+   waited that long (measured: 54 ms median) before the guest even looked. The host now says when a
+   gesture is running: PVMON stops blocking in GetMessage for as long as it is armed and reads the
+   register between yields (measured: 1 ms median). It is a busy loop in the guest — it keeps the
+   system VM out of its INT 2F idle, which the emulator uses to throttle — so it is armed only from
+   the touch that starts a scroll, re-armed while the finger keeps moving, and cancelled on the
+   release; PVMON's own box (3 s) is the backstop if the page goes away mid-gesture. */
+const FASTPOLL_MS = 1200;
+let fastPollArmed = false, fastPollSentAt = 0;
+function armFastPoll() {
+  if (!desktopReady || (shell.ver && shell.ver < 36)) return;      // older PVMON ignores the command
+  const now = performance.now();
+  if (fastPollArmed && now - fastPollSentAt < FASTPOLL_MS / 2) return;
+  const again = fastPollArmed;
+  fastPollArmed = true; fastPollSentAt = now;
+  sendCommand(CMD_FASTPOLL, FASTPOLL_MS);
+  diag(`fastpoll ${again ? "re-armed" : "armed"} ${FASTPOLL_MS} ms`);
+}
+function releaseFastPoll() {
+  if (!fastPollArmed) return;
+  fastPollArmed = false;
+  sendCommand(CMD_FASTPOLL, 0);
+  diag("fastpoll released");
+}
 
 /* Shell-owned dialogs (About Program Manager, Run, Exit Windows: PVO with slot -1) are drawn inside
    the desktop column, not as layers. One taller than the visible column would have no reachable
@@ -1480,16 +1508,31 @@ function present() {
   requestAnimationFrame(present);
 }
 
-/* drawImage throws on an empty source rectangle; a window can legitimately have one (a zero-size
-   client while it is being created), and one throw must never take the render loop down. */
+/* The dialog hole fill and the menu strip's fill sample one guest pixel each. A readback
+   (drawImage + getImageData) is the most expensive thing the compositor does and these points are
+   the background of a window that is not repainting: sampled once and remembered, cleared whenever
+   the guest publishes a new layout (a dialog came or went) and at most half a second old anyway,
+   so a program that changes its background is followed without reading pixels 60 times a second. */
 let sampleCanvas = null;
+const sampleCache = new Map();
+let sampleCacheAt = 0;
+function dropSampleCache() { sampleCache.clear(); }
 function sampleColour(src, x, y) {
+  const now = performance.now();
+  if (now - sampleCacheAt > 500) { sampleCache.clear(); sampleCacheAt = now; }
+  const key = (x << 12) ^ y;
+  const had = sampleCache.get(key);
+  if (had !== undefined) return had;
   if (!sampleCanvas) { sampleCanvas = document.createElement("canvas"); sampleCanvas.width = sampleCanvas.height = 1; }
   const sg = sampleCanvas.getContext("2d", { willReadFrequently: true });
   sg.drawImage(src, x, y, 1, 1, 0, 0, 1, 1);
   const d = sg.getImageData(0, 0, 1, 1).data;
-  return `rgb(${d[0]},${d[1]},${d[2]})`;
+  const col = `rgb(${d[0]},${d[1]},${d[2]})`;
+  sampleCache.set(key, col);
+  return col;
 }
+/* drawImage throws on an empty source rectangle; a window can legitimately have one (a zero-size
+   client while it is being created), and one throw must never take the render loop down. */
 function blit(g, src, sx, sy, sw, sh, dx, dy, dw, dh) {
   if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
   g.drawImage(src, sx, sy, sw, sh, dx, dy, dw, dh);
@@ -1949,6 +1992,64 @@ function installTouch() {
      drag. A finger that never travels is still a click. */
   let oneScroll = null, shellPan = null;
 let hoverSurface = false;
+
+  /* Swipe in from the right edge: the window at the back of the z-order comes to the front
+     (CMD_ACTIVATE), so a repeated swipe cycles through what is open, front to back. The right
+     edge only — iOS owns the left one for its own back gesture — and it must start within a thin
+     margin, travel left, and stay level, which is what tells it from a window drag (those start on
+     the caption or the frame: `hitTest` says "drag") and from a menu-bar pan (the menu row says
+     "chrome"), neither of which arms this. A finger that starts there and goes up or down instead
+     is handed to the ordinary pipeline the moment it is clear it is not a swipe, so scrolling with
+     a thumb near the right edge (where the scroll bar is) still works, and a tap that never
+     travels is still the click it would have been. The switch itself is not animated: the guest
+     brings the window forward and the next frame shows it, which is the whole point. */
+  const EDGE_W = 24;            // host px from the right edge in which a swipe may start
+  const EDGE_TRAVEL = 44;       // px of leftward travel that commits the switch
+  const EDGE_SLOP = 30;         // px of vertical wander before it is not an edge swipe at all
+  let edgeSwipe = null;
+  const cycleWindows = () => {
+    const ws = layers.filter(L => L.kind === "W");                 // published back to front
+    if (ws.length < 2) { diag(`edge swipe: ${ws.length} window(s), nothing to cycle`); return false; }
+    const back = ws[0];
+    sendCommand(CMD_ACTIVATE, back.slot);
+    diag(`edge swipe: activate slot ${back.slot} "${back.title}" (of ${ws.map(L => L.slot).join(",")})`);
+    noteInput(`edge swipe -> ${back.title}`);
+    return true;
+  };
+  const edgeStart = t => {
+    if (!narrow() || !desktopReady) return false;
+    const { px, py } = hostPoint(t);
+    const [vw] = viewport();
+    if (px < vw - EDGE_W) return false;
+    const h = hitTest(px, py);
+    /* Over a window's client area, its frame, or the desktop. Not over chrome that clicks
+       (the caption boxes, the menu row: those keep their own gestures, and the menu row is
+       panned by exactly this motion) and not over a popup, which must not be dismissed by a
+       swipe. The frame counts because a full-width window's right border is what lies under the
+       edge margin — a level leftward swipe from there switches windows, anything else is the
+       ordinary frame drag, handed over below. */
+    if (h.kind !== "client" && h.kind !== "desktop" && h.kind !== "drag") return false;
+    if (h.win && (h.win.transient || h.win.shellDialog)) return false;
+    // the touch point is kept as a plain pair: touchend carries no touches to replay a tap from
+    edgeSwipe = { startX: px, startY: py, t0: performance.now(), fired: false, tap: { clientX: t.clientX, clientY: t.clientY } };
+    diag(`edge swipe armed at ${Math.round(px)},${Math.round(py)} over ${h.kind} ${h.win ? `"${h.win.title}"` : ""}`);
+    return true;
+  };
+  /* Returns true while the gesture is still the edge's; false once it has been handed over. */
+  const edgeMove = t => {
+    const { px, py } = hostPoint(t);
+    const dx = px - edgeSwipe.startX, dy = py - edgeSwipe.startY;
+    if (Math.hypot(dx, dy) > 8) edgeSwipe.tap = null;              // travelled: no longer a tap
+    if (edgeSwipe.fired) return true;                              // switched already: ignore the rest
+    if (Math.abs(dy) > EDGE_SLOP) {                                // not level: an ordinary gesture
+      diag(`edge swipe handed over (dy=${Math.round(dy)})`);
+      edgeSwipe = null;
+      down(t); move(t);
+      return false;
+    }
+    if (dx <= -EDGE_TRAVEL) { edgeSwipe.fired = true; cycleWindows(); }
+    return true;
+  };
   const down = ev => {
     window.pvPhase = "down";
     consumed = pressStart(ev);
@@ -1964,7 +2065,10 @@ let hoverSurface = false;
       else if (insideShellClient(h0)) { pol = "scroll"; slot = SHELL_SCROLL_SLOT; title = "Program Manager"; }   // PVMON targets the active group
       shellPan = pol === "pan" ? { startY: py, base: shellPanY, panning: false } : null;
       hoverSurface = pol === "hover";
-      oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, t0: performance.now() } : null; }
+      oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, t0: performance.now() } : null;
+      // The finger is on a surface a drag would scroll: tell the guest to watch the command
+      // register closely, so the first line of scroll is not 55 ms behind the finger.
+      if (oneScroll && oneScroll.slot >= 0) armFastPoll(); }
     // A quick second tap near the first is a double-click: Windows 3.1 only pairs clicks a few
     // pixels apart, and fingers do not repeat to the pixel, so the second tap reuses the first
     // tap's exact point.
@@ -2026,7 +2130,7 @@ let hoverSurface = false;
       if (oneScroll && oneScroll.scrolling) {
         oneScroll.accX += px - oneScroll.lastX; oneScroll.accY += py - oneScroll.lastY;
         const ny = Math.trunc(oneScroll.accY / SCROLL_STEP), nx = Math.trunc(oneScroll.accX / SCROLL_STEP);
-        const send = (dir, n) => { if (oneScroll.slot >= 0) sendCommand(CMD_SCROLL, oneScroll.slot | dir << 8 | Math.min(15, n) << 12); noteInput(`scroll ${dir} ${n}`); };
+        const send = (dir, n) => { if (oneScroll.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, oneScroll.slot | dir << 8 | Math.min(15, n) << 12); } noteInput(`scroll ${dir} ${n}`); };
         if (ny) { send(ny > 0 ? 1 : 2, Math.abs(ny)); oneScroll.accY -= ny * SCROLL_STEP; }   // finger down = content up = line up
         if (nx) { send(nx > 0 ? 3 : 4, Math.abs(nx)); oneScroll.accX -= nx * SCROLL_STEP; }
       }
@@ -2088,6 +2192,7 @@ let hoverSurface = false;
   const up = (ev) => {
     window.pvPhase = "up";
     pressActive = false;
+    releaseFastPoll();
     const G = g;
     const S = oneScroll; oneScroll = null;
     const P = shellPan; shellPan = null;
@@ -2143,11 +2248,14 @@ let hoverSurface = false;
         if (insideShellClient(hitTest(m.x - r.left - safe.l, m.y - r.top - safe.t + keyboardShift()))) slot = SHELL_SCROLL_SLOT;
       }
       twoFinger = { last: m, accX: 0, accY: 0, dist: dist(ev.touches), win, slot };
+      if (slot >= 0) armFastPoll();
       ev.preventDefault();
       return;
     }
     if (ev.touches.length !== 1) { clearTimeout(pressTimer); return; }
-    ev.preventDefault(); down(ev.touches[0]);
+    ev.preventDefault();
+    if (edgeStart(ev.touches[0])) return;              // right edge: a window switch, decided on the move
+    down(ev.touches[0]);
   }, { passive: false });
   c.addEventListener("touchmove", ev => {
     if (twoFinger && ev.touches.length === 2) {
@@ -2176,18 +2284,30 @@ let hoverSurface = false;
       }
       twoFinger.accX += m.x - twoFinger.last.x; twoFinger.accY += m.y - twoFinger.last.y;
       twoFinger.last = m;
-      const send = (dir, n) => { if (twoFinger.slot >= 0) sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); };
+      const send = (dir, n) => { if (twoFinger.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); } };
       const ny = Math.trunc(twoFinger.accY / SCROLL_STEP), nx = Math.trunc(twoFinger.accX / SCROLL_STEP);
       if (ny) { send(ny > 0 ? 1 : 2, Math.abs(ny)); twoFinger.accY -= ny * SCROLL_STEP; }   // finger down = content up = line up
       if (nx) { send(nx > 0 ? 3 : 4, Math.abs(nx)); twoFinger.accX -= nx * SCROLL_STEP; }
       return;
     }
     if (ev.touches.length !== 1) return;
-    ev.preventDefault(); move(ev.touches[0]);
+    ev.preventDefault();
+    if (edgeSwipe && edgeMove(ev.touches[0])) return;
+    move(ev.touches[0]);
   }, { passive: false });
   const end = ev => {
     ev.preventDefault();
     if (ev.touches.length > 0) return;      // a finger is still down: nothing ends yet
+    releaseFastPoll();                      // the gesture is over: the guest goes back to its timer
+    if (edgeSwipe) {
+      const E = edgeSwipe; edgeSwipe = null;
+      /* Armed but never a swipe: it was a tap in the edge margin (a scroll bar arrow, a button
+         against the right edge). Play it back as the click it would have been. */
+      if (!E.fired && ev.type === "touchend" && E.tap) { down(E.tap); up({ type: "touchend" }); }
+      else if (!E.fired) diag("edge swipe cancelled");
+      unlockAudio("touchend");
+      return;
+    }
     const wasTwo = !!twoFinger;
     twoFinger = null;
     // A two-finger gesture that began as a single-finger press must still release that press.
