@@ -3,7 +3,7 @@
  * Runs Windows for Workgroups 3.11 in v86 on a paravirtual display adapter whose mode follows
  * the viewport (SPEC.md 2.7, 2.8). Also handles touch, the on-screen keyboard, and snapshots.
  */
-import { V86 } from "../v86/src/browser/starter.js";
+import { V86Worker } from "../v86/src/browser/worker_client.js";
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -309,19 +309,36 @@ async function clearState() {
   status("snapshot cleared");
 }
 
-/* ----------------------------------------------------------------------------------- boot */
-const emulator = new V86({
-  wasm_path: "../v86/build/" + (params.get("wasm") || "v86.wasm"),   // ?wasm=v86-base.wasm for A/B
+/* ----------------------------------------------------------------------------------- boot
+ * The emulator runs in a worker (SPEC 2026-09-03): the wasm CPU, the devices, the disk fetches and
+ * the conversion of guest pixels all happen off this thread, so a busy guest cannot delay the
+ * composite or the user's finger. `emulator` is a proxy with (almost) the same surface; the
+ * speaker and v86's own keyboard/mouse adapters still live here, on the proxy bus.
+ *
+ * Guest pixels arrive either in shared memory (cross-origin isolated, so a secure context: the
+ * https deploy and localhost) or as transferred ImageBitmaps of the rows that changed (the plain
+ * http LAN dev server, where SharedArrayBuffer is unavailable). Both end up in the same canvas,
+ * which is what the compositor draws its slices from. ?nosab=1 forces the transfer path.
+ */
+const abs = u => new URL(u, location.href).href;      // the worker resolves URLs against itself
+const guestCanvas = document.querySelector("#screen_container canvas");
+const emulator = new V86Worker({
+  worker_url: abs("../v86/src/browser/worker.js"),
+  canvas: guestCanvas,
+  shared: params.get("nosab") === "1" ? false : undefined,
+  wasm_path: abs("../v86/build/" + (params.get("wasm") || "v86.wasm")),   // ?wasm=v86-base.wasm for A/B
   memory_size: 32 * 1024 * 1024,
   vga_memory_size: 8 * 1024 * 1024,
   screen_container: $("screen_container"),
-  bios: { url: "../v86/bios/seabios.bin" },
-  vga_bios: { url: "../v86/bios/vgabios.bin" },
-  hda: HDA,
+  bios: { url: abs("../v86/bios/seabios.bin") },
+  vga_bios: { url: abs("../v86/bios/vgabios.bin") },
+  hda: Object.assign({}, HDA, { url: abs(HDA.url) }),
   boot_order: 0x132,
   autostart: false,
+  on_log: s => report("emu", s),
 });
 window.emulator = emulator;
+report("emu", `pixels: ${emulator.pixels.path} (SharedArrayBuffer ${typeof SharedArrayBuffer === "function" ? "present" : "absent"}, crossOriginIsolated ${!!self.crossOriginIsolated}${params.get("nosab") === "1" ? ", forced off" : ""})`);
 if (params.get("selftest")) import("./selftest.js").then(m => m.run());              // app tour (PLAN.md Fix 5)
 if (params.get("remote")) import("./remote.js").then(m => m.run(params.get("remote"))); // parked-phone remote control
 
@@ -1511,8 +1528,29 @@ function report(kind, detail) {
 window.addEventListener("error", ev => report("error", `${ev.message} @${ev.filename}:${ev.lineno} ${ev.error && ev.error.stack}`));
 window.addEventListener("unhandledrejection", ev => report("rejection", String(ev.reason && (ev.reason.stack || ev.reason))));
 
+/* Composite frame accounting, so "60 fps while the guest is busy" is a number rather than an
+   impression: the interval between composites, the time spent taking guest pixels across, and the
+   time spent drawing. window.pvPerf() reads and resets it. */
+const perf = { last: 0, iv: new Float32Array(600), draw: new Float32Array(600), n: 0, syncCost: 0 };
+window.pvPerf = reset => {
+  const n = Math.min(perf.n, 600);
+  const iv = Array.from(perf.iv.subarray(0, n)).sort((a, b) => a - b);
+  const dr = Array.from(perf.draw.subarray(0, n)).sort((a, b) => a - b);
+  const q = (a, p) => a.length ? +a[Math.min(a.length - 1, Math.floor(a.length * p))].toFixed(2) : 0;
+  const out = { frames: perf.n, fps: iv.length ? +(1000 / (iv.reduce((x, y) => x + y, 0) / iv.length)).toFixed(1) : 0,
+                iv_p50: q(iv, 0.5), iv_p95: q(iv, 0.95), iv_max: q(iv, 1),
+                draw_p50: q(dr, 0.5), draw_p95: q(dr, 0.95), draw_max: q(dr, 1),
+                sync_ms: +perf.syncCost.toFixed(2), path: emulator.pixels.path, guestFrames: emulator.pixels.frames };
+  if (reset !== false) { perf.n = 0; perf.syncCost = 0; emulator.pixels.cost = 0; }
+  return out;
+};
 function present() {
+  const t0 = performance.now();
   try { presentOnce(); } catch (e) { report("present", e.stack || String(e)); }
+  const t1 = performance.now();
+  if (perf.last) { const i = perf.n++ % 600; perf.iv[i] = t0 - perf.last; perf.draw[i] = t1 - t0; }
+  perf.last = t0;
+  perf.syncCost = emulator.pixels.cost;
   frames++;
   const now = performance.now();
   if (now - lastBeat > 15000) {
@@ -1520,32 +1558,67 @@ function present() {
     let ic = 0; try { ic = emulator.get_instruction_counter() >>> 0; } catch (e) {}
     const mips = lastIc ? ((ic - lastIc) >>> 0) / (now - lastBeatAt) / 1000 : 0;
     lastIc = ic; lastBeatAt = now;
-    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} mode=${guestDesktop === null ? "?" : guestDesktop ? "D" : "P"}${lastReq ? ` ${lastReq.w}x${lastReq.h}` : ""} layers=${layers.map(l => l.kind + ":" + (l.title || "").slice(0, 14)).join("|")} ready=${desktopReady} mips=${mips.toFixed(1)} pvmon=${shell.ver || "?"}`);
+    report("beat", `frames=${frames} running=${emulator.is_running && emulator.is_running()} vp=${innerWidth}x${innerHeight} mode=${guestDesktop === null ? "?" : guestDesktop ? "D" : "P"}${lastReq ? ` ${lastReq.w}x${lastReq.h}` : ""} layers=${layers.map(l => l.kind + ":" + (l.title || "").slice(0, 14)).join("|")} ready=${desktopReady} mips=${mips.toFixed(1)} pvmon=${shell.ver || "?"} pixels=${emulator.pixels.path} composite=${JSON.stringify(window.pvPerf())}`);
   }
   requestAnimationFrame(present);
 }
 
+/* What the guest painted, in guest pixels. The worker reports the rectangle it filled with every
+   frame it converts; `guestDirty` is the current composite's rectangle (null when nothing changed)
+   and `dirtyGen` counts the composites that carried pixels. The last few hundred rectangles are
+   kept with their generation, so anything cached per set of guest pixels can ask "has this
+   rectangle changed since generation N" instead of having to be thrown away wholesale.
+     pvRectDirty(x,y,w,h)             new pixels in this rectangle in the composite being drawn
+     pvRectDirtySince(gen,x,y,w,h)    ... at any point since that generation
+   which is what lets a layer whose client area has not changed be skipped instead of re-blitted
+   (the drawWindow/placeLayers side of that belongs to the gesture pass; this is the information). */
+let guestDirty = null, dirtyGen = 0;
+const DIRTY_LOG = 256;
+const dirtyLog = new Array(DIRTY_LOG).fill(null);
+let dirtyLogAt = 0;
+function noteDirty(d) {
+  dirtyGen++;
+  guestDirty = d;
+  dirtyLog[dirtyLogAt++ % DIRTY_LOG] = { gen: dirtyGen, x: d.x, y: d.y, w: d.w, h: d.h };
+}
+const hits = (r, x, y, w, h) => r.x < x + w && x < r.x + r.w && r.y < y + h && y < r.y + r.h;
+function rectDirty(x, y, w, h) { return !!guestDirty && hits(guestDirty, x, y, w, h); }
+function rectDirtySince(gen, x, y, w, h) {
+  if (gen >= dirtyGen) return false;
+  if (dirtyGen - gen > DIRTY_LOG) return true;             // older than the log: assume changed
+  for (let i = 1; i <= DIRTY_LOG; i++) {
+    const r = dirtyLog[(dirtyLogAt - i + DIRTY_LOG * 2) % DIRTY_LOG];
+    if (!r || r.gen <= gen) break;
+    if (hits(r, x, y, w, h)) return true;
+  }
+  return false;
+}
+window.pvRectDirty = rectDirty;
+window.pvRectDirtySince = rectDirtySince;
+window.pvDirty = () => ({ rect: guestDirty, gen: dirtyGen, path: emulator.pixels.path,
+                          changes: emulator.pixels.change_count, cost: emulator.pixels.cost });
+
 /* The dialog hole fill and the menu strip's fill sample one guest pixel each. A readback
-   (drawImage + getImageData) is the most expensive thing the compositor does and these points are
-   the background of a window that is not repainting: sampled once and remembered, cleared whenever
-   the guest publishes a new layout (a dialog came or went) and at most half a second old anyway,
-   so a program that changes its background is followed without reading pixels 60 times a second. */
+   (drawImage + getImageData) is the most expensive thing the compositor does, and these points are
+   the background of a window that is not repainting: sampled once and remembered until the guest
+   paints over that very pixel (the dirty log above), so nothing is read 60 times a second and a
+   program that does change its background is still followed exactly. The cache is also dropped
+   whenever the guest publishes a new layout, since a dialog that came or went moves the points. */
 let sampleCanvas = null;
 const sampleCache = new Map();
-let sampleCacheAt = 0;
 function dropSampleCache() { sampleCache.clear(); }
 function sampleColour(src, x, y) {
-  const now = performance.now();
-  if (now - sampleCacheAt > 500) { sampleCache.clear(); sampleCacheAt = now; }
+  x = Math.round(x); y = Math.round(y);
   const key = (x << 12) ^ y;
   const had = sampleCache.get(key);
-  if (had !== undefined) return had;
+  if (had !== undefined && !rectDirtySince(had.gen, x, y, 1, 1)) return had.c;
   if (!sampleCanvas) { sampleCanvas = document.createElement("canvas"); sampleCanvas.width = sampleCanvas.height = 1; }
   const sg = sampleCanvas.getContext("2d", { willReadFrequently: true });
   sg.drawImage(src, x, y, 1, 1, 0, 0, 1, 1);
   const d = sg.getImageData(0, 0, 1, 1).data;
   const col = `rgb(${d[0]},${d[1]},${d[2]})`;
-  sampleCache.set(key, col);
+  if (sampleCache.size > 512) sampleCache.clear();
+  sampleCache.set(key, { c: col, gen: dirtyGen });
   return col;
 }
 /* drawImage throws on an empty source rectangle; a window can legitimately have one (a zero-size
@@ -1568,7 +1641,13 @@ function drawFirstFrame(g, vw, vh) {
   if (!firstFrameShown) { firstFrameShown = true; report("firstframe", `shown ${img.width}x${img.height} at ${Math.round(performance.now() - pageStart)}ms`); }
 }
 function presentOnce() {
-  const src = document.querySelector("#screen_container canvas");
+  /* One place where guest pixels reach this thread: the rows the worker says changed are copied
+     out of shared memory (or drawn from the ImageBitmaps it transferred) into the source canvas.
+     Everything below draws slices of that canvas. */
+  const dirty = emulator.pixels.sync();
+  guestDirty = null;
+  if (dirty) { wd.lastChange = performance.now(); wd.frameSig = emulator.pixels.change_count; noteDirty(dirty); }
+  const src = guestCanvas;
   const pres = $("pres");
   if (!pres) return;
   const [fw, fh] = fullViewport();
@@ -1611,20 +1690,9 @@ function presentOnce() {
       for (const w of placed) drawWindow(g, src, w);  // back to front
       if (shift) g.translate(0, shift);
     }
-    // Did the composite change? A cheap signature of a few hundred source pixels is enough for the
-    // watchdog to tell "the guest is painting" from "nothing has moved since the last input".
-    if ((frames & 7) === 0) {
-      try {
-        const sg = src.getContext("2d");
-        const step = Math.max(1, Math.floor(src.height / 24));
-        let sig = 0;
-        for (let y = 0; y < src.height; y += step) {
-          const row = sg.getImageData(0, y, Math.min(src.width, 1024), 1).data;
-          for (let i = 0; i < row.length; i += 64) sig = (sig * 31 + row[i] + row[i + 1] * 7 + row[i + 2] * 13) | 0;
-        }
-        if (sig !== wd.frameSig) { wd.frameSig = sig; wd.lastChange = performance.now(); }
-      } catch (e) {}
-    }
+    /* "Has the guest painted?" used to be a per-frame getImageData of two dozen source rows.
+       The worker now says exactly which rows changed, so the signature is its running count of
+       dirty regions (set above, in sync()) and the readback is gone. */
   }
 }
 requestAnimationFrame(present);
@@ -2428,22 +2496,21 @@ onOrientation();
    dev server: CPU state, idle counters, the protocol tail, the recent input, the layers, and a PNG
    of the composite. At most one bundle a minute. Until PVMON ships the heartbeat (`PVH`) only the
    input-without-change rule can fire. */
-function cpuSnapshot() {
-  try {
-    const cpu = emulator.v86.cpu;
-    const r = cpu.reg32, s = cpu.sreg;
-    const hex = v => (v >>> 0).toString(16).padStart(8, "0");
-    const idle = i => { try { return cpu.wm.exports.pv_idle_stat(i); } catch (e) { return "?"; } };
-    return { eax: hex(r[0]), ecx: hex(r[1]), edx: hex(r[2]), ebx: hex(r[3]), esp: hex(r[4]), ebp: hex(r[5]), esi: hex(r[6]), edi: hex(r[7]),
-             eip: hex(cpu.instruction_pointer[0]), prev_ip: hex(cpu.previous_ip[0]), cs: s[1].toString(16), ds: s[3].toString(16), ss: s[2].toString(16),
-             flags: hex(cpu.flags[0]), IF: !!(cpu.flags[0] & 0x200), VM: !!(cpu.flags[0] & 0x20000), in_hlt: cpu.in_hlt[0],
-             cr0: cpu.cr ? hex(cpu.cr[0]) : "?", idle_halted: idle(0), idle_passed: idle(1) };
-  } catch (e) { return { error: String(e) }; }
+/* The registers live in the worker, so they cannot be read synchronously any more: the worker
+   formats the same bundle (v86/src/browser/worker.js cpu_snapshot) and the watchdog keeps the
+   last answer, refreshed every second alongside its other polling. */
+let cpuCache = { pending: false };
+function refreshCpuSnapshot() {
+  if (cpuCache.pending) return;
+  cpuCache.pending = true;
+  emulator.cpu_snapshot().then(s => { cpuCache = Object.assign({ at: Date.now() }, s); }).catch(e => { cpuCache = { error: String(e) }; });
 }
+function cpuSnapshot() { const c = Object.assign({}, cpuCache); delete c.pending; return c; }
 let wdLastMipsIc = 0, wdLastMipsAt = 0, wdMips = 0;
 function watchdog(force) {
   const now = performance.now();
   if ((document.hidden && !force) || !desktopReady) return;
+  refreshCpuSnapshot();
   try { const ic = emulator.get_instruction_counter() >>> 0; if (wdLastMipsAt) wdMips = ((ic - wdLastMipsIc) >>> 0) / (now - wdLastMipsAt) / 1000; wdLastMipsIc = ic; wdLastMipsAt = now; } catch (e) {}
   const beatStale = wd.beats > 0 && now - wd.lastBeat > 5000;
   const inputStuck = wd.lastInput && now - wd.lastInput > 5000 && wd.lastChange < wd.lastInput && now - wd.lastInput < 20000;

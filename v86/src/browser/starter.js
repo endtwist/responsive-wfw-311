@@ -304,7 +304,14 @@ V86.prototype.continue_init = async function(emulator, options)
         this.absolute_pointer_enabled = enabled;
     }, this);
 
-    if(screen_options.container)
+    if(screen_options.adapter)
+    {
+        // responsive-wfw311: the emulator runs in a worker and the caller brings its own screen
+        // adapter (v86/src/browser/worker_screen.js), which has no DOM to draw into.
+        this.screen_adapter = screen_options.adapter;
+        this.screen_fill_buffer = () => this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer();
+    }
+    else if(screen_options.container)
     {
         this.screen_adapter = new ScreenAdapter(screen_options, () => this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer());
     }

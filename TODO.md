@@ -8,23 +8,27 @@ people hold a phone. Landscape is explicitly not a priority.
 
 ## Agreed with Josh
 
-0. **Emulator off the main thread (smoothness).** Today one thread runs the guest, converts
-   its pixels and composites, so a busy guest delays both the frame and your finger. Run the
-   emulator in a worker so the composite keeps its own frame budget (60, and 120 on Josh's
-   phone, which is ProMotion and our composite is cheap) and input is never blocked. Modest
-   throughput gain too, from not being interrupted. Blockers to solve: getting guest pixels
-   across without a copy needs a shared buffer, which needs cross-origin isolation headers
-   (we control them on the Vercel deploy, not on the plain-http LAN dev server), so keep a
-   copy-based fallback. This is the single biggest change in how the thing feels under load.
-   Companions to it, both nearly free and worth doing first:
-   - Turn off v86's debug flag (assertion and logging branches live in the hot paths).
-   - Composite only layers whose pixels changed (the emulator already tracks dirty rows; we
-     re-blit every layer every frame).
+0. ~~**Emulator off the main thread (smoothness).**~~ Done 2026-09-03 (SPEC): the wasm CPU, the
+   devices, the disk fetches and the pixel conversion run in a worker; the page keeps the
+   compositor, the input, the audio and the snapshots. Guest pixels come across as dirty rows
+   only, through a `SharedArrayBuffer` where the page is cross-origin isolated (headers now in
+   `vercel.json` and the dev server) and as transferred `ImageBitmap`s otherwise — the plain-http
+   LAN origin can never be a secure context, and that is the one Josh's phone uses; the path is
+   chosen at run time, logged, and `?nosab=1` forces the transfer one. At 6x CPU throttle (this
+   Mac standing in for the phone) a repainting guest took the composite to 31 fps with a 68 ms
+   p95 frame and a 141 ms p95 input queue; it is now 60 fps, 20 ms p95, 29 ms p95 input queue,
+   with the absolute-pointer round trip still at 5 ms and its tail improved from 71 ms to 5 ms.
+   `tools/composite-bench.mjs` is the harness. Still open, and now cheap:
+   - Turn off v86's debug flag (assertion and logging branches live in the hot paths) — left to
+     the driver pass, which owns the build.
+   - Composite only layers whose pixels changed. The information is published now
+     (`pvRectDirty`, `pvRectDirtySince`, backed by a ring of the worker's dirty rectangles with
+     generations); what is left is the skip itself in `drawWindow`/`placeLayers`.
    - ~~Stop the per-frame `getImageData` readback in the dialog hole fill.~~ Done 2026-09-03
-     (SPEC): `sampleColour` caches per point, dropped on every publish and after 500 ms — 2
-     readbacks per 30 frames where it was 2 per frame. The heavy readback left in the composite
-     loop is the watchdog's frame signature (25 rows every 8th frame), which belongs to whoever
-     lands the worker.
+     (SPEC): `sampleColour` caches per point; since the worker landed, an entry is invalidated
+     only when the guest has actually painted over that pixel, so there is no timer and no
+     readback on a still background. The watchdog's frame signature (25 rows every 8th frame)
+     is gone with it: the worker says which rows changed.
    - (Rejected by Josh: optimistic scrolling, i.e. sliding the layer's own pixels with the
      finger and filling the leading edge with a sampled background colour. No faked pixels
      standing in for the guest's real scroll; fix the latency instead — the driver blit pass

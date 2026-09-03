@@ -162,7 +162,14 @@ http.createServer((req, res) => {
   const size = fs.statSync(file).size;
   const headers = { "Content-Type": mime[path.extname(file)] || "application/octet-stream",
     "Accept-Ranges": "bytes", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*",
-    "Last-Modified": fs.statSync(file).mtime.toUTCString() };
+    "Last-Modified": fs.statSync(file).mtime.toUTCString(),
+    /* Cross-origin isolation, which is what SharedArrayBuffer needs: the emulator worker then
+       writes guest pixels straight into memory the compositor reads (SPEC 2026-09-03). It only
+       takes effect in a secure context, so it works on http://localhost and is inert over plain
+       http on the LAN -- which is why the page keeps a transferred-ImageBitmap path for phones. */
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Embedder-Policy": "require-corp",
+    "Cross-Origin-Resource-Policy": "cross-origin" };
   // The service worker is registered with scope "/" from /web/sw.js: allowed here, and a real
   // deployment must send the same header (or serve sw.js from the root).
   if (url === "/web/sw.js") headers["Service-Worker-Allowed"] = "/";

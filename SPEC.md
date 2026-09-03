@@ -2585,3 +2585,150 @@ https://responsive-wfw-311.vercel.app), but neither the floppy nor any game bina
   `image/changes-local/`. The built image and its split parts are uploaded from the working tree,
   so the games reach production without ever entering git. A fresh clone with no
   `image/changes-local/` builds the same image minus the pack, SkiFree included.
+
+### 2026-09-03 — the emulator runs in a worker: the composite keeps its own frame budget (TODO 0)
+
+Everything the guest costs — the wasm CPU, the devices, the disk fetches, and the palette
+conversion of guest pixels into RGBA — now happens on a worker thread. The page keeps the
+compositor, the input translation, the audio (there is no `AudioContext` in a worker) and the
+snapshots. Before this, one thread did all of it, so a repainting guest delayed both the frame and
+the finger; a phone shows that as the whole interface going sticky while a window paints.
+
+**Where the pixels go.** The worker owns a screen adapter of its own
+(`v86/src/browser/worker_screen.js`; v86's `ScreenAdapter` needs a DOM canvas and, worse, would
+hand the page pixels it has to read back). `vga.js` already reports which rows changed —
+`screen_fill_buffer` passes `update_buffer` a layer list with a `buffer_y`/`buffer_height` — so the
+adapter only ever moves those rows, by one of two routes chosen at run time:
+
+- **`shared`** — the page is cross-origin isolated, so `SharedArrayBuffer` exists: the adapter
+  converts straight into a SAB whose first 32 words are a control block (`worker_proto.js`: frame
+  sequence, the pending dirty rectangle under a CAS spin lock, and a mirror of the guest scalars
+  the page polls). Per composite the page copies the dirty rows into a scratch `ImageData` and does
+  one `putImageData`. No message per frame; the compositor reads whenever it likes.
+- **`bitmap`** — no `SharedArrayBuffer`. The LAN dev server is plain http, which can never be a
+  secure context and therefore never cross-origin isolated, and that is the origin Josh's phone
+  uses. The adapter puts each changed region into an `OffscreenCanvas`, takes an `ImageBitmap`
+  (`transferToImageBitmap`, synchronous and ordered) and transfers it; the page `drawImage`s it at
+  its offset. A third path (`buffer`, a transferred `ArrayBuffer` the page `putImageData`s) covers
+  a browser without `OffscreenCanvas`.
+
+Both end up in the same hidden canvas the compositor has always drawn its slices from, so
+`presentOnce`, `placeLayers` and `drawWindow` did not change. The choice is logged to the diag
+trace on load (`emu pixels: shared|bitmap (SharedArrayBuffer …, crossOriginIsolated …)`) and shown
+in every `beat` line; `?nosab=1` forces the transfer path. `Cross-Origin-Opener-Policy:
+same-origin` and `Cross-Origin-Embedder-Policy: require-corp` are now sent by `vercel.json` (all
+paths) and by `tools/devserver.mjs`; everything the page loads is same-origin, so `require-corp`
+costs nothing.
+
+**Where the composite stayed.** On the page. Drawing it in the worker through
+`transferControlToOffscreen` was considered and rejected: it would have had to take the gesture
+code, the hit testing and the layer placement with it (all of which live on the main thread with
+the DOM events), and it buys nothing — the composite is four or five `drawImage` calls, measured
+below at 0.2–0.6 ms a frame. Josh's requirement was that input is never blocked, and that is
+satisfied by moving the *emulator*, not the compositor.
+
+**Measured** (`tools/composite-bench.mjs`, new: the real page in a headless Chromium at 375x812
+@3x, the same probes against both builds — the interval between the page's own
+`requestAnimationFrame` callbacks, `performance.now()` at the head of the touch handler minus the
+event's own `timeStamp` (how long the finger's event waited for this thread), and the
+absolute-pointer round trip. Busy = File Manager launched and then minimised/restored on a loop,
+i.e. repeated full repaints. `--throttle 6` slows every thread 6x, which is how this Mac stands in
+for the phone; SPEC already has the phone running the guest 5–10x slower than node here.)
+
+| | | fps | frame p50 | p95 | max | frames >20 ms | >33 ms | input queue p50 | p95 | pointer round trip p50 / p95 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **before** (one thread) | idle | 34.2 | 16.8 | **163** | 184 | 50 | 33 | 32 | 71 | 5.3 / 17.4 |
+| | busy | 30.7 | 26.2 | **68** | 182 | 123 | 88 | **81** | **141** | 6.4 / **71** |
+| **after** (worker, shared) | idle | **60** | 16.7 | 19.3 | 45 | 13 | 1 | 27 | 48 | 4.3 / 5.8 |
+| | busy | **60** | 16.7 | 19.7 | 26 | 14 | 0 | 26 | 29 | 4.6 / 5.5 |
+| **after** (worker, bitmap) | idle | **60** | 16.6 | 18.2 | 39 | 12 | 1 | 25 | 49 | 4.5 / 5.5 |
+| | busy | **60** | 16.7 | 18.4 | 36 | 10 | 1 | 26 | 30 | 4.3 / 5.3 |
+
+(6x throttled, 6 s per case. Unthrottled, the difference is the same shape but small on this
+machine: before 15 late frames idle and 27 busy per 6 s, after 0 and 0.) The input-queue floor of
+~26 ms is the cost of injecting the tap over CDP, identical in both builds; what matters is that it
+no longer *grows* with what the guest is doing — 81 ms p50 and 141 ms p95 before, 26 and 29 after.
+The absolute-pointer confirmation (`pv-mouse-abs` + a PS/2 packet, then waiting for the guest's
+cursor report) stays inside the 5–11 ms band SPEC recorded for the single-threaded page: 4.3–5.1 ms
+p50, and its tail is *better*, because the report no longer waits behind a repaint (71 ms p95
+before, 5.5 after). The worker hop itself costs about 1–2 ms: `TIME_PER_FRAME` in the rust main
+loop is 1 ms, so a message posted to the worker is handled within one slice.
+
+Main-thread pixel cost per composite: `presentOnce` 0.2–0.6 ms unthrottled (1.1–2.7 ms at 6x);
+taking the pixels across cost 5.9 ms (idle) / 34.8 ms (busy) of main-thread time per 6 s on the
+shared path and 1.8 / 3.9 ms on the bitmap path. The transfer path is therefore not a degraded
+fallback — `drawImage` of an `ImageBitmap` is a texture upload where the shared path is a `memcpy`
+plus a `putImageData`, and at 6x throttle that shows up plainly (141 ms vs 0.01 ms per 6 s busy).
+Shared is still the default where it is available, because it needs no message per frame and does
+no `ImageBitmap` allocation on the worker, which is the thread we have just freed; if the phone
+disagrees, `?nosab=1` is the A/B and flipping the default is one line.
+
+**Companions in the same pass.**
+- The per-frame `getImageData` of two dozen source rows that answered "has the guest painted?" for
+  the watchdog is gone: the worker says exactly which rows changed, so the frame signature is its
+  running count of dirty regions.
+- Dirty-region information is published for the compositor: `pvRectDirty(x,y,w,h)` (new pixels in
+  that guest rectangle in the composite being drawn) and `pvRectDirtySince(gen,x,y,w,h)` (at any
+  point since that generation), backed by a 256-entry ring of the rectangles with their
+  generations. The per-layer skip in `drawWindow`/`placeLayers` is deliberately left to the pass
+  that owns those functions; this is the information it needs.
+- `sampleColour` (the dialog hole fill and the menu strip's fill) keeps its cache from the
+  scroll-latency pass but no longer expires it on a 500 ms timer: an entry is now invalidated only
+  when the guest has actually painted over that pixel, so a background that does change is still
+  followed exactly and nothing is read back on a timer.
+- v86's debug flag was left alone: it belongs to the driver pass.
+
+**API surface.** `window.emulator` is a `V86Worker` (`v86/src/browser/worker_client.js`) that keeps
+the surface the page, `web/selftest.js`, `web/remote.js` and the diag paths use. Unchanged and
+synchronous: `bus.send` / `bus.register` / `bus.unregister`, `add_listener` / `remove_listener`,
+`is_running()`, `get_instruction_counter()`, `keyboard_send_text`, `keyboard_send_scancodes`,
+`mouse_set_enabled`, `speaker_adapter.audio_context` (the real `SpeakerAdapter`, and v86's own
+keyboard and mouse adapters, are constructed on the page against the proxy bus), `v86.running`,
+`v86.do_tick()`, `v86.cpu.instruction_counter[0]`, `v86.cpu.devices.vga.pv_cmd`,
+`v86.cpu.devices.vga.pv_cmd_str.length`, `v86.cpu.wm.exports.pv_idle_stat(i)`. Those last few are a
+mirror: on the shared path they are read live out of the control block, otherwise they arrive with
+each converted frame. `pv_cmd` additionally counts a command the page has sent but the worker has
+not yet confirmed delivering as busy, so the command register cannot be overwritten before PVMON
+takes it. Already asynchronous and unchanged in shape: `run`, `stop`, `restore_state`, `save_state`
+(the state comes back as a transferred `ArrayBuffer` — 14.9 MB in 11 ms).
+
+What changed for callers:
+- `emulator.v86.cpu.reg32` / `sreg` / `flags` / `instruction_pointer` / `in_hlt` / `cr` are **not**
+  mirrored (they change every instruction). Use `await emulator.cpu_snapshot()`, which formats the
+  same bundle in the worker; `app.js`'s watchdog keeps the last answer, refreshed every second.
+- `emulator.screen_adapter.update_screen()` / `get_text_screen()` / `get_text_row()` are now
+  **async** (they return promises).
+- `emulator.screen_set_scale()` and `screen_make_screenshot()` are no-ops: the page owns the canvas
+  and composites it itself.
+- `emulator.read_memory(offset, length)` is now async. `write_memory` is not proxied (nothing on
+  the page used it).
+- The node harnesses (`tools/tour.mjs`, `probe.mjs`, `redraw-bench.mjs`, `desktop-probe.mjs`,
+  `print-test.mjs`) and `web/dev.html` still construct `V86` directly and are untouched.
+- `v86/src/browser/starter.js` gained one branch: `screen: { adapter }` uses a caller-supplied
+  screen adapter and exposes `emulator.screen_fill_buffer`.
+
+**Verified.** `node tools/tour.mjs --apps NOTEPAD,SOL` pass=16 fail=1 (the pre-existing
+`dlgfit 604x318`), unchanged from main. In the page: `?selftest=1` pass=19 fail=1 (the same one),
+PVMON v36; `/solitaire` up from the snapshot in 1354 ms over localhost (shared) and 1305 ms over
+the LAN IP (bitmap, chosen automatically because plain http is not a secure context); `?remote=`
+drives taps, keys, `eval` (including `emulator.v86.cpu.devices.vga.pv_cmd`) and `shot`;
+`?keepalive=1` with the page hidden advances the instruction counter (~1 M in 4 s, as before —
+the heartbeat worker drives `do_tick` one tick at a time and the mirror is refreshed with it);
+`save_state` 14.9 MB in 11 ms and a reload back to a desktop in 1186 ms. Audio round-trips the
+bridge: launching `SOUNDREC.EXE /PLAY /CLOSE C:\WINDOWS\CHIMES.WAV` produced
+`dac-tell-sampling-rate`, `dac-enable`, 64 `dac-send-data` blocks and `dac-disable` at the page's
+`SpeakerAdapter` (`AudioContext` running at 48 kHz); sb16 already allocates and transfers those
+buffers, which is what v86's original worker-bus design expected. Visual checks in the pane
+(mobile preset): shell, Notepad, its File menu, and the File→Open dialog composited over its owner
+with the hole filled — screenshots in `shots/`. Disk both ways: the split zstd parts (the
+production path, decompressed in the emulator worker) and a whole `.img` over Range requests.
+
+**Risks and notes.** v86's yield mechanism and its zstd helper both spawn nested workers from
+inside our worker; the zstd one is replaced with the in-place `zstd_decompress` (it is already off
+the page's thread, and the nested-worker variant would transfer the wasm module bytes away). While
+the page is hidden the worker's own timers are throttled, so pixel conversion stops — which is
+correct, nothing is compositing — and `?keepalive=1` still drives the guest by message.
+`window.emulator` exists synchronously but the worker boots asynchronously, so a very early
+`bus.send` is delivered once the worker is up rather than dropped (subscriptions are replayed).
+The `shared` path allocates a new `SharedArrayBuffer` per screen size and posts it, so a mode
+change costs one allocation; nothing else resizes it.
