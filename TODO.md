@@ -77,12 +77,16 @@ people hold a phone. Landscape is explicitly not a priority.
       "Segment Load Failure" earlier), and today each deploy ships only the current image, so
       yesterday's link breaks tomorrow. Blob-hosted parts outlive deployments and shrink the
       deploy.
-    - **Expiry**: Blob does not track reads. Start with age-based expiry (one cron, no
-      bookkeeping); add a last-read touch through a tiny function later if live links start
-      expiring under people.
+    - **Expiry, with a last-read touch, in the first version.** Blob does not track reads, so
+      loads go through a tiny function that stamps a last-read time, and the cron deletes by
+      that rather than by age. A link nobody opens expires; a link people keep using does not.
     - **Trigger must be native**: a small Win16 "Share Session" program (same shape as
       ABOUT.EXE) tells the host over the debug channel; the host uploads and hands the link to
-      the iOS share sheet (item 7). No page chrome.
+      the iOS share sheet (item 7). No page chrome. Put it in **both** places: a Program
+      Manager item in Main (where you would look for it), and a desktop icon by starting it
+      minimised from WIN.INI's `run=` — a minimised window is exactly how Windows 3.1 puts an
+      icon on the bare desktop, so it stays period-correct, and our icon placement already
+      keeps labels inside the column.
     - **Say plainly that it publishes everything**: a snapshot is a photograph of the whole
       machine, including text typed in Notepad and anything on screen. Links must be
       unguessable, not sequential.
