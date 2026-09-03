@@ -6,6 +6,10 @@ PLAN.md holds the invariants these all have to respect.
 Guiding idea (Josh): a website in the shape of an OS. Portrait is the target, the way most
 people hold a phone. Landscape is explicitly not a priority.
 
+Numbers are stable: a finished item keeps its number and is struck through in place, so a
+reference like "item 3" always means the same thing. Slugs in brackets are the safer way to
+refer to one.
+
 ## Agreed with Josh
 
 0. ~~**Emulator off the main thread (smoothness).**~~ Done 2026-09-03 (SPEC): the wasm CPU, the
@@ -24,7 +28,7 @@ people hold a phone. Landscape is explicitly not a priority.
    - Composite only layers whose pixels changed. The information is published now
      (`pvRectDirty`, `pvRectDirtySince`, backed by a ring of the worker's dirty rectangles with
      generations); what is left is the skip itself in `drawWindow`/`placeLayers`.
-0. **Emulator off the main thread (smoothness).** Today one thread runs the guest, converts
+0. [emulator-worker] **Emulator off the main thread (smoothness).** Today one thread runs the guest, converts
    its pixels and composites, so a busy guest delays both the frame and your finger. Run the
    emulator in a worker so the composite keeps its own frame budget (60, and 120 on Josh's
    phone, which is ProMotion and our composite is cheap) and input is never blocked. Modest
@@ -51,7 +55,7 @@ people hold a phone. Landscape is explicitly not a priority.
      the host arms `CMD_FASTPOLL` for the length of a gesture and PVMON's message loop peeks
      instead of blocking — 54 ms median delivery down to 1-2 ms, idle unchanged at 0.4 MIPS.
    - (Rejected by Josh: drawing ahead of the viewport by oversizing scroll windows.)
-1. **Blitting for OS-level actions.** Mostly done 2026-09-03 (SPEC): the adapter copies
+1. [blitting] **Blitting for OS-level actions.** Mostly done 2026-09-03 (SPEC): the adapter copies
    rectangles inside the frame buffer for the driver (DISPI 0x20-0x26, seven port writes
    instead of a read-plus-write per four pixels), and the rust A000 fast path now covers
    chain-4 mode, which was every remaining JS write. Notepad and Write scrolling 13-30x
@@ -63,11 +67,11 @@ people hold a phone. Landscape is explicitly not a priority.
    AllocSelector alone cannot reach physical 0xE0000000. Still repaint-bound and untouched:
    window switch and resize (neither blits in the phone layout) and File Manager's list
    scroll (GDI does it, not a screen-to-screen blit).
-2. ~~**Edge swipe to switch windows.**~~ Done 2026-09-03 (SPEC): a level leftward swipe starting in
+2. [edge-swipe] ~~**Edge swipe to switch windows.**~~ Done 2026-09-03 (SPEC): a level leftward swipe starting in
    the right 24 px brings the back-most window forward (CMD_ACTIVATE), so repeated swipes cycle;
    the right edge only, never over chrome (the menu-bar pan and the caption boxes keep their
    gestures), and a vertical wander or a tap in the margin is handed to the ordinary pipeline.
-3. **Per-app screen rectangle = its slot.** On each task switch, write that app's slot into
+3. [screen-rect] **Per-app screen rectangle = its slot.** On each task switch, write that app's slot into
    the screen size and desktop rectangle USER keeps in memory; real values for the shell and
    PVMON. Fixes screen-rect intersections (Paintbrush's cursor clip), dialog centring, self
    sizing, default placement. Does not replace host scaling or input translation. Scope as a
@@ -77,20 +81,20 @@ people hold a phone. Landscape is explicitly not a priority.
    the snapshot; and running a program (F5) panicked v86 on `INT EFh`, a vector past the DOS VM's
    IDT limit, which is a `#GP` on a real 386. A windowed PIF plus a one-line CPU fix; EDIT and the
    other DOS programs run under the already-windowed `_DEFAULT.PIF`.
-5. **Files in and out.** Nothing can enter or leave today except a printed PDF. Give the guest
+5. [files-io] **Files in and out.** Nothing can enter or leave today except a printed PDF. Give the guest
    a second disk the host reads and writes (a FAT image mounted as a drive), so a file dropped
    on the page appears in File Manager, and anything saved there comes back to the phone. The
    guest just sees a disk; no chrome.
-6. **Clipboard bridge.** Copy in Notepad or Write and paste into iOS, and the reverse. The
+6. [clipboard] **Clipboard bridge.** Copy in Notepad or Write and paste into iOS, and the reverse. The
    guest clipboard plus the hidden input, no visible UI.
-7. **Share sheet for printed PDFs.** A print currently downloads. Hand it to the iOS share
+7. [share-sheet] **Share sheet for printed PDFs.** A print currently downloads. Hand it to the iOS share
    sheet instead so printing feels finished.
-8. **Networking.** This is Windows *for Workgroups*, and v86 has a network card with a
+8. [networking] **Networking.** This is Windows *for Workgroups*, and v86 has a network card with a
    fetch-based backend. Even partial TCP/IP puts a period-correct browser and file sharing in
    reach. The largest item on the list and the most distinctive.
-9. **Deep links with state.** `/solitaire` exists; extend to opening a specific document
+9. [deep-links] **Deep links with state.** `/solitaire` exists; extend to opening a specific document
    (Write, Notepad, Paintbrush) and to resuming a saved session, so a link is shareable.
-9b. **Shareable session snapshots (blob-backed).** A link that drops someone into a
+9b. [session-snapshots] **Shareable session snapshots (blob-backed).** A link that drops someone into a
     mid-Solitaire game, which encoded state cannot do because the deal lives in app memory.
     The page already saves and restores whole-machine state; add: host gzips it (~2 MB) and
     uploads to Vercel Blob, the link carries the blob id, opening it restores in about the
@@ -115,15 +119,15 @@ people hold a phone. Landscape is explicitly not a priority.
       unguessable, not sequential.
     - Sequence after items 5 (files in/out) and 6 (clipboard), which unlock the smaller
       sharing wins first.
-10. **Screen-reader access.** The page is pixels, so VoiceOver sees nothing. Build an invisible
+10. [screen-reader] **Screen-reader access.** The page is pixels, so VoiceOver sees nothing. Build an invisible
     accessibility tree from the window, menu and control information the guest already
     reports. Not visible chrome, so it stays inside the rule.
-11. **First-run note as ABOUT.EXE.** Done 2026-09-03 (SPEC): `guest/about/` builds ABOUT.EXE with
+11. [about-exe] **First-run note as ABOUT.EXE.** Done 2026-09-03 (SPEC): `guest/about/` builds ABOUT.EXE with
     the Watcom toolchain, staged as `image/changes/windows/ABOUT.EXE`, opened once by WIN.INI
     `[windows] run=` and suppressed afterwards by `[PVMon] AboutShown`; "Read Me First" in Main
     shows it again. Remaining: the `/about` alias in `web/app.js`'s `APPS` table.
 
-14. **First-open latency.** Launching a program takes about a second on the phone, and it is all
+14. [qbasic] **First-open latency.** Launching a program takes about a second on the phone, and it is all
     guest work: Windows loading the executable and painting its first window. The driver agent
     measured the cost and it is NOT port-trapped disk I/O (this guest uses ATA DMA; a Paintbrush
     launch does zero IDE data-port reads) — it is INT 13h reflection through WIN386 plus the
