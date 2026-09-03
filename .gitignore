@@ -7,6 +7,10 @@ image/*.img
 image/*.img.*
 image/parts/
 image/floppies/
+# Josh's own install media, expanded and staged for the build (Best of Microsoft Entertainment
+# Pack): the built image carries it, git never does. changes/games/ stays SkiFree-only so a clone
+# without this directory still builds a working image.
+image/changes-local/
 *.img
 *.iso
 *.7z

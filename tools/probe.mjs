@@ -19,6 +19,8 @@
  *   cursor:1000,500         absolute pointer to x,y and print where the guest says it landed
  *   tap                     tap the middle of the current window's client area (absolute pointer)
  *   down[:ms] / up[:ms]     left button (then wait ms, default 40)
+ *   rdown[:ms] / rup[:ms]   right button — what the host's long-press-then-release sends
+ *                           (web/app.js LONG_PRESS_MS): JezzBall's wall-orientation toggle
  *   hide / show             CMD_CURSOR 0 / 1 (the host hides the pointer during touch)
  *   delta:dx,dy             one relative PS/2 packet, print the report
  *   sine:x0,y0,x1,y1,n,amp[,pace]   n absolute placements along the segment displaced by amp*sin (a
@@ -27,6 +29,10 @@
  *   probe[:1]               PVMON CMD_PROBE: metrics, cursor clip, pointer, capture, children of the window
  *                           under the pointer; :1 = the ClipCursor experiment
  *   beats                   PVMON heartbeat (PVH) gaps so far
+ *   audio                   what the SB16 has been asked to play: dac-enable/disable transitions
+ *                           and sampling rates (the guest really started a DMA wave playback).
+ *                           v86's OPL/FM registers are accepted but not synthesised, so MIDI
+ *                           through MSADLIB.DRV never shows up here — see SPEC 2026-09-03.
  *   close                   CMD_CLOSE the current slot, wait for it to go (N to a save box)
  *   shellsize:700           CMD_SHELLSIZE
  *   republish               CMD_REPUBLISH
@@ -86,6 +92,21 @@ emulator.bus.register("pv-debug", line => { if (/^PVH /.test(line)) beats.push(p
 const beatGaps = () => { const g = []; for (let i = 1; i < beats.length; i++) g.push(Math.round(beats[i] - beats[i - 1])); return g; };
 let cursor = null, cursorSeq = 0;
 emulator.bus.register("pv-cursor", xy => { cursor = { x: xy[0], y: xy[1] }; cursorSeq++; });
+/* Sound: with disable_speaker there is no consumer asking for samples, but the SB16 still
+   announces every playback the guest starts (dac-enable) and the rate it set. */
+/* ... and a headless stand-in for browser/speaker.js: pull samples on a timer the way the
+   AudioWorklet does and measure them, so "did that tap play a sound?" has an answer with no
+   audio device. Peak is the loudest |sample| since the last `audio` step. */
+const audio = { enable: 0, disable: 0, rates: [], blocks: 0, samples: 0, peak: 0 };
+emulator.bus.register("dac-enable", () => audio.enable++);
+emulator.bus.register("dac-disable", () => audio.disable++);
+emulator.bus.register("dac-tell-sampling-rate", r => { if (!audio.rates.includes(r)) audio.rates.push(r); });
+emulator.bus.register("dac-send-data", d => {
+  const ch = d[0]; if (!ch || !ch.length) return;
+  audio.blocks++; audio.samples += ch.length;
+  for (let i = 0; i < ch.length; i++) { const v = Math.abs(ch[i]); if (v > audio.peak) audio.peak = v; }
+});
+setInterval(() => emulator.bus.send("dac-request-data"), 20).unref?.();
 
 const key = async (sc, down) => { emulator.bus.send("keyboard-code", down ? sc : sc | 0x80); await sleep(30); };
 const press = async sc => { await key(sc, true); await key(sc, false); };
@@ -99,6 +120,7 @@ async function place(x, y) {
   return cursorSeq !== seq ? cursor : null;
 }
 const click = async down => emulator.bus.send("mouse-click", [down, false, false]);
+const rclick = async down => emulator.bus.send("mouse-click", [false, false, down]);
 const until = async (pred, timeout, step = 40) => { const s = performance.now(); for (;;) { const v = pred(); if (v) return v; if (performance.now() - s > timeout) return null; await sleep(step); } };
 const fmt = L => `${L.kind}${L.slot} win ${L.wx},${L.wy} ${L.ww}x${L.wh} client ${L.gx},${L.gy} ${L.gw}x${L.gh} "${L.title}"`;
 const dump = () => { for (const L of st.layers) console.log("  " + fmt(L)); };
@@ -177,6 +199,7 @@ for (const s of steps) {
   else if (op === "hide") { emulator.bus.send("pv-command", [10, 0]); await sleep(300); console.log(`${ts()} cursor hidden (CMD_CURSOR 0)`); }
   else if (op === "show") { emulator.bus.send("pv-command", [10, 1]); await sleep(300); console.log(`${ts()} cursor shown (CMD_CURSOR 1)`); }
   else if (op === "down" || op === "up") { await click(op === "down"); await sleep(+arg || 40); console.log(`${ts()} button ${op}`); }
+  else if (op === "rdown" || op === "rup") { await rclick(op === "rdown"); await sleep(+arg || 40); console.log(`${ts()} right button ${op.slice(1)}`); }
   else if (op === "delta") { const [dx, dy] = arg.split(",").map(Number); const seq = cursorSeq; emulator.bus.send("mouse-delta", [dx, -dy]); await until(() => cursorSeq !== seq, 900, 5); console.log(`${ts()} delta ${dx},${dy} -> ${cursorSeq !== seq ? cursor.x + "," + cursor.y : "no report"}`); }
   else if (op === "sine" || op === "line") {
     /* x0,y0,x1,y1,n[,amp]: n absolute placements along the segment, displaced by amp*sin along the way */
@@ -211,6 +234,10 @@ for (const s of steps) {
     console.log(`${ts()} check: ${onCurve}/${N} samples painted along the sine, ${onChord}/${N} along the straight chord (bg colour ${bg})`);
   }
   else if (op === "probe") { emulator.bus.send("pv-command", [12, +arg || 0]); await sleep(400); }   // PVMON CMD_PROBE: metrics, clip, pointer, capture, children (printed as pvmon: lines)
+  else if (op === "audio") {
+    console.log(`${ts()} audio: dac-enable=${audio.enable} dac-disable=${audio.disable} rates=${audio.rates.join(",") || "-"} blocks=${audio.blocks} samples=${audio.samples} peak=${audio.peak.toFixed(3)}`);
+    audio.blocks = 0; audio.samples = 0; audio.peak = 0;
+  }
   else if (op === "beats") { const g = beatGaps(); console.log(`${ts()} heartbeat gaps (ms): ${g.slice(-40).join(" ")}${g.length ? ` max ${Math.max(...g)}` : " none"}`); }
   else if (op === "tap") { const L = curWin() || cur; if (!L) { console.log("tap: no window"); continue; } const x = Math.round(L.gx + L.gw / 2), y = Math.round(L.gy + L.gh / 2); const c = await place(x, y); await click(true); await sleep(60); await click(false); await sleep(400); console.log(`${ts()} tap ${x},${y} -> ${c ? c.x + "," + c.y : "no report"}`); }
   else if (op === "close") {

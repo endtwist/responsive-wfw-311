@@ -532,7 +532,15 @@ const APPS = {
   charmap: "CHARMAP.EXE", pifedit: "PIFEDIT.EXE", setup: "SETUP.EXE", winver: "WINVER.EXE",
   chat: "WINCHAT.EXE", mail: "MSMAIL.EXE", schedule: "SCHDPLUS.EXE", help: "WINHELP.EXE",
   soundrecorder: "SOUNDREC.EXE", soundrec: "SOUNDREC.EXE", mediaplayer: "MPLAYER.EXE",
-  skifree: "C:\\GAMES\\SKI.EXE", ski: "C:\\GAMES\\SKI.EXE", jezzball: "C:\\GAMES\\JEZZ.EXE", jezz: "C:\\GAMES\\JEZZ.EXE",
+  skifree: "C:\\GAMES\\SKI.EXE", ski: "C:\\GAMES\\SKI.EXE",
+  /* Best of Microsoft Entertainment Pack (SPEC 2026-09-03) */
+  jezzball: "C:\\GAMES\\JEZZBALL.EXE", jezz: "C:\\GAMES\\JEZZBALL.EXE",
+  tetris: "C:\\GAMES\\TETRIS.EXE", tetravex: "C:\\GAMES\\TETRAVEX.EXE",
+  tripeaks: "C:\\GAMES\\TRIPEAKS.EXE", tutstomb: "C:\\GAMES\\TUTSTOMB.EXE",
+  freecell: "C:\\GAMES\\FREECELL.EXE", golf: "C:\\GAMES\\GOLF.EXE",
+  chips: "C:\\GAMES\\CHIPS.EXE", chipschallenge: "C:\\GAMES\\CHIPS.EXE",
+  rodent: "C:\\GAMES\\RODENT.EXE", pipedream: "C:\\GAMES\\PIPE.EXE", pipe: "C:\\GAMES\\PIPE.EXE",
+  taipei: "C:\\GAMES\\TP.EXE", blackjack: "C:\\GAMES\\BLAKJAK.EXE",
 };
 let launched = false;
 function launchFromUrl() {
@@ -945,7 +953,13 @@ const SURFACE_POLICY = [
   [/^File Manager/, "scroll"], [/^Control Panel/, "scroll"], [/^Print Manager/, "scroll"], [/^Task List/, "scroll"],
   [/^Calendar\b/, "scroll"], [/^Character Map/, "scroll"], [/^Media Player/, "scroll"], [/^Clipboard/, "scroll"],
   [/^Solitaire/, "drag"], [/^Paintbrush/, "drag"], [/^Minesweeper/, "drag"], [/^Hearts/, "drag"], [/MS-DOS/, "drag"],
-  [/^Terminal/, "drag"], [/^Reversi/, "drag"], [/^SkiFree/, "hover"], [/^JezzBall/, "drag"],   // hover: the skier follows the pointer; a swipe moves it without pressing
+  [/^Terminal/, "drag"], [/^Reversi/, "drag"], [/^SkiFree/, "hover"],   // hover: the skier follows the pointer; a swipe moves it without pressing
+  /* Entertainment Pack: every one is a pointer surface (JezzBall draws a wall from the tap, the
+     card games and Rodent's Revenge drag, Pipe Dream / Taipei / TetraVex place a piece per tap).
+     "drag" is also the fallback, so these lines are the record, not a behaviour change. */
+  [/^JezzBall/, "drag"], [/^TETRIS/, "drag"], [/^TetraVex/, "drag"], [/^TriPeaks/, "drag"],
+  [/^Tut's Tomb/, "drag"], [/^FreeCell/, "drag"], [/^Golf/, "drag"], [/^Chip's Challenge/, "drag"],
+  [/^Rodent's Revenge/, "drag"], [/^Pipe Dream/, "drag"], [/^Taipei/, "drag"], [/^Dr\. Black Jack/, "drag"],
 ];
 /* CMD_SCROLL's slot field for the shell: PVMON routes it to Program Manager's active MDI group
    window (WM_VSCROLL/WM_HSCROLL). Slot numbers 0..MAX_SLOTS-1 are application columns. */
@@ -965,8 +979,11 @@ function surfacePolicy(L) {
 }
 /* Programs that never take text: a tap there does not even try the keyboard speculatively, so the
    keyboard does not pop up for the guest to send away again on every card. */
-const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi|SkiFree|JezzBall)\b/;
-const KEYBOARD_TITLES = /MS-DOS|^Notepad\b|^Write\b|^Terminal\b|^Cardfile\b|^Calendar\b|^Calculator\b/;
+const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi|SkiFree|JezzBall|TETRIS|TetraVex|TriPeaks|Tut's Tomb|FreeCell|Golf|Chip's Challenge|Rodent's Revenge|Pipe Dream|Taipei|Dr\. Black Jack)\b/;
+/* Titles that do take typing. Checked before NO_KEYBOARD, because a few of the games own a dialog
+   that wants text under a title that starts with the game's own name ("TriPeaks Player Name",
+   "BlackJack Player Name", Chip's Challenge's level password). */
+const KEYBOARD_TITLES = /MS-DOS|^Notepad\b|^Write\b|^Terminal\b|^Cardfile\b|^Calendar\b|^Calculator\b|Player Name|Password/;
 
 /* The shell column's height follows the visible viewport (browser toolbars come and go), so the
    desktop fills the phone with no letterbox. PVMON re-arranges Program Manager on request. */
@@ -2061,8 +2078,8 @@ let hoverSurface = false;
     if (kbtest) why = "kbtest";
     else if (wantKeyboard || keyboardHeld) why = "want";
     else if (hit && hit.kind === "desktop" && !insideShellDialog(hit)) why = null;          // icons, the desktop: never
-    else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
     else if (hit && hit.win && hit.kind === "client" && KEYBOARD_TITLES.test(title) && !onScrollbar(hit)) why = "title";   // client only, and not on a scrollbar
+    else if (hit && hit.win && NO_KEYBOARD.test(title)) why = null;
     else if (hit && (hit.kind === "client" || hit.kind === "desktop")) {
       /* No speculative focus: it flashed the keyboard up and down on every dialog tap. Instead the
          tap is remembered for a second; if the guest reports PVK 1 in that window (the click landed

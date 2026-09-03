@@ -29,9 +29,11 @@ const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, f: 0x21, 
    resizes it), so a frame wider than the phone and a host scale below 1:1 are reported as
    information, not failures. Until PVW carries the hook's own flag these are named by title;
    WINVER and Network Setup are fixed too but not toured. */
-/* [PVMon] KeepSize in build-image.sh: SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER
+/* [PVMon] KeepSize in build-image.sh: SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER
+   PIFEDIT PACKAGER PBRUSH + the Entertainment Pack modules (JEZZBALL TETRIS TETRAVEX TRIPEAKS
+   TUTSTOMB FREECELL GOLF CHIPS RODENT PIPE TP BLAKJAK)
    (kept in step by hand; the same set as the `fixed:` marks above plus the untoured WINVER/PIFEDIT). */
-const FIXED_TITLES = /^(Character Map|Solitaire|The Microsoft Hearts|Minesweeper|Calculator|Sound Recorder|Media Player|Object Packager|Task List|About |PIF Editor|Network Setup|Print Manager)/;
+const FIXED_TITLES = /^(Character Map|Solitaire|The Microsoft Hearts|Minesweeper|Calculator|Sound Recorder|Media Player|Object Packager|Task List|About |PIF Editor|Network Setup|Print Manager|JezzBall|TETRIS|TetraVex|TriPeaks|Tut's Tomb|FreeCell|Golf|Chip's Challenge|Rodent's Revenge|Pipe Dream|Taipei|Dr\. Black Jack)/;
 export const APPS = [
   { name: "NOTEPAD",  cmd: "NOTEPAD.EXE",  title: /^Notepad/,        text: true,  dialog: "alt-f-o" },
   { name: "WRITE",    cmd: "WRITE.EXE",    title: /^Write/,          dialog: "alt-f-o" },
@@ -57,7 +59,22 @@ export const APPS = [
   { name: "TASKMAN",  keys: "ctrl-esc",    title: /^Task List/, fixed: true },
   { name: "DOSPRMPT", cmd: "DOSPRMPT.PIF", title: /^MS-DOS/,         text: true, timeout: 40000 },
   { name: "SKI",      cmd: "C:\\GAMES\\SKI.EXE",  title: /^SkiFree/ },                 // image/changes/games (games=1)
-  // { name: "JEZZ",  cmd: "C:\\GAMES\\JEZZ.EXE", title: /^JezzBall/, fixed: true },   // once JEZZ.EXE is in changes/games
+  /* Best of Microsoft Entertainment Pack: image/changes-local/games (untracked, SPEC 2026-09-03).
+     All fixed-layout: KeepSize holds each at its natural size and the host scales it. Rodent's
+     Revenge is a Visual Basic 1 program whose ThunderRTMain top level is 0x0 and whose playfield
+     is an owned window, so its geometry rows are informational. */
+  { name: "JEZZ",     cmd: "C:\\GAMES\\JEZZBALL.EXE", title: /^JezzBall/,        fixed: true },
+  { name: "TETRIS",   cmd: "C:\\GAMES\\TETRIS.EXE",   title: /^TETRIS/,          fixed: true },
+  { name: "TETRAVEX", cmd: "C:\\GAMES\\TETRAVEX.EXE", title: /^TetraVex/,        fixed: true },
+  { name: "TRIPEAKS", cmd: "C:\\GAMES\\TRIPEAKS.EXE", title: /^TriPeaks$/,       fixed: true },
+  { name: "TUTSTOMB", cmd: "C:\\GAMES\\TUTSTOMB.EXE", title: /^Tut's Tomb/,      fixed: true },
+  { name: "FREECELL", cmd: "C:\\GAMES\\FREECELL.EXE", title: /^FreeCell/,        fixed: true },
+  { name: "GOLF",     cmd: "C:\\GAMES\\GOLF.EXE",     title: /^Golf/,            fixed: true },
+  { name: "CHIPS",    cmd: "C:\\GAMES\\CHIPS.EXE",    title: /^Chip's Challenge/, fixed: true },
+  { name: "RODENT",   cmd: "C:\\GAMES\\RODENT.EXE",   title: /^Rodent's Revenge$/, fixed: true },
+  { name: "PIPE",     cmd: "C:\\GAMES\\PIPE.EXE",     title: /^Pipe Dream/,      fixed: true },
+  { name: "TP",       cmd: "C:\\GAMES\\TP.EXE",       title: /^Taipei/,          fixed: true },
+  { name: "BLAKJAK",  cmd: "C:\\GAMES\\BLAKJAK.EXE",  title: /^Dr\. Black Jack/, fixed: true },
 ];
 
 /* ------------------------------------------------------------------------------ time
