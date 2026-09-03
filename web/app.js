@@ -737,6 +737,26 @@ function buildKeybar() {
 const CHAR_SCANCODES = { a:0x1E,b:0x30,c:0x2E,d:0x20,e:0x12,f:0x21,g:0x22,h:0x23,i:0x17,j:0x24,k:0x25,l:0x26,m:0x32,n:0x31,o:0x18,p:0x19,q:0x10,r:0x13,s:0x1F,t:0x14,u:0x16,v:0x2F,w:0x11,x:0x2D,y:0x15,z:0x2C,
   "1":0x02,"2":0x03,"3":0x04,"4":0x05,"5":0x06,"6":0x07,"7":0x08,"8":0x09,"9":0x0A,"0":0x0B," ":0x39,"-":0x0C,"=":0x0D,"[":0x1A,"]":0x1B,";":0x27,"'":0x28,",":0x33,".":0x34,"/":0x35,"\\":0x2B };
 function charScancode(ch) { return CHAR_SCANCODES[ch.toLowerCase()] || 0; }
+/* Characters that need Shift, and the unshifted key they live on. v86 can type these itself, but
+   it presses Shift, the key and releases Shift with no gap at all, and a DOS box samples the
+   shift state on its own schedule: "?" arrived as "/". We send them ourselves with a beat between
+   the shift and the key. */
+const SHIFT_CHARS = { "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8",
+  "(": "9", ")": "0", "_": "-", "+": "=", "{": "[", "}": "]", ":": ";", '"': "'", "<": ",", ">": ".",
+  "?": "/", "|": "\\", "~": "`" };
+const SHIFT_SCAN = 0x2A;
+async function typeChar(ch) {
+  const upper = ch >= "A" && ch <= "Z";
+  const base = upper ? ch.toLowerCase() : SHIFT_CHARS[ch];
+  const code = charScancode(base != null ? base : ch);
+  if (!code) { emulator.keyboard_send_text(ch); return; }        // anything unmapped: v86's own path
+  const shift = upper || SHIFT_CHARS[ch] !== undefined;
+  if (shift) { emulator.bus.send("keyboard-code", SHIFT_SCAN); await sleep(8); }
+  emulator.bus.send("keyboard-code", code);
+  await sleep(4);
+  emulator.bus.send("keyboard-code", code | 0x80);
+  if (shift) { await sleep(8); emulator.bus.send("keyboard-code", SHIFT_SCAN | 0x80); }
+}
 function updateKeybar() {
   const bar = $("keybar");
   if (!bar) return;
@@ -2600,7 +2620,7 @@ function installKeyboard() {
   inp.addEventListener("input", ev => {
     if (ev.isComposing) return;                          // wait for the composition to end
     const text = kbdRead(inp);
-    for (const ch of text) if (ch !== "\n" && ch !== "\r") emulator.keyboard_send_text(ch);
+    for (const ch of text) if (ch !== "\n" && ch !== "\r") queue(() => typeChar(ch));
     kbdClear(inp);                                       // newlines: handled once, in beforeinput
   });
   /* Enter and Backspace in the contenteditable: exactly one source. iOS fires keydown (sometimes
@@ -2612,7 +2632,7 @@ function installKeyboard() {
     if (t === "insertParagraph" || t === "insertLineBreak") { ev.preventDefault(); emulator.keyboard_send_text("\n"); }
     else if (t === "deleteContentBackward") { ev.preventDefault(); emulator.bus.send("keyboard-code", 0x0E); emulator.bus.send("keyboard-code", 0x8E); }
   });
-  inp.addEventListener("compositionend", () => { const t = kbdRead(inp); for (const ch of t) emulator.keyboard_send_text(ch); kbdClear(inp); });
+  inp.addEventListener("compositionend", () => { const t = kbdRead(inp); for (const ch of t) queue(() => typeChar(ch)); kbdClear(inp); });
   inp.addEventListener("keydown", ev => {
     if (inp.isContentEditable) return;                   // handled in beforeinput
     if (ev.key === "Enter") { emulator.keyboard_send_text("\n"); ev.preventDefault(); }

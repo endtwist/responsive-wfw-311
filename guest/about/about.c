@@ -24,7 +24,7 @@
 #define GAP        8
 
 static char szClass[] = "PVAbout";
-static char szTitle[] = "Welcome to Windows";
+static char szTitle[] = "About";
 static char szIniApp[] = "PVMon";
 static char szIniKey[] = "AboutShown";
 
