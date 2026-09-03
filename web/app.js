@@ -744,7 +744,12 @@ function updateKeybar() {
     const st = b.dataset.key === "Ctrl" ? sticky.ctrl : b.dataset.key === "Alt" ? sticky.alt : 0;
     b.classList.toggle("on", st === 1); b.classList.toggle("lock", st === 2);
   }
-  const up = keyboardUp();
+  /* Games played with the arrow keys (Tetris, Chip's Challenge, Rodent's Revenge) need keys but no
+     typing, and the soft keyboard would eat half the screen. When one of them is in front the
+     accessory bar shows on its own, docked at the bottom of the viewport. */
+  const front = layers.filter(l => l.kind === "W" || l.kind === "O").slice(-1)[0];
+  const keysOnly = !!(front && ARROW_GAMES.test(front.title || "")) && !keyboardUp();
+  const up = keyboardUp() || keysOnly;
   // Folded by default: with the keyboard up only a small tab shows; tapping it opens the bar.
   const tab = $("keybartab");
   bar.classList.toggle("show", up && keybarOpen);
@@ -753,7 +758,7 @@ function updateKeybar() {
     const vv = window.visualViewport;
     // dock to the bottom of the visible viewport, i.e. the top edge of the keyboard (on Chrome for
     // iOS that is the top of its own accessory row: it is part of the keyboard's height)
-    const bottom = window.innerHeight - (vv.offsetTop + vv.height);
+    const bottom = keysOnly ? Math.max(0, innerHeight - (vv.offsetTop + vv.height)) : window.innerHeight - (vv.offsetTop + vv.height);
     bar.style.top = "auto";
     bar.style.bottom = bottom + "px";
     if (tab) tab.style.bottom = (bottom + (keybarOpen ? bar.offsetHeight : 0)) + "px";
@@ -998,6 +1003,8 @@ function surfacePolicy(L) {
 }
 /* Programs that never take text: a tap there does not even try the keyboard speculatively, so the
    keyboard does not pop up for the guest to send away again on every card. */
+/* Games driven by the arrow keys: the accessory bar appears for them without the soft keyboard. */
+const ARROW_GAMES = /^(TETRIS|Chip's Challenge|Rodent's Revenge|CHIPS|JezzBall)/i;
 const NO_KEYBOARD = /^(Solitaire|Hearts|Minesweeper|Paintbrush|Clock|Reversi|SkiFree|JezzBall|TETRIS|TetraVex|TriPeaks|Tut's Tomb|FreeCell|Golf|Chip's Challenge|Rodent's Revenge|Pipe Dream|Taipei|Dr\. Black Jack)\b/;
 /* Titles that do take typing. Checked before NO_KEYBOARD, because a few of the games own a dialog
    that wants text under a title that starts with the game's own name ("TriPeaks Player Name",
@@ -1177,7 +1184,17 @@ function placeLayers(src) {
       let x, y;
       const centred = Math.abs(L.wx + L.ww / 2 - screenW / 2) < 8;      // the Alt+Tab switcher
       const col = Math.floor(L.wx / SLOT_W);
-      const owner = col >= 1 ? bySlot[col - 1] : null;
+      /* The window the popup belongs to. Usually the slot's application (bySlot), but an owned
+         window can own menus of its own — Rodent's Revenge's whole game window is an owned
+         window — and anchoring those to the slot's application put the menu somewhere else
+         entirely, with a masked grey hole where it should have been. Prefer the front-most
+         already-placed layer whose rect contains the popup's origin. */
+      let owner = col >= 1 ? bySlot[col - 1] : null;
+      for (let i = out.length - 1; i >= 0; i--) {
+        const q = out[i];
+        if (q.transient || q.shellCopy || q.src == null) continue;
+        if (L.wx >= q.wx - 2 && L.wx <= q.wx + q.ww + 2 && L.wy >= q.wy - 2 && L.wy <= q.wy + q.wh + 2) { owner = q; break; }
+      }
       if (centred) { x = Math.round((vw - hw) / 2); y = Math.round((vh - hh) / 2); }
       else if (owner) {
         if (L.wy < owner.gy) {                                            // hangs off the chrome (a menu)
