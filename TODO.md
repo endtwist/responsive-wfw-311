@@ -108,8 +108,18 @@ people hold a phone. Landscape is explicitly not a priority.
 
 ## Known, not yet scheduled
 
-- **JezzBall**: not on the install media and not free to download. Dropping JEZZ.EXE and
-  JEZZ.HLP into `image/changes/games/` is all that is needed; everything else is wired.
+- **MIDI is configured but silent**: `[drivers] midi=msadlib.drv` is written and the driver loads,
+  but v86's SB16 does not synthesise the OPL FM chip (write-only dummy registers, status port a
+  constant 0xFF, so even Adlib detection fails). Chip's Challenge's Background Music is greyed and
+  Media Player says "This device cannot play" on a .MID. Needs a v86 change: implement OPL, or
+  route MIDI out to WebAudio. Everything else about sound works (SPEC 2026-09-03).
+- **Entertainment Pack leftovers**: Tetris' Sound option is on but it drives the PC speaker (no
+  .WAV of its own) and nothing is audible; Golf, Tut's Tomb, Rodent's Revenge and Pipe Dream were
+  silent in the interactions tested. Taipei's Hint (H) highlight was too brief to catch headlessly,
+  so a legal *pair* removal in Taipei is verified only as far as tile selection.
+- **Tour: PBRUSH's `fit` row fails every run** — `Size.PBRUSH=640x424` is deliberate but the tour
+  table's `PBRUSH` entry has no `fixed:` mark, so the 640>352 frame reads as a failure rather than
+  information. Either mark it or teach PVW to carry the hook's own fixed-layout flag.
 - **Microphone on the phone** needs https (Safari exposes no microphone over plain http).
 - **Chrome/Safari autofill row** above the keyboard cannot be suppressed by the page; the
   standalone home-screen app is the way out.

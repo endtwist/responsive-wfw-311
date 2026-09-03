@@ -5,7 +5,13 @@
 #   changes/root/*     -> C:\
 #   changes/games/*    -> C:\GAMES  (games=1, default; each known game also gets a Program Manager
 #                         item in the Games group via tools/grpadd.py: SKI.EXE "SkiFree" is in the
-#                         repo, JEZZ.EXE "JezzBall" is picked up when dropped in — see SPEC 2026-09-02)
+#                         repo — see SPEC 2026-09-02)
+#   changes-local/*    -> the same four destinations, an OPTIONAL untracked overlay for media that
+#                         must not be committed (Josh's Best of Microsoft Entertainment Pack floppy:
+#                         changes-local/games/ = the games, changes-local/system/ = VBRUN100.DLL +
+#                         THREED.VBX, changes-local/windows/ = the games' .WAVs/.MIDs, which
+#                         sndPlaySound only finds in C:\WINDOWS, and ENTPACK.INI). Absent on a
+#                         fresh clone and the build is unaffected — see SPEC 2026-09-03.
 # then apply SYSTEM.INI edits via tools/inied.py.
 # Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
 #        Desktop mode (SPEC 2026-09-02) is a runtime switch (CMD_DESKTOP): the image is always the phone layout.
@@ -24,18 +30,33 @@ shopt -s nullglob
 for f in changes/system/*;  do mcopy -o $M "$f" ::/WINDOWS/SYSTEM/; done
 for f in changes/windows/*; do mcopy -o $M "$f" ::/WINDOWS/; done
 for f in changes/root/*;    do mcopy -o $M "$f" ::/; done
+# Optional untracked overlay (changes-local/): same layout, applied after the tracked changes so a
+# clone without it still builds. Only files are copied; games/ is handled with changes/games below.
+for f in changes-local/system/*;  do if [ -f "$f" ]; then mcopy -o $M "$f" ::/WINDOWS/SYSTEM/; fi; done
+for f in changes-local/windows/*; do if [ -f "$f" ]; then mcopy -o $M "$f" ::/WINDOWS/; fi; done
+for f in changes-local/root/*;    do if [ -f "$f" ]; then mcopy -o $M "$f" ::/; fi; done
 TMP=$(mktemp -d)
 # Games: C:\GAMES plus one Program Manager item per known game (GAMES.GRP is binary; tools/grpadd.py
 # rewrites it with the icon taken from the executable). SkiFree (SKI.EXE, 1991, free from its author,
-# ski.ihoc.net) is in the repo; JezzBall (Entertainment Pack 4, not redistributable) is installed the
-# moment JEZZ.EXE (+ JEZZ.HLP) is dropped into changes/games/. Unknown files are copied, no item.
-if [ "$GAMES" = 1 ] && [ -d changes/games ] && [ -n "$(ls changes/games)" ]; then
+# ski.ihoc.net) is in the repo under changes/games/; the Best of Microsoft Entertainment Pack games
+# come from the untracked changes-local/games/ overlay (Josh's own floppy, SPEC 2026-09-03) and are
+# installed whenever that directory is present. Unknown files are copied, no item.
+if [ "$GAMES" = 1 ]; then
+  GAMEDIRS=; for d in changes/games changes-local/games; do [ -d "$d" ] && [ -n "$(ls -A "$d")" ] && GAMEDIRS="$GAMEDIRS $d"; done
+fi
+if [ "$GAMES" = 1 ] && [ -n "${GAMEDIRS# }" ]; then
   mmd $M ::/GAMES 2>/dev/null || true
-  for f in changes/games/*; do mcopy -o $M "$f" ::/GAMES/; done
+  for d in $GAMEDIRS; do for f in $d/*; do if [ -f "$f" ]; then mcopy -o $M "$f" ::/GAMES/; fi; done; done
   mcopy -n $M ::/WINDOWS/GAMES.GRP $TMP/GAMES.GRP
-  for g in "SKI.EXE:SkiFree" "JEZZ.EXE:JezzBall"; do
+  # title strings are the ones the pack's own SETUP writes (BOWEP.MST CreateProgmanItem)
+  for g in "SKI.EXE:SkiFree" "JEZZBALL.EXE:JezzBall" "TETRIS.EXE:Tetris" "TETRAVEX.EXE:TetraVex" \
+           "TRIPEAKS.EXE:TriPeaks" "TUTSTOMB.EXE:Tut's Tomb" "FREECELL.EXE:Free Cell" "GOLF.EXE:Golf" \
+           "CHIPS.EXE:Chip's Challenge" "RODENT.EXE:Rodent's Revenge" "PIPE.EXE:Pipe Dream" \
+           "TP.EXE:Taipei" "BLAKJAK.EXE:Dr. Black Jack"; do
     exe=${g%%:*}; title=${g#*:}
-    if [ -f "changes/games/$exe" ]; then python3 ../tools/grpadd.py $TMP/GAMES.GRP "$title" "C:\\GAMES\\$exe" --exe "changes/games/$exe"; fi
+    for d in $GAMEDIRS; do
+      if [ -f "$d/$exe" ]; then python3 ../tools/grpadd.py $TMP/GAMES.GRP "$title" "C:\\GAMES\\$exe" --exe "$d/$exe"; break; fi
+    done
   done
   mcopy -o $M $TMP/GAMES.GRP ::/WINDOWS/GAMES.GRP
 
@@ -50,7 +71,11 @@ fi
 # boot=win (default): AUTOEXEC runs WIN in a loop, so PVMON's exit-to-DOS resize comes straight
 # back up at the new mode. boot=pvtest: run the DOS adapter test first, then WIN. boot=dos: prompt.
 {
-  printf 'C:\\WINDOWS\\SMARTDRV.EXE\r\n@ECHO OFF\r\nPROMPT $P$G\r\nPATH C:\\WINDOWS;C:\\DOS;\r\nSET TEMP=C:\\TEMP\r\n'
+  # C:\GAMES on the PATH so a game can also be started by name from a DOS box or File Manager.
+  # (It is not what makes their sound work: the Entertainment Pack games call sndPlaySound with a
+  # bare file name and the lookup does not reach C:\GAMES, so changes-local/windows/ stages the
+  # .WAVs and .MIDs into C:\WINDOWS as well — SPEC 2026-09-03.)
+  printf 'C:\\WINDOWS\\SMARTDRV.EXE\r\n@ECHO OFF\r\nPROMPT $P$G\r\nPATH C:\\WINDOWS;C:\\DOS;C:\\GAMES;\r\nSET TEMP=C:\\TEMP\r\n'
   case $BOOT in
     win)    printf ':WINLOOP\r\nPVDPI\r\nWIN\r\nGOTO WINLOOP\r\n';;
     pvtest) printf 'PVTEST\r\nWIN\r\n';;
@@ -82,10 +107,14 @@ mcopy -n $M ::/WINDOWS/WIN.INI $TMP/WIN.INI
 W=$SHELLW; [ "$W" = 0 ] && W=352
 H=$SHELLH; [ "$H" = 0 ] && H=760
 # SkiFree (module SKI) draws its slope in whatever client it gets: the whole phone frame (the hook
-# clamps to the runtime shell height). JezzBall (JEZZ) has a fixed playfield: natural size, scaled.
+# clamps to the runtime shell height). The Entertainment Pack games all have fixed playfields, so
+# they are KeepSize at their natural size and the host scales them; the two exceptions are Tetris
+# (born CW_USEDEFAULT in both axes, so it would fill a 640 slot: 352x470 gives a normally
+# proportioned well at 1:1) and Dr. Black Jack (a 96 dpi layout whose button row falls off the
+# bottom of its own 576x456 window at 120 dpi: +44 px brings it back). SPEC 2026-09-03.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 Paintbrush.width=536 Paintbrush.height=300 PVMon.Size.SKI=${W}x${H} "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZ" \
+  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 Paintbrush.width=536 Paintbrush.height=300 PVMon.Size.SKI=${W}x${H} PVMon.Size.TETRIS=${W}x470 PVMon.Size.BLAKJAK=576x500 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZBALL TETRIS TETRAVEX TRIPEAKS TUTSTOMB FREECELL GOLF CHIPS RODENT PIPE TP BLAKJAK" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
   "windows.device=$( [ "$PRINTER" = TTY ] && echo "Text Printer,TTY" || echo "PDF Printer,PSCRIPT" ),C:\\PRINT.PRN" \

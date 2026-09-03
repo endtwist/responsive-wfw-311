@@ -36,6 +36,10 @@ if opts.get("sound"):
     # Sound Blaster 2.0 driver on v86's SB16 (port 220, IRQ 5, DMA 1); VSBD virtualises it for DOS boxes
     setkey(secs, "drivers", "wave", "sndblst2.drv")
     setkey(secs, "sndblst.drv", "port", "220"); setkey(secs, "sndblst.drv", "int", "5"); setkey(secs, "sndblst.drv", "dmachannel", "1")
+    # MIDI out: the SB's OPL FM synth through MSADLIB.DRV (port 388). Without a midi= line the
+    # MIDI mapper has no device and a sequencer MCI open fails (Chip's Challenge music, .MID files).
+    setkey(secs, "drivers", "midi", "msadlib.drv")
+    setkey(secs, "msadlib.drv", "port", "388")
     addline(secs, "386Enh", "device=vsbd.386")
 # sysfont=PVSYS.FON: a taller system font (tools/mkfon.py) makes captions, menus and caption
 # boxes bigger, which is how the chrome becomes thumb-sized with only Windows' own pixels.

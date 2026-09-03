@@ -2467,3 +2467,121 @@ back every frame.
   mouse=PVMOUSE.DRV sound=1 load=PVMON.EXE live=1 shellw=352 shellh=760 spooler=no printer=PSCRIPT
   out=work-phone.img` and a fresh boot snapshot (the staged `PVMON.EXE` is v36; nothing else in
   `image/changes/` changed).
+### 2026-09-03 — Best of Microsoft Entertainment Pack: 13 games installed and playable by touch (agent, worktree)
+Josh dropped `image/win-entertainment-pack-best-of.img` (1.44 MB FAT12 floppy, "Best of Microsoft
+Entertainment Pack", disk label `DISK1`, files dated 1994-02-14, 65 files) in `image/`. **Deployed
+publicly at Josh's direction** (the games go into the normal phone image, so they reach
+https://responsive-wfw-311.vercel.app), but neither the floppy nor any game binary is committed.
+
+- **Route: host-side decompression, not the guest's SETUP.EXE.** Every packed file is plain SZDD
+  (`53 5A 44 44 88 F0 27 33`, mode `A`), which `tools/msexpand.py` already handles, so the pack
+  expands deterministically on the host and drops straight into the existing staging pipeline.
+  The one wrinkle: the SZDD header's "last character of the name" byte is `00` on this media, so
+  `msexpand.py` must be given the output name (`X.EX_` -> `X.EXE`, `DL_`/`HL_`/`WA_`/`MI_`/`DA_`/
+  `VB_` -> `DLL`/`HLP`/`WAV`/`MID`/`DAT`/`VBX`). Every expanded size matches the byte counts in the
+  pack's own `SETUP.INF` `[Files]`, and its `SKI.EXE` is sha256-identical to the SkiFree already in
+  `image/changes/games/` — the media is intact. Running SETUP.EXE inside the guest was rejected: it
+  needs a floppy attached plus five MSCOMSTF/MSINSSTF dialogs driven blind, and its result could not
+  be reproduced by `build-image.sh`, which is the only thing that builds the image we ship.
+- **Staging: `image/changes-local/`, untracked** (added to `.gitignore`), same four subdirectories
+  as `changes/`, applied by `build-image.sh` after the tracked ones and skipped when absent, so a
+  clone without Josh's media still builds a working image. `changes/games/` stays SkiFree-only.
+  - `changes-local/games/` -> `C:\GAMES`: the 13 `.EXE`s + `.HLP`s, `ABOUTWEP.DLL` `ABOUTTET.DLL`
+    `WEPUTIL.DLL` `WEP4UTIL.DLL` `FIELD100.DLL`, `CHIPS.DAT`, the `.WAV`s and `.MID`s, `README.TXT`.
+  - `changes-local/system/` -> `C:\WINDOWS\SYSTEM`: `VBRUN100.DLL` and `THREED.VBX` (Rodent's
+    Revenge is a Visual Basic 1 program: `RODENT.EXE`'s only import is `VBRUN100`).
+  - `changes-local/windows/` -> `C:\WINDOWS`: the `.WAV`s and `.MID`s **again**, plus `ENTPACK.INI`.
+    This is what makes the sound work — see below. `CARDS.DLL` is deliberately *not* staged: the
+    pack's copy is byte-identical (sha256 `07ed76eb…`) to the one already in `C:\WINDOWS`.
+- **Program Manager**: `build-image.sh`'s known-game table now carries all 13 with the titles the
+  pack's own setup script writes (`BOWEP.MST` `CreateProgmanItem`: "Dr. Black Jack", "Free Cell",
+  "Chip's Challenge", "Rodent's Revenge", "Tut's Tomb", "Pipe Dream", "Taipei", …), each with its
+  own icon through `tools/grpadd.py`. The Games group is 16 items — Solitaire, Minesweeper, Hearts,
+  SkiFree and the 13 — three to a row in the 352 column (`shots/pm-games-group.png`).
+  Note the module names: the file is `JEZZBALL.EXE` and the module `JEZZBALL`, not the `JEZZ`
+  the 2026-09-02 entry guessed; `/jezzball` and the `KeepSize` key are corrected accordingly.
+- **Geometry.** Every game is a fixed layout, so all 13 modules go in `[PVMon] KeepSize`
+  (`JEZZBALL TETRIS TETRAVEX TRIPEAKS TUTSTOMB FREECELL GOLF CHIPS RODENT PIPE TP BLAKJAK`, plus
+  the untouched `SKI`) and the host scales anything wider than the phone. Two `Size.*` exceptions:
+  - `Size.TETRIS=352x470`. Tetris is born `CW_USEDEFAULT` in *both* axes and lays its well out to
+    whatever client it gets, so the clamp gave it 640x760 and a 230x600 well in a sea of tiled
+    background. 352x470 puts the well at ~130x300 (normal proportions) at host scale 1:1.
+  - `Size.BLAKJAK=576x500`. Its natural 576x456 window is a 96 dpi layout; at this image's 120 dpi
+    the taller caption and menu push the SPLIT/DOUBLE/STAY/HIT/DEAL row off the bottom edge. 40 px
+    of extra height brings the whole button row back (`shots/bj-a.png` clipped vs `shots/bj-b.png`).
+    `Size.*` is applied at creation before the fixed-layout check, so it works on a window PVHOOK
+    is otherwise forbidden to resize.
+  - Golf was tried at 576x520 and 576x760 and lost its stock/waste pile both times: its layout
+    wants the full 640 width, so it keeps the plain one-slot clamp (640x760).
+- **Host tables** (`web/app.js`): `APPS` gains `/jezzball` `/jezz` `/tetris` `/tetravex` `/tripeaks`
+  `/tutstomb` `/freecell` `/golf` `/chips` `/chipschallenge` `/rodent` `/pipedream` `/pipe`
+  `/taipei` `/blackjack`; `SURFACE_POLICY` records all 13 as `drag` (the fallback anyway — none of
+  them follows the pointer with no button down, so none is `hover` like SkiFree); `NO_KEYBOARD`
+  covers all 13. **`KEYBOARD_TITLES` is now tested before `NO_KEYBOARD`** and matches `Player Name`
+  and `Password`: TriPeaks and Dr. Black Jack each own a startup dialog whose title begins with the
+  game's own name ("TriPeaks Player Name", "BlackJack Player Name"), and Chip's Challenge has a
+  level password box — under the old order the game's `NO_KEYBOARD` entry would have swallowed them.
+- **Keyboard-driven games** (Tetris, Chip's Challenge, Rodent's Revenge) are reached the way
+  SkiFree's numpad is: a 600 ms hold on the caption toggles the soft keyboard, whose accessory bar
+  carries the arrows and F-keys (`web/app.js` KEYBAR).
+- **Sound.** `tools/probe.mjs` grew an `audio` step and a headless stand-in for
+  `browser/speaker.js`: it pulls `dac-request-data` on a 20 ms timer and reports
+  `dac-enable`/`dac-disable` counts, sampling rates, blocks, samples and peak amplitude, so "did
+  that tap make a noise?" is answerable with no audio device.
+  - The wave path itself is good: `SOUNDREC.EXE C:\GAMES\BELL.WAV` + Play -> 12288 samples at
+    11025 Hz, peak 0.945.
+  - The games were silent at first. They call `sndPlaySound` with a bare file name
+    (`bounce.wav`, `click1.wav`, …) and the lookup never reaches `C:\GAMES` — PVMON's `WinExec`
+    launch leaves the current directory at `C:\WINDOWS`. Staging the `.WAV`s (and `.MID`s) into
+    `C:\WINDOWS` as well fixed it: JezzBall now fires one playback per ball bounce (dac-enable 5 ->
+    14 -> 21 over 8 s, peak 1.000) and Taipei clicks on every tile tap (12288 samples, peak 0.482).
+    `C:\GAMES` was also added to the `PATH` in AUTOEXEC.BAT, which is a convenience for starting a
+    game by name from a DOS box — it is *not* what fixes the sound.
+  - Chip's Challenge keeps its settings in `C:\WINDOWS\ENTPACK.INI` (all the games read that file)
+    and its **Sound Effects** default is off, so `changes-local/windows/ENTPACK.INI` ships
+    `[Chip's Challenge] Sounds=1`: effects now play from the first move with no menu hunting.
+  - **MIDI does not work, and cannot on this v86.** `tools/inied.py`'s `sound=` now also writes
+    `[drivers] midi=msadlib.drv` and `[msadlib.drv] port=388`, which is the right configuration —
+    but v86's SB16 does not synthesise the OPL FM chip at all: the FM registers are write-only
+    dummies (`fm_default_write` just logs) and the status port returns a constant `0xFF`, so even
+    Adlib *detection* fails. Media Player on `CHIP01.MID`: "This device cannot play", and Chip's
+    Challenge greys out its **Background Music** item. The `midi=` line is kept because it is
+    correct and costs nothing, and the games degrade gracefully; making MIDI audible is a v86 job
+    (implement OPL, or route MIDI out to WebAudio) and is now in TODO.
+  - Measured silent in the interactions run: Tetris (its Sound option is checked, but it has no
+    `.WAV` of its own and drives the PC speaker), Golf, Tut's Tomb, Rodent's Revenge, Pipe Dream.
+- **Verified.** `node tools/tour.mjs` over everything: **pass=209 fail=5**, and all 13 games pass
+  launch / match / slot / tap / close / alive. The only failures are the two pre-existing ones
+  (CALENDAR is not on the base image — `winexec=2`, already in TODO; PBRUSH's `fit` row, because
+  `Size.PBRUSH=640x424` has no matching `fixed:` mark in the tour table). Per game, natural rect,
+  phone scale (352/width) and what was done with a finger:
+
+  | game | rect | scale | played by touch |
+  |---|---|---|---|
+  | JezzBall | 504x410 | 0.70 | tap grows a wall (score 70, "Area Cleared: 1%"); long-press flips it |
+  | Tetris | 352x470 | 1.00 | F2, then ←← moves the falling I-piece left (keybar) |
+  | TetraVex | 331x289 | 1.00 | dragged the 9/3-4/2 tile from the pool into the top-left cell |
+  | TriPeaks | 640x413 | 0.55 | F2 deals; tapping the 10♦ sends it to the waste, "Won $1" |
+  | Tut's Tomb | 693x550 | 0.51 | tapping the stock deals 9♣ 10♣ 6♦ onto the empty waste pile |
+  | Free Cell | 640x480 | 0.55 | F2 → game #28516; K♠ tapped, then a free cell — the card moves |
+  | Golf | 640x760 | 0.55 | tapped the seven bottom cards: 8♣ and 7♠ played to the waste |
+  | Chip's Challenge | 520x439 | 0.68 | LESSON 1 from CHIPS.DAT; a tap and arrows move Chip |
+  | Rodent's Revenge | 278x394 (owned) | 1.00 | F2, then →→↓ push the blocks (VB runtime works) |
+  | Pipe Dream | 583x432 | 0.60 | tap dismisses the splash and places a pipe from the queue |
+  | Taipei | 575x350 | 0.61 | Game▸New deals #26548; a tap selects a tile (and clicks) |
+  | Dr. Black Jack | 576x500 | 0.61 | DEAL tapped: dealer 7♣ + hole, player J♦ K♠, HIT/STAY enabled |
+  | SkiFree | 352x760 | 1.00 | unchanged from 2026-09-02 (`hover` surface) |
+
+  Rodent's Revenge is the odd one: its `ThunderRTMain` top level is 0x0 and the playfield is an
+  owned window, so its geometry rows are informational and the host composites the `O` layer.
+- **The long press really is a right click.** `tools/probe.mjs` gained `rdown`/`rup`
+  (`mouse-click [false,false,x]`), and in the guest a right click flips JezzBall's wall: the cursor
+  glyph goes from a vertical to a horizontal double arrow and the next tap grows a horizontal wall
+  (`shots/jezz-1-tap.png` vs `shots/jezz-3-tap-after-rclick.png`, `shots/jezz-4-horizontal-wall.png`).
+  In the pane (mobile preset, `/jezzball`) a synthetic 900 ms touch on the playfield made the host
+  emit exactly `mouse-click [false,false,true]` then `[false,false,false]`, and a 120 ms tap emitted
+  `[true,false,false]` / `[false,false,false]` — the same pair the probe sends.
+- **Not committed, by design**: the floppy (`image/*.img` is ignored) and everything under
+  `image/changes-local/`. The built image and its split parts are uploaded from the working tree,
+  so the games reach production without ever entering git. A fresh clone with no
+  `image/changes-local/` builds the same image minus the pack, SkiFree included.
