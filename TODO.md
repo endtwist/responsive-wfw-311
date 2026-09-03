@@ -17,7 +17,9 @@ people hold a phone. Landscape is explicitly not a priority.
    (we control them on the Vercel deploy, not on the plain-http LAN dev server), so keep a
    copy-based fallback. This is the single biggest change in how the thing feels under load.
    Companions to it, both nearly free and worth doing first:
-   - Turn off v86's debug flag (assertion and logging branches live in the hot paths).
+   - ~~Turn off v86's debug flag.~~ Done 2026-09-03 (SPEC): `log.js`/`cjs.js` default `DEBUG`
+     off, `globalThis.V86_DEBUG` or `V86_DEBUG=1` turns it back on. No measurable gain on node
+     once the per-pixel work was in wasm; kept because a phone pays more for dead branches.
    - Composite only layers whose pixels changed (the emulator already tracks dirty rows; we
      re-blit every layer every frame).
    - ~~Stop the per-frame `getImageData` readback in the dialog hole fill.~~ Done 2026-09-03
@@ -33,17 +35,18 @@ people hold a phone. Landscape is explicitly not a priority.
      the host arms `CMD_FASTPOLL` for the length of a gesture and PVMON's message loop peeks
      instead of blocking — 54 ms median delivery down to 1-2 ms, idle unchanged at 0.4 MIPS.
    - (Rejected by Josh: drawing ahead of the viewport by oversizing scroll windows.)
-1. **Blitting for OS-level actions** (window switch, move, resize). The redraw pass fixed
-   ordinary painting; moves still repaint whole windows through a sliding 64 KB window into
-   video memory. Two driver changes: a screen-to-screen blit fast path so a move is a copy
-   inside the frame buffer, and selector addressing so blits never switch banks. Measure
-   switch/move/resize before and after, as in the redraw pass. This also covers **scrolling**:
-   Windows scrolls by blitting the client up and repainting only the exposed strip, and that
-   screen-to-screen blit is the case the driver handles worst today — so this is the most
-   direct fix for scroll latency, which raises its priority. In the same pass, two more
-   throughput wins found by the redraw agent: serve the boot BIOS's disk reads directly
-   instead of port-by-port programmed I/O (a third of an app launch's instructions), and
-   ship with v86's debug flag off.
+1. **Blitting for OS-level actions.** Mostly done 2026-09-03 (SPEC): the adapter copies
+   rectangles inside the frame buffer for the driver (DISPI 0x20-0x26, seven port writes
+   instead of a read-plus-write per four pixels), and the rust A000 fast path now covers
+   chain-4 mode, which was every remaining JS write. Notepad and Write scrolling 13-30x
+   faster, app repaints 2-4x, and the debug flag ships off. Two findings closed the other
+   two sub-items: the BIOS reads the disk with **DMA**, not programmed I/O (0 data-port
+   reads per app launch), so there was nothing to serve directly; and **selector
+   addressing** is still open but no longer urgent — the next experiment there is whether
+   WIN386 grants DPMI `INT 31h AX=0800h` over the linear frame buffer at all, since
+   AllocSelector alone cannot reach physical 0xE0000000. Still repaint-bound and untouched:
+   window switch and resize (neither blits in the phone layout) and File Manager's list
+   scroll (GDI does it, not a screen-to-screen blit).
 2. ~~**Edge swipe to switch windows.**~~ Done 2026-09-03 (SPEC): a level leftward swipe starting in
    the right 24 px brings the back-most window forward (CMD_ACTIVATE), so repeated swipes cycle;
    the right edge only, never over chrome (the menu-bar pan and the caption boxes keep their

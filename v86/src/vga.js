@@ -447,6 +447,7 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.svga_memory_offset = vga_offset;
     this.svga_mem_plain = null;
     this.pv_planar_disabled = false;  // set to keep every A000 write in JS (A/B testing)
+    this.pv_planar_chain4_disabled = false;  // set to keep only the chain-4 A000 writes in JS (A/B)
     this.pv_planar_sync();
 
     this.diff_addr_min = this.vga_memory_size;
@@ -845,6 +846,7 @@ VGAScreen.prototype.pv_planar_sync = function()
     // the driver's colour output routines write through 3. See memory.rs pv_planar_enabled.
     const mode = !eight_bit ? 0 :
         !(this.sequencer_memory_mode & 0x8) ? (pipeline_is_plain ? 1 : 0) :
+        this.pv_planar_chain4_disabled ? 0 :
         (this.v7_seq[0xFE] & 0x08) ? (pipeline_is_plain ? 2 : 0) : 3;
     this.cpu.pv_planar_set(mode, this.svga_bank_offset >>> 0, this.plane_write_bm & 0xF,
         (this.v7_seq[0xFE] & 0x08) ? 1 : 0, this.v7_fore_latch_dword() >>> 0);

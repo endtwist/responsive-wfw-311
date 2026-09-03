@@ -2585,3 +2585,162 @@ https://responsive-wfw-311.vercel.app), but neither the floppy nor any game bina
   `image/changes-local/`. The built image and its split parts are uploaded from the working tree,
   so the games reach production without ever entering git. A fresh clone with no
   `image/changes-local/` builds the same image minus the pack, SkiFree included.
+
+### 2026-09-03 — blitting for OS-level actions: the adapter copies inside the frame buffer (scroll 20-30x)
+
+TODO item 1. Windows moves, resizes, raises and above all **scrolls** by blitting a rectangle of the
+frame buffer onto another part of itself and repainting only the strip that uncovered. The redraw
+pass (2026-09-02) fixed ordinary painting; this is the case it left alone, and it is the one Josh
+feels most, because scrolling is the gesture he does most. Delivery latency was fixed separately
+(PVMON v36, 2 ms); what was left was the guest's own ~35 ms per scrolled line, which is this.
+
+Measured with `tools/redraw-bench.mjs`, which grew four operations: **scroll** (File Manager's list,
+Notepad on `WIN.INI`, Write on `README.WRI` — ten `CMD_SCROLL` steps of three lines each, the same
+`WM_VSCROLL` the host's two-finger gesture sends), **window switch** (`CMD_ACTIVATE` on the window
+behind), **move** and **resize** (real pointer drags on the caption and the bottom-right corner).
+New flags: `--noblt` refuses the adapter's blit, `--nochain4` sends the chain-4 A000 writes back to
+JS, `--cold` boots Windows instead of restoring the snapshot (the driver reads the adapter's
+capability once, at set_board_flags and setmode, so an A/B has to start before Windows does), and
+`--pointer` keeps the guest pointer visible. Scroll and switch run with it **hidden**, as on the
+phone (host `CMD_CURSOR 0`): with it visible the driver saves and restores the pixels under it
+around every blit, which is ~90% of a File Manager list scroll's A000 traffic and would have hidden
+everything else.
+
+#### What dominated each operation, before
+
+| operation | busy ms | what it was |
+|---|---|---|
+| Notepad / Write scroll | 1015-1126 | `bltstos_srccopy`: 98% of the A000 traffic from one instruction. VGA write mode 1 (latch copy) = one CPU read plus one CPU write per **four pixels**, each a call out of the JIT into JS. 2.2 M A000 accesses per ten three-line scrolls. |
+| File Manager list scroll | 27-38 | not a screen-to-screen blit at all: 92% of the time inside GDI, 3200 A000 accesses. Only its 6080 bank-register writes (~2 per access) betray the banked path. Untouched by this pass. |
+| window switch | 15-22 | pure repaint (WM_PAINT); in the phone layout windows live in separate slots and do not overlap, so nothing is blitted. |
+| move | dominated by USER | 2 blits and ~175 k A000 accesses, but the busy time is USER's modal tracking loop (a PeekMessage spin while the button is down), which varies 5-15x run to run. Blits and A000 traffic are the meaningful columns for move and resize, not ms. |
+| resize | dominated by USER | 0 blits: Notepad's client is repainted, not blitted. |
+| app open / restore | 32-422 | the exposed-strip and full repaints, and **all** of their remaining JS A000 writes were chain-4 mode, which the rust fast path did not cover (see below). |
+
+#### Changes
+
+- **v86 `vga.js`: a PV 2D blit engine, DISPI `0x20`-`0x26`** — `SRC_X/SRC_Y/DST_X/DST_Y/WIDTH/HEIGHT`
+  and a `CTRL` whose bit 0 executes a screen-to-screen copy. It addresses the frame buffer exactly
+  as the banked path does (pixel (x,y) at byte `y*pitch + x`, `svga_offset` ignored, like the
+  driver's own `y*bmWidthBytes + x`), copies away from an overlap (rows bottom-up when the
+  destination is lower, `copyWithin` per row = a memmove), clips to the frame buffer and marks the
+  dirty range. Reading `CTRL` returns the capability, so `vga.pv_blt_disabled` sends the driver back
+  to the latch path with nothing rebuilt. Blit parameters are in the snapshot at slot 89.
+- **Driver `INC/PVBLT.INC`** — the register numbers and `pv_dispi_out`, one atomic 32-bit OUT per
+  register (index in the low word, data in the high word: the form BANK.INC established, so nothing
+  needs protecting against `MoveCursor` at interrupt time and the DISPI index register is left
+  alone). **`VGA.ASM`** `pv_blt_probe` reads the capability at `set_board_flags` and at every
+  `setmode` and records it as `BOARD_FLAG_PV_BLT` in `Video_Board_Flags`, next to the other "what
+  can this board do" bits — which BitBlt already copies into its stack frame as
+  `local_board_flags`, so the dispatch test is free and needs no data segment (by dispatch time DS
+  is not the data segment, which is why a plain flag byte would not do). **`BBLT.ASM`**
+  `pv_blt_scr2scr` is dispatched for a screen-to-screen SRCCOPY in opaque mode, with the clipped
+  rectangle BitBlt already computed for the software-cursor exclusion (`src_left_edge`/
+  `src_top_edge`/`dst_left_edge`/`dst_top_edge`, `xExt`, `yExt`, taken before
+  `blt_set_directions` moves the origins to the far edge). Seven port writes replace the whole latch
+  loop; unlike the latch path it needs no nibble alignment between source and destination, so the
+  unaligned case stops falling into the slower *compiled* screen-to-screen code.
+- **v86 rust `memory.rs`: the A000 write fast path now covers chain-4 mode too.** A diagnostic run
+  showed 100% of the *remaining* JS A000 writes after the blit landed — 178 800 of them per ten
+  Notepad scrolls — were chain-4, which `pv_planar_set` refused (it required chain-4 **off**). The
+  driver's colour output routines (`ppsd_color`, `color_opaque_output_386`, `color_bitmap_opaque`,
+  `blt_dst_nibbles`) all write through it. `pv_planar_enabled` is now a mode: 0 none, 1 unchained,
+  2 chain-4 with the V7 fore latches (the latch byte for the address's plane, gated by that plane's
+  map-mask bit, CPU data ignored), 3 chain-4 with them off (the CPU byte is the pixel). The value is
+  carried in the existing argument, so `?wasm=v86-base.wasm` still loads. JS A000 writes per ten
+  Notepad scrolls went from 178 800 to 0.
+- **v86 `log.js` / `cjs.js`: `DEBUG` defaults off.** Upstream defaults it true and the page never
+  set it, so every `dbg_assert` ran and every `dbg_log`'s arguments were evaluated on the phone.
+  `globalThis.V86_DEBUG = true` before the module graph loads, or `V86_DEBUG=1` for the node
+  harnesses, turns it back on. Nothing depends on it for correctness: the only non-logging effects
+  are `io.js` not installing overlap-assert stubs for unregistered port widths (the empty handlers
+  return the same all-ones), port 0x80/0xE9 no longer being silenced (their logs are gated anyway),
+  `cpu.seen_code` not being allocated, and `ide.js` not sealing itself.
+- Image `work-phone-20260903-104136.img` + `boot-20260903-104136.state.gz` (cold boot 3.3 s
+  headless; the snapshot is saved with the first-run Welcome note dismissed).
+
+#### Before and after
+
+Both columns are the same tree, the same image and a cold boot; "before" is `--noblt --nochain4`
+with `V86_DEBUG=1`, i.e. main as it stood. This Mac, node; **Josh's phone runs 5-10x slower while
+active**, so multiply busy ms accordingly. A000 accesses = JS writes + rust writes + reads.
+
+| operation | instr (M) before → after | busy ms before → after | gain | A000 accesses before → after | bank reg writes | PV blits |
+|---|---|---|---|---|---|---|
+| notepad WIN.INI scroll down 10x3 | 3.72 → 3.41 | **1105 → 36** | **30.7x** | 2 266 890 → 286 890 | 1766 → 1286 | 30 |
+| notepad WIN.INI scroll up 10x3 | 3.96 → 3.65 | **1126 → 51** | **22.1x** | 2 266 890 → 286 890 | 1612 → 1132 | 30 |
+| write README.WRI scroll down 10x3 | 7.18 → 6.93 | **1095 → 81** | **13.5x** | 2 201 200 → 239 630 | 954 → 534 | 30 |
+| write README.WRI scroll up 10x3 | 3.83 → 3.56 | **1015 → 58** | **17.5x** | 2 165 812 → 204 242 | 660 → 240 | 30 |
+| winfile list scroll down 10x3 | 1.94 → 1.98 | 38 → 29 | 1.3x | 6400 → 6400 | 6080 → 6080 | 0 |
+| winfile list scroll up 10x3 | 1.79 → 1.79 | 27 → 26 | 1.0x | 6400 → 6400 | 6080 → 6080 | 0 |
+| window switch (raise the one behind) | 0.58 → 0.52 | 15 → 6 | 2.5x | 15 981 → 15 981 | 161 → 161 | 0 |
+| window switch back | 0.74 → 0.89 | 22 → 7 | 3.1x | 23 534 → 23 534 | 329 → 329 | 0 |
+| notepad move (caption drag 240,140) | 54.83 → 3.48 | 557 → 61 | (see note) | 175 376 → 158 832 | 2402 → 2396 | 2 |
+| notepad move back | 3.39 → 8.48 | 32 → 90 | (see note) | 174 284 → 145 452 | 1933 → 1869 | 2 |
+| notepad resize (corner drag +160,+120) | 4.61 → 12.09 | 59 → 120 | (see note) | 144 370 → 140 274 | 1329 → 1307 | 0 |
+| notepad resize back | 11.24 → 10.54 | 133 → 113 | (see note) | 178 808 → 178 808 | 2444 → 2448 | 0 |
+| progman restore (repaint) | 0.11 → 0.13 | 0 → 0 | — | 8192 → 8192 | 44 → 44 | 0 |
+| notepad open | 1.20 → 1.00 | 32 → 19 | 1.7x | 53 979 → 45 707 | 192 → 192 | 1 |
+| notepad restore (repaint) | 0.78 → 0.73 | 36 → 18 | 2.0x | 75 291 → 67 099 | 287 → 251 | 0 |
+| winfile open | 13.89 → 13.80 | 297 → 136 | 2.2x | 676 570 → 562 778 | 2013 → 1949 | 1 |
+| winfile restore (repaint) | 3.16 → 2.91 | 108 → 48 | 2.3x | 418 611 → 410 419 | 1982 → 1938 | 0 |
+| solitaire open | 4.74 → 4.82 | 346 → 92 | 3.8x | 849 766 → 707 000 | 1543 → 1660 | 1 |
+| solitaire restore (repaint) | 4.67 → 4.41 | 422 → 97 | 4.3x | 1 013 095 → 868 193 | 2625 → 2569 | 1 |
+
+Move and resize: busy ms there is USER's modal drag loop, a PeekMessage spin for as long as the
+button is held, and it swings 5-15x between runs of the identical gesture (54.8 M against 3.5 M
+instructions for the same drag). The blit count and the A000 traffic are the columns that mean
+something. Move sheds ~10% of its A000 accesses and does its two client copies as two blits;
+resize does not blit at all, so it is unchanged by this pass.
+
+Attribution, on the Notepad scroll: 1105 ms → 117 with the adapter blit alone → 36 with the chain-4
+rust path as well. The blit is ~9x of it and the chain-4 path a further ~3x. `DEBUG` off was **not
+measurable above noise** on this Mac once the per-pixel work was in wasm (77/83 ms with it on
+against 72/76 off, inside the run-to-run spread); it is still the right default, since a phone's
+JavaScriptCore pays more for the dead branches and the log-argument expressions.
+
+#### The other two items
+
+**Serving the boot BIOS's disk reads directly turned out to be unnecessary**, and the bench now
+counts what settled it: this guest issues **ATA READ DMA (0xC8)**, not programmed I/O. A whole cold
+boot is 512 IDE data-port reads (the two boot sectors SeaBIOS reads with command 0x20, 0 ms in JS)
+and 797 READ DMA commands; a Paintbrush launch is **0 data-port reads** and 49 READ DMA. The
+per-port JS round trip is worth 0 ms per app launch, so nothing was changed. The "a third of an app
+launch's instructions are SeaBIOS" observation stands, but those instructions are INT 13h
+reflection and mode switching in F000, not data-port traps, and instructions were never the cost.
+
+**Selector-based frame-buffer addressing is not done, and the blit removes most of its motivation.**
+What it would buy is now visible: after the blit, the remaining redraw cost is the exposed-strip
+repaint through the chain-4 window, and moving *that* into wasm (the rust change above) got 3x
+without touching the driver at all. Two things came out of looking at it properly, and they change
+how it should be attempted:
+- The frame buffer is **linear** in the emulator (`memory.rs` `in_svga_lfb`): an LFB access from the
+  guest is a pointer read or write inside wasm with **no JS call at all**, cheaper even than the
+  rust A000 fast path, and `rep movs` into it already has a memcpy fast path. So selectors are worth
+  real money for every blitter, not just for row addressing.
+- But a ring-3 Windows driver cannot make a selector over physical `0xE0000000` with
+  AllocSelector/SetSelectorBase alone: WIN386's VMM does not map that physical range into the
+  System VM's linear address space. It needs DPMI `INT 31h AX=0800h` (Physical Address Mapping)
+  first, then an array of 64K selectors over the linear address it returns. That is the experiment
+  to run, and it should be run before any blitter is rewritten, because if WIN386 refuses the
+  mapping the whole approach dies there. The WIN.INI switch asked for in the TODO is therefore not
+  written either; the blit's own switch is the adapter capability (`vga.pv_blt_disabled`), which
+  needs no guest-side INI parsing and takes effect at the next mode set.
+
+Verification: `node v86/tests/pv/banked-vga.mjs` 77/77. `node tools/tour.mjs --apps
+NOTEPAD,SOL,WINFILE,PBRUSH` 32 pass / 2 fail — the same two pre-existing geometry checks (PBRUSH fit
+640x424, the Notepad dialog fit 604x318). **Frame-buffer hashes are identical for all seventeen
+operations between the before and after runs**, so the adapter's copy is pixel-for-pixel what the
+latch loop drew, and the chain-4 rust path is pixel-for-pixel what `vga_memory_write` did.
+
+Risks:
+- The blit trusts the rectangle BitBlt hands it. It clips to the frame buffer, so a bad rectangle is
+  wrong pixels, not a crash — but a future change to when `src_left_edge`/`dst_top_edge`/`xExt` are
+  valid at dispatch time would silently blit the wrong thing. `--noblt` is the bisect.
+- The rust chain-4 path depends on `pv_planar_sync()` being called after every port write that can
+  change chain-4, the fore-latch bit, the fore latches or the map mask, exactly as the unchained
+  path already did. A new write path in `vga.js` must call it.
+- `DEBUG` off means an overlapped port registration is no longer asserted. If a device ever
+  registers a port width twice, it now fails quietly.
+- The measurement image has no `image/changes-local/`, so the Entertainment Pack games are absent
+  from these runs; nothing in this pass is game-specific.

@@ -15,6 +15,7 @@
  *   --cold cold-boots Windows instead of restoring the snapshot (needed with --noblt).
  *   --pointer leaves the guest pointer visible during the scroll and switch benchmarks (the phone
  *   hides it, and the software cursor's save/restore around each blit otherwise dominates them).
+ *   --nochain4 sends the chain-4 A000 writes back to JS (the state before that fast path).
  *   --noblt refuses the adapter screen-to-screen blit (vga.pv_blt_disabled), for A/B against the
  *   driver's banked latch copy. Both are set before the snapshot is restored, so the driver reads
  *   the capability with the flag already in force.
@@ -71,6 +72,7 @@ if (flag("--log")) emulator.bus.register("pv-debug", line => console.log("[guest
 await new Promise(res => emulator.add_listener("emulator-ready", res));
 const cpu = emulator.v86.cpu, vga = cpu.devices.vga;
 if (flag("--nofast")) { vga.pv_planar_disabled = true; vga.pv_planar_sync(); }
+if (flag("--nochain4")) { vga.pv_planar_chain4_disabled = true; vga.pv_planar_sync(); }   // only the chain-4 A000 writes go back to JS
 if (flag("--noblt")) vga.pv_blt_disabled = true;   // refuse the adapter blit capability: the driver falls back to its banked latch copy
 const wexp = n => { try { return cpu.wm.exports[n](...[].slice.call(arguments, 1)) >>> 0; } catch (e) { return 0; } };
 const excStat = i => { try { return cpu.wm.exports.pv_exc_stat(i) >>> 0; } catch (e) { return 0; } };
