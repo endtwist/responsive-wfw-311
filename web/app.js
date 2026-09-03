@@ -1027,7 +1027,7 @@ function setGuestCursor(show, force) {
    Keyed by the window title PVMON publishes (class names are not on the wire). Taps are clicks
    everywhere. Unknown titles get pointer drag, the behaviour every Windows program expects. */
 const SURFACE_POLICY = [
-  [/^Welcome to Windows/, "scroll"],                                  // the read-me's note scrolls
+  [/^About$/, "scroll"], [/^Welcome to Windows/, "scroll"],            // the read-me's note scrolls
   [/\bHelp\b/, "scroll"], [/^Write\b/, "scroll"], [/^Notepad\b/, "scroll"], [/^Cardfile\b/, "scroll"],
   [/^File Manager/, "scroll"], [/^Control Panel/, "scroll"], [/^Print Manager/, "scroll"], [/^Task List/, "scroll"],
   [/^Calendar\b/, "scroll"], [/^Character Map/, "scroll"], [/^Media Player/, "scroll"], [/^Clipboard/, "scroll"],
@@ -2207,7 +2207,12 @@ function installTouch() {
   let lastTap = null;
   const follow = async (G) => {
     let steered = null;
+    const started = performance.now();
+    let lastPoint = started;
     for (;;) {
+      // A gesture whose end was never delivered (a touchcancel the page missed, the tab hidden
+      // mid-drag) used to leave this loop running and the input queue blocked behind it.
+      if (performance.now() - lastPoint > 5000) { diag("follow: abandoned, no movement for 5 s"); break; }
       // Walk the finger's path in order rather than jumping to the latest point: a freehand
       // stroke in Paintbrush is drawn from the WM_MOUSEMOVEs it receives, so skipping points turns
       // a curve into a few straight segments. Points closer than 3 guest px are coalesced; when
@@ -2221,7 +2226,7 @@ function installTouch() {
       // Absolute placement for drag motion too: on a phone the guest runs slowly enough that
       // relative PS/2 packets lag behind the release, while SetCursorPos through PVMON lands in
       // tens of milliseconds and Windows generates the WM_MOUSEMOVE for the dragging program.
-      if (t && (!steered || steered.x !== t.x || steered.y !== t.y)) { await placePointer(t); steered = t; continue; }
+      if (t && (!steered || steered.x !== t.x || steered.y !== t.y)) { lastPoint = performance.now(); await placePointer(t); steered = t; continue; }
       if (!G.active) break;
       await sleep(16);
     }
@@ -2610,7 +2615,9 @@ let keySwipe = null, lastKeyTap = 0;
     if (T && !T.scrolled && !T.zoomed && T.guest && ev.type === "touchend" && performance.now() - T.t0 < 1200) {
       diag(`two-finger tap: right click at ${T.guest.x},${T.guest.y}`);
       noteInput("two-finger right click");
-      queue(async () => { await placePointer(T.guest); button(true, true); await sleep(60); button(false, true); });
+      /* Straight through, not via the shared queue: a right click is atomic, and a queue still
+         draining an earlier gesture (a follow loop that outlived its finger) swallowed it. */
+      (async () => { await placePointer(T.guest); button(true, true); await sleep(60); button(false, true); })();
       unlockAudio("touchend");
       return;
     }
