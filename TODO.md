@@ -67,6 +67,27 @@ people hold a phone. Landscape is explicitly not a priority.
    Windows' own event sounds, cost little now that audio works.
 10. **Deep links with state.** `/solitaire` exists; extend to opening a specific document
     (Write, Notepad, Paintbrush) and to resuming a saved session, so a link is shareable.
+10b. **Shareable session snapshots (blob-backed).** A link that drops someone into a
+    mid-Solitaire game, which encoded state cannot do because the deal lives in app memory.
+    The page already saves and restores whole-machine state; add: host gzips it (~2 MB) and
+    uploads to Vercel Blob, the link carries the blob id, opening it restores in about the
+    two seconds a cold visit already takes, and a cron deletes stale ones. Two real decisions:
+    - **Prerequisite: move the stamped image parts into Blob**, keyed by stamp. A snapshot is
+      welded to the image build it came from (restoring across builds is what produced the
+      "Segment Load Failure" earlier), and today each deploy ships only the current image, so
+      yesterday's link breaks tomorrow. Blob-hosted parts outlive deployments and shrink the
+      deploy.
+    - **Expiry**: Blob does not track reads. Start with age-based expiry (one cron, no
+      bookkeeping); add a last-read touch through a tiny function later if live links start
+      expiring under people.
+    - **Trigger must be native**: a small Win16 "Share Session" program (same shape as
+      ABOUT.EXE) tells the host over the debug channel; the host uploads and hands the link to
+      the iOS share sheet (item 7). No page chrome.
+    - **Say plainly that it publishes everything**: a snapshot is a photograph of the whole
+      machine, including text typed in Notepad and anything on screen. Links must be
+      unguessable, not sequential.
+    - Sequence after items 5 (files in/out) and 6 (clipboard), which unlock the smaller
+      sharing wins first.
 11. **Screen-reader access.** The page is pixels, so VoiceOver sees nothing. Build an invisible
     accessibility tree from the window, menu and control information the guest already
     reports. Not visible chrome, so it stays inside the rule.
