@@ -2603,10 +2603,27 @@ function installTouch() {
      the guest stops changing (the end of a list: nothing to scroll), on any new touch, or after a
      second and a half, so it can never run away. */
   let glide = null;
+  /* Velocity from the last ~120 ms of movement rather than the gap between two events: touch
+     moves can arrive in a burst with no time between them (and synthetic ones always do), which
+     makes a per-event velocity either zero or nonsense. */
+  const noteFlick = (G, x, y) => {
+    (G.hist || (G.hist = [])).push({ t: performance.now(), x, y });
+    if (G.hist.length > 8) G.hist.shift();
+  };
+  const flickVelocity = G => {
+    const h = G && G.hist;
+    if (!h || h.length < 2) return { vx: 0, vy: 0 };
+    const last = h[h.length - 1];
+    let first = h[0];
+    for (const p of h) if (last.t - p.t <= 120) { first = p; break; }
+    const dt = last.t - first.t;
+    if (dt < 8) return { vx: 0, vy: 0 };                  // no usable time base
+    return { vx: (last.x - first.x) / dt, vy: (last.y - first.y) / dt };
+  };
   const stopGlide = () => { if (glide) { cancelAnimationFrame(glide.raf); glide = null; } };
   const startGlide = (slot, vx, vy) => {
     stopGlide();
-    if (slot < 0 || Math.max(Math.abs(vx), Math.abs(vy)) < 0.35) return;   // a slow lift just stops
+    if (slot < 0 || Math.max(Math.abs(vx), Math.abs(vy)) < 0.35) { diag(`glide declined slot=${slot} v=${vx.toFixed(2)},${vy.toFixed(2)}`); return; }   // a slow lift just stops
     const g0 = { slot, vx, vy, accX: 0, accY: 0, t: performance.now(), until: performance.now() + 1500, gen: dirtyGen, still: 0, raf: 0 };
     glide = g0;
     const step = () => {
@@ -2673,6 +2690,7 @@ function installTouch() {
      window the press started in (line messages through PVMON, like two fingers), never a pointer
      drag. A finger that never travels is still a click. */
   let oneScroll = null, shellPan = null;
+  const clearHold = () => { if (oneScroll && oneScroll.holdTimer) { clearTimeout(oneScroll.holdTimer); oneScroll.holdTimer = 0; } };
 let hoverSurface = false;
 let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
 
@@ -2755,7 +2773,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
       hoverSurface = pol === "hover";
       keySwipe = pol === "keys" ? { startX: px, startY: py, map: keyGame(title), title, fired: 0, t0: performance.now() } : null;
       aimSwipe = pol === "aim" ? { startX: px, startY: py, guest: h0 && (h0.kind === "client") ? { x: h0.x, y: h0.y } : null, decided: false } : null;
-      oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, t0: performance.now() } : null;
+      oneScroll = pol === "scroll" ? { slot, startX: px, startY: py, lastX: px, lastY: py, accX: 0, accY: 0, scrolling: false, title, layer: pressLayer, t0: performance.now(), holdTimer: 0 } : null;
       // The finger is on a surface a drag would scroll: tell the guest to watch the command
       // register closely, so the first line of scroll is not 55 ms behind the finger.
       if (oneScroll && oneScroll.slot >= 0) armFastPoll(); }
@@ -2776,6 +2794,32 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     const G = g = { active: true, dragging: false, longFired: false, latest: null, timer: 0, hit: hitTest(hostPoint(ev).px, hostPoint(ev).py), scrollSurface: !!oneScroll, hover: hoverSurface, t0: performance.now(),
                     mouse: ev.type === "mousedown", right: ev.type === "mousedown" && ev.button === 2 };
     pressActive = true;
+    /* Hold still on a scrolling surface, then move: the gesture becomes a guest left-button drag,
+       which inside an Edit control is a text selection. The button goes down at the hold itself,
+       not at the first movement, so the caret jumps to the finger the moment the hold takes --
+       the guest's own version of the cue iOS gives with its magnifier. */
+    if (oneScroll) {
+      const S = oneScroll, PT = pt, L = S.layer;
+      S.holdTimer = setTimeout(() => {
+        if (oneScroll !== S || S.scrolling || !G.active || G.dragging) return;
+        oneScroll = null;
+        G.dragging = true; G.selecting = true; G.latest = PT; G.path = [PT];
+        if (lastTap) lastTap.dragged = true;
+        diag(`hold-select start at ${PT.x},${PT.y} in "${S.title}"`);
+        noteInput("hold-select");
+        queue(async () => { await placePointer(PT); button(true, false); await follow(G); });
+        // A selection dragged to the edge of the text has to keep scrolling: an Edit only scrolls
+        // on a mouse move, so while the finger sits in the edge band we keep feeding it points
+        // just past the edge.
+        G.edge = setInterval(() => {
+          if (!G.active || !G.dragging) { clearInterval(G.edge); G.edge = 0; return; }
+          const t = G.latest;
+          if (!t || !L || L.gh == null) return;
+          const top = t.y <= L.gy + 24, bot = t.y >= L.gy + L.gh - 24;
+          if (top || bot) (G.path || (G.path = [])).push({ x: t.x, y: t.y + (bot ? 8 : -8) });
+        }, 120);
+      }, HOLD_MS);
+    }
     queue(async () => {
       await placePointer(pt);
       if (!G.active || G.dragging) return;
@@ -2832,21 +2876,16 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
           // held still first, then moved: a guest left-button drag from the hold point
           diag(`hold-drag start slot=${oneScroll.slot} ${oneScroll.title} after ${Math.round(performance.now() - oneScroll.t0)}ms`);
           noteInput("hold-drag");
-          oneScroll = null;
+          clearHold(); oneScroll = null;
         } else {
+          clearHold();
           oneScroll.scrolling = true; G.scrolled = true;
           if (lastTap) lastTap.dragged = true;
           diag(`scroll start slot=${oneScroll.slot} ${oneScroll.title}`);
         }
       }
       if (oneScroll && oneScroll.scrolling) {
-        { const now = performance.now(), dt = now - (oneScroll.vT || oneScroll.t0);
-          if (dt > 4) {                                   // smoothed velocity, host px per ms
-            const vy = (py - oneScroll.lastY) / dt, vx = (px - oneScroll.lastX) / dt;
-            oneScroll.vy = oneScroll.vy === undefined ? vy : oneScroll.vy * 0.6 + vy * 0.4;
-            oneScroll.vx = oneScroll.vx === undefined ? vx : oneScroll.vx * 0.6 + vx * 0.4;
-            oneScroll.vT = now;
-          } }
+        noteFlick(oneScroll, px, py);
         oneScroll.accX += px - oneScroll.lastX; oneScroll.accY += py - oneScroll.lastY;
         const ny = Math.trunc(oneScroll.accY / SCROLL_STEP), nx = Math.trunc(oneScroll.accX / SCROLL_STEP);
         const send = (dir, n) => { if (oneScroll.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, oneScroll.slot | dir << 8 | Math.min(15, n) << 12); } noteInput(`scroll ${dir} ${n}`); };
@@ -2919,12 +2958,12 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     pressActive = false;
     releaseFastPoll();
     const G = g;
-    const S = oneScroll; oneScroll = null;
+    const S = oneScroll; clearHold(); oneScroll = null;
     const P = shellPan; shellPan = null;
     if (P && P.panning) { if (G) { G.active = false; clearTimeout(G.timer); } noteInput(`shell pan -> ${Math.round(shellPanY)}`); return; }   // a pan ends with nothing pressed
     diag(`up dragging=${G && G.dragging} longFired=${G && G.longFired} scrolled=${!!(S && S.scrolling)} consumed=${consumed} cursor=${JSON.stringify(guestCursor)}`);
     noteInput(`up drag=${!!(G && G.dragging)} scroll=${!!(S && S.scrolling)} consumed=${consumed}`);
-    if (G) { G.active = false; clearTimeout(G.timer); }
+    if (G) { G.active = false; clearTimeout(G.timer); if (G.edge) { clearInterval(G.edge); G.edge = 0; } }
     if (consumed) {
       // a caption tap that did not turn into a drag is a click on the caption: it activates
       if (chromeDrag) clearTimeout(chromeDrag.timer);
@@ -2945,7 +2984,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
       consumed = null; chromeDrag = null; return;
     }
     if (!G) return;
-    if (S && S.scrolling) { startGlide(S.slot, S.vx || 0, S.vy || 0); return; }   // a scroll ends with nothing pressed, and glides
+    if (S && S.scrolling) { const v = flickVelocity(S); startGlide(S.slot, v.vx, v.vy); return; }   // a scroll ends with nothing pressed, and glides
     if (!G.dragging && !G.longFired && !G.mouse && ev && ev.type === "touchend" && performance.now() - G.t0 >= LONG_PRESS_MS) {   // a hold released still: right button
       queue(async () => { button(true, true); await sleep(60); button(false, true); });
       return;
@@ -2994,7 +3033,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     setGuestCursor(false);
     if (ev.touches.length === 2) {
       noteInput("two-finger start");
-      oneScroll = null;
+      clearHold(); oneScroll = null;
       const G = g;
       if (G) { G.active = false; clearTimeout(G.timer); if (G.dragging && !G.hover) queue(async () => button(false, false)); g = null; }
       const m = mid(ev.touches);
@@ -3047,13 +3086,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
           return;
         }
       }
-      { const now = performance.now(), dt = now - (twoFinger.vT || twoFinger.t0);
-        if (dt > 4) {
-          const vy = (m.y - twoFinger.last.y) / dt, vx = (m.x - twoFinger.last.x) / dt;
-          twoFinger.vy = twoFinger.vy === undefined ? vy : twoFinger.vy * 0.6 + vy * 0.4;
-          twoFinger.vx = twoFinger.vx === undefined ? vx : twoFinger.vx * 0.6 + vx * 0.4;
-          twoFinger.vT = now;
-        } }
+      noteFlick(twoFinger, m.x, m.y);
       twoFinger.accX += m.x - twoFinger.last.x; twoFinger.accY += m.y - twoFinger.last.y;
       twoFinger.last = m;
       const send = (dir, n) => { twoFinger.scrolled = true; if (twoFinger.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); } };
@@ -3082,7 +3115,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     }
     const wasTwo = !!twoFinger;
     const T = twoFinger;
-    if (T && T.scrolled && T.slot >= 0) startGlide(T.slot, T.vx || 0, T.vy || 0);
+    if (T && T.scrolled && T.slot >= 0) { const v = flickVelocity(T); startGlide(T.slot, v.vx, v.vy); }
     twoFinger = null;
     /* Two fingers down that neither scrolled nor pinched: a right click where they landed.
        Immediate, unlike the hold-and-lift right click, which made JezzBall's wall flip awkward.
