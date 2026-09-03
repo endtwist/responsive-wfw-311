@@ -2332,7 +2332,14 @@ let hoverSurface = false;
         const r = c.getBoundingClientRect();
         if (insideShellClient(hitTest(m.x - r.left - safe.l, m.y - r.top - safe.t + keyboardShift()))) slot = SHELL_SCROLL_SLOT;
       }
-      twoFinger = { last: m, accX: 0, accY: 0, dist: dist(ev.touches), win, slot };
+      twoFinger = { last: m, accX: 0, accY: 0, dist: dist(ev.touches), win, slot,
+                    t0: performance.now(), start: m, moved: false, guest: null };
+      /* A two-finger TAP is a right click, the trackpad convention: no hold, so games that flip a
+         mode with the right button (JezzBall's wall orientation) are playable. The guest point is
+         taken now, at the midpoint, because the release has no touches left to hit-test. */
+      { const r = c.getBoundingClientRect();
+        const h = hitTest(m.x - r.left - safe.l, m.y - r.top - safe.t + keyboardShift());
+        if (h && (h.kind === "client" || h.kind === "chrome" || h.kind === "desktop")) twoFinger.guest = { x: h.x, y: h.y }; }
       if (slot >= 0) armFastPoll();
       ev.preventDefault();
       return;
@@ -2350,6 +2357,7 @@ let hoverSurface = false;
       if (twoFinger.win) {
         const zp = layerZoom[twoFinger.win.key] || (layerZoom[twoFinger.win.key] = { z: 1, px: 0, py: 0 });
         if (Math.abs(d - twoFinger.dist) > 2) {                     // pinch: zoom the client area
+          twoFinger.moved = true;
           const maxZ = Math.max(1, (twoFinger.win.c * 1.5) / twoFinger.win.s);
           const nz = Math.max(1, Math.min(maxZ, zp.z * d / twoFinger.dist));
           // keep the guest pixel under the fingers where it is
@@ -2367,6 +2375,7 @@ let hoverSurface = false;
           return;
         }
       }
+      if (Math.hypot(m.x - twoFinger.start.x, m.y - twoFinger.start.y) > 10) twoFinger.moved = true;
       twoFinger.accX += m.x - twoFinger.last.x; twoFinger.accY += m.y - twoFinger.last.y;
       twoFinger.last = m;
       const send = (dir, n) => { if (twoFinger.slot >= 0) { armFastPoll(); sendCommand(CMD_SCROLL, twoFinger.slot | dir << 8 | Math.min(15, n) << 12); } };
@@ -2394,7 +2403,17 @@ let hoverSurface = false;
       return;
     }
     const wasTwo = !!twoFinger;
+    const T = twoFinger;
     twoFinger = null;
+    /* Two fingers down, neither moved, lifted quickly: a right click at that point. Immediate,
+       unlike the hold-and-lift right click, which is what made JezzBall's wall flip awkward. */
+    if (T && !T.moved && T.guest && ev.type === "touchend" && performance.now() - T.t0 < 500) {
+      diag(`two-finger tap: right click at ${T.guest.x},${T.guest.y}`);
+      noteInput("two-finger right click");
+      queue(async () => { await placePointer(T.guest); button(true, true); await sleep(60); button(false, true); });
+      unlockAudio("touchend");
+      return;
+    }
     // A two-finger gesture that began as a single-finger press must still release that press.
     // The keyboard decision happens inside up(), synchronously in this handler: iOS grants focus
     // only inside the gesture, not in a timer afterwards.
