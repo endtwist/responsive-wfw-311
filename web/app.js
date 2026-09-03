@@ -3565,8 +3565,11 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     const step = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? 320 : 1;   // lines / pages / pixels
     wheelAcc += ev.deltaY * step; wheelAccX += ev.deltaX * step;
     const ny = Math.trunc(wheelAcc / 40), nx = Math.trunc(wheelAccX / 40);
-    if (ny) { armFastPoll(); sendCommand(CMD_SCROLL, slot | (ny > 0 ? 1 : 2) << 8 | Math.min(15, Math.abs(ny)) << 12); wheelAcc -= ny * 40; }
-    if (nx) { armFastPoll(); sendCommand(CMD_SCROLL, slot | (nx > 0 ? 3 : 4) << 8 | Math.min(15, Math.abs(nx)) << 12); wheelAccX -= nx * 40; }
+    /* A wheel is not a finger. A finger moving down drags the content down, so it scrolls the
+       window up; a positive wheel delta means "scroll down" in every browser, so it scrolls the
+       window down -- the opposite direction from the same sign in the touch path above. */
+    if (ny) { armFastPoll(); sendCommand(CMD_SCROLL, slot | (ny > 0 ? 2 : 1) << 8 | Math.min(15, Math.abs(ny)) << 12); wheelAcc -= ny * 40; }
+    if (nx) { armFastPoll(); sendCommand(CMD_SCROLL, slot | (nx > 0 ? 4 : 3) << 8 | Math.min(15, Math.abs(nx)) << 12); wheelAccX -= nx * 40; }
   }, { passive: false });
 }
 
