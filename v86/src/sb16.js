@@ -6,6 +6,7 @@ import {
 import { h } from "./lib.js";
 import { dbg_log } from "./log.js";
 import { SyncBuffer } from "./buffer.js";
+import { OPL3, OPL_RATE } from "./opl3.js";
 import { v86 } from "./main.js";
 
 // For Types Only
@@ -88,6 +89,12 @@ const
     // Default IRQ channel.
     SB_IRQ = SB_IRQ5,
 
+    // OPL rendering: at least this many samples before a block is worth sending (2.6 ms), at most
+    // this many in one (41 ms), and never more than this owed after a stall (82 ms of catch-up).
+    OPL_MIN_BLOCK = 128,
+    OPL_MAX_BLOCK = 2048,
+    OPL_MAX_OWED = 4096,
+
     // Indices to the irq_triggered register.
     SB_IRQ_8BIT = 0x1,
     SB_IRQ_16BIT = 0x2,
@@ -102,7 +109,6 @@ var DSP_COMMAND_HANDLERS = [];
 var MIXER_READ_HANDLERS = [];
 var MIXER_WRITE_HANDLERS = [];
 var MIXER_REGISTER_IS_LEGACY = new Uint8Array(256);
-var FM_HANDLERS = [];
 
 
 /**
@@ -174,6 +180,7 @@ export function SB16(cpu, bus)
     this.dma_paused = false;
     this.sampling_rate = 22050;
     bus.send("dac-tell-sampling-rate", this.sampling_rate);
+    bus.send("opl-tell-sampling-rate", OPL_RATE);
     this.bytes_per_sample = 1;
 
     // DMA identification data.
@@ -188,9 +195,19 @@ export function SB16(cpu, bus)
     this.mpu_read_buffer_lastvalue = 0;
 
     // FM Synthesizer.
+    // responsive-wfw311: the register writes used to be discarded (see opl3.js). They now reach a
+    // real OPL3, rendered at its own 49716 Hz on the wall clock in opl_timer() and handed to the
+    // page as "opl-send-data" blocks - a separate channel from the wave DAC, so FM and a .WAV can
+    // sound at once and neither has to agree with the other about a sampling rate.
+    this.opl = new OPL3();
     this.fm_current_address0 = 0;
-    this.fm_current_address1 = 0;
-    this.fm_waveform_select_enable = false;
+    this.fm_current_address1 = 0x100;
+    this.opl_playing = false;
+    this.opl_last_time = 0;
+    this.opl_owed = 0;                      // fractional samples owed since the last tick
+    this.opl_blocks = 0;
+    this.opl_samples = 0;
+    this.opl_traced = 0;
 
     // Interrupts.
     this.irq = SB_IRQ;
@@ -201,7 +218,7 @@ export function SB16(cpu, bus)
     // responsive-wfw311: guest-visible DSP/IRQ trace on the console (bus "sb16-trace" true/false),
     // for watching a driver's detection sequence in a release build where dbg_log is compiled out.
     this.trace = false;
-    bus.register("sb16-trace", function(v) { this.trace = !!v; }, this);
+    bus.register("sb16-trace", function(v) { this.trace = !!v; if(this.opl) this.opl.trace = !!v; }, this);
 
     // IO Ports.
     // http://homepages.cae.wisc.edu/~brodskye/sb16doc/sb16doc.html#DSPPorts
@@ -433,6 +450,11 @@ SB16.prototype.set_state = function(state)
     this.dma_waiting_transfer = state[25];
     this.dma_paused = state[26];
     this.sampling_rate = state[27];
+    // The FM chip is not snapshotted; a restore comes back with it silent rather than with
+    // whatever note was sounding when the state was saved.
+    this.opl.reset();
+    this.opl_playing = false;
+    this.opl_owed = 0;
     this.bytes_per_sample = state[28];
 
     this.e2_value = state[29];
@@ -470,10 +492,13 @@ SB16.prototype.set_state = function(state)
 // I/O handlers
 //
 
+// FM status: the timer overflow flags. An Ad Lib detection routine writes registers 4/2/4 and
+// reads this back expecting 0x00 then 0xC0, which opl3.js's timers satisfy.
 SB16.prototype.port2x0_read = function()
 {
-    dbg_log("220 read: fm music status port (unimplemented)", LOG_SB16);
-    return 0xFF;
+    this.opl.timers_advance(v86.microtick());
+    this.opl.timers_read_tick();
+    return this.opl.read_status();
 };
 
 SB16.prototype.port2x1_read = function()
@@ -484,8 +509,9 @@ SB16.prototype.port2x1_read = function()
 
 SB16.prototype.port2x2_read = function()
 {
-    dbg_log("222 read: advanced fm music status port (unimplemented)", LOG_SB16);
-    return 0xFF;
+    this.opl.timers_advance(v86.microtick());
+    this.opl.timers_read_tick();
+    return this.opl.read_status();
 };
 
 SB16.prototype.port2x3_read = function()
@@ -522,8 +548,9 @@ SB16.prototype.port2x7_read = function()
 
 SB16.prototype.port2x8_read = function()
 {
-    dbg_log("228 read: fm music status port (unimplemented)", LOG_SB16);
-    return 0xFF;
+    this.opl.timers_advance(v86.microtick());
+    this.opl.timers_read_tick();
+    return this.opl.read_status();
 };
 
 SB16.prototype.port2x9_read = function()
@@ -591,42 +618,28 @@ SB16.prototype.port2xF_read = function()
 };
 
 
-// FM Address Port - primary register.
+// FM Address Port - primary register bank (0x220/0x228/0x388: Ad Lib compatible).
 SB16.prototype.port2x0_write = function(value)
 {
-    dbg_log("220 write: (unimplemented) fm register 0 address = " + h(value), LOG_SB16);
-    this.fm_current_address0 = 0;
+    this.fm_current_address0 = value & 0xFF;
 };
 
-// FM Data Port - primary register.
+// FM Data Port - primary register bank.
 SB16.prototype.port2x1_write = function(value)
 {
-    dbg_log("221 write: (unimplemented) fm register 0 data = " + h(value), LOG_SB16);
-    var handler = FM_HANDLERS[this.fm_current_address0];
-    if(!handler)
-    {
-        handler = this.fm_default_write;
-    }
-    handler.call(this, value, 0, this.fm_current_address0);
+    this.opl.write(this.fm_current_address0, value);
 };
 
-// FM Address Port - secondary register.
+// FM Address Port - secondary register bank (OPL3 only; 0x222/0x38A).
 SB16.prototype.port2x2_write = function(value)
 {
-    dbg_log("222 write: (unimplemented) fm register 1 address = " + h(value), LOG_SB16);
-    this.fm_current_address1 = 0;
+    this.fm_current_address1 = 0x100 | (value & 0xFF);
 };
 
-// FM Data Port - secondary register.
+// FM Data Port - secondary register bank.
 SB16.prototype.port2x3_write = function(value)
 {
-    dbg_log("223 write: (unimplemented) fm register 1 data =" + h(value), LOG_SB16);
-    var handler = FM_HANDLERS[this.fm_current_address1];
-    if(!handler)
-    {
-        handler = this.fm_default_write;
-    }
-    handler.call(this, value, 1, this.fm_current_address1);
+    this.opl.write(this.fm_current_address1, value);
 };
 
 // Mixer Address Port.
@@ -673,12 +686,12 @@ SB16.prototype.port2x7_write = function(value)
 
 SB16.prototype.port2x8_write = function(value)
 {
-    dbg_log("228 write: fm music register port (unimplemented)", LOG_SB16);
+    this.fm_current_address0 = value & 0xFF;
 };
 
 SB16.prototype.port2x9_write = function(value)
 {
-    dbg_log("229 write: fm music data port (unimplemented)", LOG_SB16);
+    this.opl.write(this.fm_current_address0, value);
 };
 
 SB16.prototype.port2xA_write = function(value)
@@ -1592,197 +1605,6 @@ register_mixer_read(0x82, function()
 });
 
 //
-// FM Handlers
-//
-
-SB16.prototype.fm_default_write = function(data, register, address)
-{
-    dbg_log("unhandled fm register write. addr:" + register + "|" + h(address) + " data:" + h(data), LOG_SB16);
-    // No need to save into a dummy register as the registers are write-only.
-};
-
-/**
- * @param{Array} addresses
- * @param{function(number, number, number)=} handler
- */
-function register_fm_write(addresses, handler)
-{
-    if(!handler)
-    {
-        handler = SB16.prototype.fm_default_write;
-    }
-    for(var i = 0; i < addresses.length; i++)
-    {
-        FM_HANDLERS[addresses[i]] = handler;
-    }
-}
-
-function between(start, end)
-{
-    var a = [];
-    for(var i = start; i <= end; i++)
-    {
-        a.push(i);
-    }
-    return a;
-}
-
-const SB_FM_OPERATORS_BY_OFFSET = new Uint8Array(32);
-SB_FM_OPERATORS_BY_OFFSET[0x00] = 0;
-SB_FM_OPERATORS_BY_OFFSET[0x01] = 1;
-SB_FM_OPERATORS_BY_OFFSET[0x02] = 2;
-SB_FM_OPERATORS_BY_OFFSET[0x03] = 3;
-SB_FM_OPERATORS_BY_OFFSET[0x04] = 4;
-SB_FM_OPERATORS_BY_OFFSET[0x05] = 5;
-SB_FM_OPERATORS_BY_OFFSET[0x08] = 6;
-SB_FM_OPERATORS_BY_OFFSET[0x09] = 7;
-SB_FM_OPERATORS_BY_OFFSET[0x0A] = 8;
-SB_FM_OPERATORS_BY_OFFSET[0x0B] = 9;
-SB_FM_OPERATORS_BY_OFFSET[0x0C] = 10;
-SB_FM_OPERATORS_BY_OFFSET[0x0D] = 11;
-SB_FM_OPERATORS_BY_OFFSET[0x10] = 12;
-SB_FM_OPERATORS_BY_OFFSET[0x11] = 13;
-SB_FM_OPERATORS_BY_OFFSET[0x12] = 14;
-SB_FM_OPERATORS_BY_OFFSET[0x13] = 15;
-SB_FM_OPERATORS_BY_OFFSET[0x14] = 16;
-SB_FM_OPERATORS_BY_OFFSET[0x15] = 17;
-
-function get_fm_operator(register, offset)
-{
-    return register * 18 + SB_FM_OPERATORS_BY_OFFSET[offset];
-}
-
-register_fm_write([0x01], function(bits, register, address)
-{
-    this.fm_waveform_select_enable[register] = bits & 0x20 > 0;
-    this.fm_update_waveforms();
-});
-
-// Timer 1 Count.
-register_fm_write([0x02]);
-
-// Timer 2 Count.
-register_fm_write([0x03]);
-
-register_fm_write([0x04], function(bits, register, address)
-{
-    switch(register)
-    {
-        case 0:
-            // if(bits & 0x80)
-            // {
-            //     // IQR Reset
-            // }
-            // else
-            // {
-            //     // Timer masks and on/off
-            // }
-            break;
-        case 1:
-            // Four-operator enable
-            break;
-    }
-});
-
-register_fm_write([0x05], function(bits, register, address)
-{
-    if(register === 0)
-    {
-        // No registers documented here.
-        this.fm_default_write(bits, register, address);
-    }
-    else
-    {
-        // OPL3 Mode Enable
-    }
-});
-
-register_fm_write([0x08], function(bits, register, address)
-{
-    // Composite sine wave on/off
-    // Note select (keyboard split selection method)
-});
-
-register_fm_write(between(0x20, 0x35), function(bits, register, address)
-{
-    var operator = get_fm_operator(register, address - 0x20);
-    // Tremolo
-    // Vibrato
-    // Sustain
-    // KSR Envelope Scaling
-    // Frequency Multiplication Factor
-});
-
-register_fm_write(between(0x40, 0x55), function(bits, register, address)
-{
-    var operator = get_fm_operator(register, address - 0x40);
-    // Key Scale Level
-    // Output Level
-});
-
-register_fm_write(between(0x60, 0x75), function(bits, register, address)
-{
-    var operator = get_fm_operator(register, address - 0x60);
-    // Attack Rate
-    // Decay Rate
-});
-
-register_fm_write(between(0x80, 0x95), function(bits, register, address)
-{
-    var operator = get_fm_operator(register, address - 0x80);
-    // Sustain Level
-    // Release Rate
-});
-
-register_fm_write(between(0xA0, 0xA8), function(bits, register, address)
-{
-    var channel = address - 0xA0;
-    // Frequency Number (Lower 8 bits)
-});
-
-register_fm_write(between(0xB0, 0xB8), function(bits, register, address)
-{
-    // Key-On
-    // Block Number
-    // Frequency Number (Higher 2 bits)
-});
-
-register_fm_write([0xBD], function(bits, register, address)
-{
-    // Tremelo Depth
-    // Vibrato Depth
-    // Percussion Mode
-    // Bass Drum Key-On
-    // Snare Drum Key-On
-    // Tom-Tom Key-On
-    // Cymbal Key-On
-    // Hi-Hat Key-On
-});
-
-register_fm_write(between(0xC0, 0xC8), function(bits, register, address)
-{
-    // Right Speaker Enable
-    // Left Speaker Enable
-    // Feedback Modulation Factor
-    // Synthesis Type
-});
-
-register_fm_write(between(0xE0, 0xF5), function(bits, register, address)
-{
-    var operator = get_fm_operator(register, address - 0xE0);
-    // Waveform Select
-});
-
-//
-// FM behaviours
-//
-
-SB16.prototype.fm_update_waveforms = function()
-{
-    // To be implemented.
-};
-
-//
 // General behaviours
 //
 
@@ -1984,10 +1806,66 @@ SB16.prototype.rec_stop = function()
     this.bus.send("sb16-record-stop");
 };
 
-// Called from the CPU's hardware timer loop. Writes the samples that have become due since the
-// last call into guest memory through the DMA controller, raising the 8-bit IRQ at each block
-// boundary. Returns the number of milliseconds until the next block is due.
+// Called from the CPU's hardware timer loop with the wall clock in milliseconds. Both the OPL
+// renderer and the recording path are paced by real time rather than by emulated time, so audio
+// keeps its rate whatever the guest is doing. Returns the milliseconds until the next one is due.
 SB16.prototype.timer = function(now)
+{
+    var opl_next = this.opl_timer(now);
+    var rec_next = this.rec_timer(now);
+    return opl_next < rec_next ? opl_next : rec_next;
+};
+
+// Render the OPL samples that have become due and send them to the page. Nothing is generated
+// while every envelope is off, so an idle Windows costs one array scan per tick.
+SB16.prototype.opl_timer = function(now)
+{
+    this.opl.timers_advance(now);
+    if(!this.opl.any_active())
+    {
+        this.opl_last_time = now;
+        this.opl_owed = 0;
+        if(this.opl_playing)
+        {
+            this.opl_playing = false;
+            this.bus.send("opl-idle");
+            if(this.trace) console.log("[sb16] opl idle after " + this.opl_blocks + " blocks, " +
+                                       this.opl_samples + " samples, " + this.opl.writes + " register writes");
+        }
+        return 100;
+    }
+
+    if(!this.opl_playing)
+    {
+        this.opl_playing = true;
+        this.opl_last_time = now;
+        this.opl_owed = 0;
+        this.opl_blocks = 0;
+        this.opl_samples = 0;
+        if(this.trace) console.log("[sb16] opl start (" + this.opl.writes + " register writes so far)");
+    }
+
+    var elapsed = now - this.opl_last_time;
+    this.opl_last_time = now;
+    if(elapsed > 0) this.opl_owed += elapsed * OPL_RATE / 1000;
+    // After a stall (a throttled tab) do not dump a second of catch-up into the page: drop it.
+    if(this.opl_owed > OPL_MAX_OWED) this.opl_owed = OPL_MAX_OWED;
+
+    var count = this.opl_owed | 0;
+    if(count >= OPL_MIN_BLOCK)
+    {
+        if(count > OPL_MAX_BLOCK) count = OPL_MAX_BLOCK;
+        this.opl_owed -= count;
+        var left = new Float32Array(count), right = new Float32Array(count);
+        this.opl.generate(left, right, count);
+        this.opl_blocks++;
+        this.opl_samples += count;
+        this.bus.send("opl-send-data", [left, right], [left.buffer, right.buffer]);
+    }
+    return 4;
+};
+
+SB16.prototype.rec_timer = function(now)
 {
     if(!this.rec_active)
     {

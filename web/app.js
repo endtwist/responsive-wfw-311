@@ -1447,6 +1447,71 @@ function overlapsOf(w, rect) {
   return out;
 }
 
+/* FM synthesis (MIDI). v86's SB16 now has a real OPL3 (v86/src/opl3.js), which renders at its own
+   49716 Hz whenever an envelope is running and pushes stereo blocks over the bus. It does not go
+   through the wave DAC: that one is a pull-model queue whose sampling rate follows whatever DMA
+   playback is programmed, and MIDI has to be able to sound at the same time as a .WAV without the
+   two arguing about a rate. So the page owns a second output node here.
+
+   A ScriptProcessor (not an AudioWorklet: a worklet needs its own module file, and this runs
+   everywhere including iOS Safari) drains a ring buffer, resampling from 49716 Hz to whatever the
+   AudioContext runs at. The device paces its blocks on the wall clock, so the ring absorbs the
+   jitter; PREROLL keeps a cushion so a busy guest does not tick, and a ring that drifts too far
+   ahead is caught up rather than allowed to add latency. Under-run plays silence. */
+const opl = { rate: 49716, ring: null, size: 1 << 16, w: 0, r: 0, node: null, sink: null, ctx: null,
+              blocks: 0, samples: 0, under: 0, skips: 0, playing: false, preroll: true };
+const OPL_PREROLL = 2048;                     // ~41 ms of cushion before the node starts draining
+const OPL_MAX_AHEAD = 24000;                  // ~480 ms: beyond this the read position jumps forward
+window.oplState = () => ({ blocks: opl.blocks, samples: opl.samples, queued: Math.round(opl.w - opl.r),
+                           under: opl.under, skips: opl.skips, playing: opl.playing, rate: opl.rate,
+                           ctx: opl.ctx ? opl.ctx.state : "none" });
+emulator.bus.register("opl-tell-sampling-rate", r => { if (r > 0) opl.rate = r; });
+emulator.bus.register("opl-idle", () => { opl.playing = false; });
+emulator.bus.register("opl-send-data", data => {
+  const l = data[0], r = data[1], n = l.length;
+  if (!oplOpen()) return;
+  if (!opl.playing) { opl.playing = true; opl.preroll = true; opl.r = opl.w; }
+  const ring = opl.ring, size = opl.size;
+  for (let i = 0; i < n; i++) {
+    const p = ((opl.w + i) % (size >> 1)) << 1;
+    ring[p] = l[i]; ring[p + 1] = r[i];
+  }
+  opl.w += n;
+  opl.blocks++; opl.samples += n;
+  if (opl.w - opl.r > OPL_MAX_AHEAD) { opl.r = opl.w - OPL_PREROLL; opl.skips++; }
+  if (opl.preroll && opl.w - opl.r >= OPL_PREROLL) opl.preroll = false;
+});
+function oplOpen() {
+  if (opl.node) return true;
+  const ctx = audioCtx();
+  if (!ctx) return false;                     // no speaker adapter (headless probe): nothing to play into
+  opl.ctx = ctx;
+  opl.ring = new Float32Array(opl.size);      // interleaved stereo, so size >> 1 frames
+  opl.node = ctx.createScriptProcessor(1024, 0, 2);
+  // Same 3x the speaker adapter gives its own DAC source: the chip's 13-bit sum is scaled by
+  // 1/32768 in the device, which leaves a single loud voice around -14 dBFS.
+  opl.sink = ctx.createGain(); opl.sink.gain.value = 3;
+  const step = opl.rate / ctx.sampleRate;     // 49716 Hz in, the context's rate out
+  opl.node.onaudioprocess = ev => {
+    const ob = ev.outputBuffer, L = ob.getChannelData(0), R = ob.getChannelData(1);
+    const frames = ob.length, size = opl.size >> 1;
+    if (opl.preroll || opl.r >= opl.w) { L.fill(0); R.fill(0); if (opl.playing && !opl.preroll) opl.under++; return; }
+    for (let i = 0; i < frames; i++) {
+      const pos = opl.r + i * step;
+      if (pos >= opl.w) { L[i] = 0; R[i] = 0; continue; }
+      const i0 = Math.floor(pos), f = pos - i0;
+      const a = (i0 % size) << 1, b = ((i0 + 1) % size) << 1;
+      L[i] = opl.ring[a] * (1 - f) + opl.ring[b] * f;
+      R[i] = opl.ring[a + 1] * (1 - f) + opl.ring[b + 1] * f;
+    }
+    opl.r += frames * step;
+    if (opl.r > opl.w) opl.r = opl.w;
+  };
+  opl.node.connect(opl.sink); opl.sink.connect(ctx.destination);
+  report("opl", `output open: ${opl.rate} Hz in, ${ctx.sampleRate} Hz out, ctx ${ctx.state}`);
+  return true;
+}
+
 /* Microphone: the emulated Sound Blaster asks for capture the moment the guest issues a DMA
    input command (Sound Recorder's Record), so the browser's permission prompt is the only thing
    the user sees and only when they record. Audio is pulled from getUserMedia through a

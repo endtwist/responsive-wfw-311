@@ -127,6 +127,26 @@ python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitl
   "PostScript,C:\\PRINT.PRN::device=HP LaserJet III PostScript" \
   "windows.load=$( [ "$LOAD" = - ] && echo || echo "$LOAD" )" \
   "windows.run=$( [ -f changes/windows/ABOUT.EXE ] && echo ABOUT.EXE )"
+# sound=1: Windows' own event sounds. The stock WIN.INI already lists the WAVs in [Sounds]; what
+# it lacks is the master switch the Sound applet writes ([Sound] Enable), without which MMSYSTEM
+# plays none of them. The names are asserted here too so a rebuilt image always has the same set
+# (SPEC 2026-09-03). All five WAVs ship with WFW 3.11 in C:\WINDOWS.
+if [ -n "$SOUND" ]; then
+  python3 ../tools/winini.py $TMP/WIN.INI Sound.Enable=1 \
+    "Sounds.SystemStart=chimes.wav, Windows Start" \
+    "Sounds.SystemExit=chimes.wav, Windows Exit" \
+    "Sounds.SystemDefault=ding.wav, Default Beep" \
+    "Sounds.SystemAsterisk=ding.wav, Asterisk" \
+    "Sounds.SystemQuestion=ding.wav, Question" \
+    "Sounds.SystemExclamation=ding.wav, Exclamation" \
+    "Sounds.SystemHand=ding.wav, Critical Stop" \
+    "Sounds.RingIn=ringin.wav, Incoming Call" \
+    "Sounds.RingOut=ringout.wav, Outgoing Call"
+  # MIDIMAP.CFG is left exactly as shipped: its current setup (the 16-bit field at offset 6) is
+  # 7, "Ad Lib general", whose channel entries name the "Ad Lib" port - the one port this machine
+  # has. The other setups name Roland or Creative ports and produce "The current MIDI Mapper setup
+  # refers to a MIDI device that is not installed" (all nine were tried; SPEC 2026-09-03).
+fi
 mcopy -o $M $TMP/WIN.INI ::/WINDOWS/WIN.INI
 # File Manager remembers its window from its last run, which on this image was a 1024x768 session;
 # opened in a 640-column slot that makes it a tall sliver scaled to nothing. Give it a sane default.
