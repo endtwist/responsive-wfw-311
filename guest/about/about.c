@@ -33,27 +33,22 @@ static char szIniKey[] = "AboutShown";
 static char szText[] =
     "Your finger is the mouse.\r\n"
     "\r\n"
-    "Tap to click; tap twice for a double-click.  One tap opens an icon in Program Manager.\r\n"
+    "Tap to click; twice to double-click.  One tap opens an icon in Program Manager.\r\n"
     "\r\n"
-    "Tap with two fingers for a right-click.  (Holding still and lifting works too.)\r\n"
+    "Tap with two fingers for a right-click.\r\n"
     "\r\n"
-    "Hold, then drag, to move a window, an icon or a selection; a plain drag scrolls a list "
-    "instead.\r\n"
+    "Hold, then drag, to move a window or an icon; a plain drag scrolls a list.\r\n"
     "\r\n"
-    "Two fingers scroll; pinch to magnify a window's contents, then two fingers move them "
-    "about.\r\n"
+    "Two fingers scroll; pinch to magnify, then move about.\r\n"
     "\r\n"
-    "Swipe in from the right edge to bring the window behind to the front; keep swiping to "
-    "cycle through everything open, including Program Manager.\r\n"
+    "Swipe in from the right edge to cycle through the open windows.\r\n"
     "\r\n"
-    "Drag a title bar to move a window; swipe a menu bar sideways if it runs off the screen.  "
-    "A menu or a dialog too big for the screen is dragged with one finger, anywhere on it.\r\n"
+    "Swipe a menu bar sideways when it runs off the screen; drag an oversized menu or dialog "
+    "anywhere on it.\r\n"
     "\r\n"
-    "In Tetris, Chip's Challenge and Rodent's Revenge, swipe to send an arrow key: left and "
-    "right move, up rotates, down drops.  Double-tap to drop at once.\r\n"
+    "In Tetris and the other keyboard games, swipes are arrow keys and a double-tap drops.\r\n"
     "\r\n"
-    "Hold a title bar for the keyboard.  Its top row adds Esc, Tab, arrows, Ctrl, Alt, Del, "
-    "F1-F10, Home, End, PgUp, PgDn and Ins; in the keyboard games that row appears on its own.";
+    "Hold a title bar for the keyboard and its row of extra keys.";
 
 static char szHide[] = "&Don't show this again";
 static char szOK[] = "OK";
@@ -66,18 +61,7 @@ static int done = 0;
    version does not fit the phone's 598-row column once every gesture is described, and a note the
    user cannot read to the end is worse than a dense one, so the tighter form is used when the
    text would otherwise be clipped. Built once from szText. */
-static char szDense[sizeof szText];
 static char *pText = szText;
-
-static void Densify(void)
-{
-    char *r = szText, *w = szDense;
-    while (*r) {
-        if (r[0] == '\r' && r[1] == '\n' && r[2] == '\r' && r[3] == '\n') { *w++ = '\r'; *w++ = '\n'; r += 4; }
-        else *w++ = *r++;
-    }
-    *w = 0;
-}
 
 /* Height of pText when wrapped to cx pixels, at the system font; *pLine gets one row's height. */
 static int TextHeight(HWND hwnd, int cx, int *pLine)
@@ -171,13 +155,6 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     bw = 5 * lh;
     ch = MARGIN + ty + 2 * GAP + lh + 6 + GAP + bh + MARGIN;
     h = ch + ey;
-    if (h > GetSystemMetrics(SM_CYSCREEN) - 8 && pText == szText) {
-        Densify();                                   /* drop the blank lines and try again */
-        pText = szDense;
-        ty = TextHeight(hwnd, cw - 2 * MARGIN, &lh);
-        ch = MARGIN + ty + 2 * GAP + lh + 6 + GAP + bh + MARGIN;
-        h = ch + ey;
-    }
     if (h > GetSystemMetrics(SM_CYSCREEN) - 8) { h = GetSystemMetrics(SM_CYSCREEN) - 8; ch = h - ey; }
     w = FRAME_W;
     x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2; if (x < 0) x = 0;
@@ -186,8 +163,13 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 
     cy = ch - MARGIN - bh - GAP - (lh + 6);
     by = ch - MARGIN - bh;
-    hText = CreateWindow("static", pText, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                         MARGIN, MARGIN, cw - 2 * MARGIN, ty, hwnd, (HMENU)-1, hInst, NULL);
+    /* A read-only multiline edit rather than a static: the note is then scrollable, so it can
+       never be clipped by a short column whatever the font or the shell height, and the two-finger
+       scroll gesture works on it. ES_READONLY keeps the caret out, so the soft keyboard stays
+       away; the host reports a read-only edit as not wanting text. */
+    hText = CreateWindow("edit", pText,
+                         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_LEFT,
+                         MARGIN, MARGIN, cw - 2 * MARGIN, cy - MARGIN - GAP, hwnd, (HMENU)-1, hInst, NULL);
     hHide = CreateWindow("button", szHide, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                          MARGIN, cy, cw - 2 * MARGIN, lh + 6, hwnd, (HMENU)ID_HIDE, hInst, NULL);
     hOK = CreateWindow("button", szOK, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
