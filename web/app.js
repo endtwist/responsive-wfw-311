@@ -1308,14 +1308,31 @@ function shellPanClamp(viewH) {
 let view = { x: 0, y: 0, w: 0, h: 0, scale: 1, ox: 0 };
 let placed = [];                     // the composited windows, as drawn, front-most last
 
+let oversizeSince = 0;
 function chooseView(src) {
   const [vw, vh] = viewport();
   if (!narrow() || !shell.h) {
     /* Desktop mode: the whole screen, 1:1, centred (the mode is the viewport rounded down to 8 x 2,
-       so a few columns at the edges stay black). A screen larger than the viewport, which is only
-       the moment between a resize and the guest's re-mode, is scaled to fit instead. */
-    const scale = Math.min(1, vw / src.width, vh / src.height);
-    return { x: 0, y: 0, w: src.width, h: src.height, scale, ox: Math.max(0, Math.floor((vw - src.width * scale) / 2)) };
+       so a few columns at the edges are left over and take the desktop's own colour).
+
+       While a browser window is being dragged smaller the guest screen is still the old, larger
+       one for as long as the resize takes to settle. Scaling it down to fit made the whole desktop
+       shrink and swim inside black bars for the length of the drag, which is nothing a desktop
+       does. It is cropped instead: the window covers the desktop as it narrows and uncovers it as
+       it widens, exactly as a window over a desktop behaves, and when the guest re-modes a moment
+       later the crop is already the whole screen. */
+    const over = src.width > vw + 1 || src.height > vh + 1;
+    oversizeSince = over ? (oversizeSince || performance.now()) : 0;
+    /* The crop is only meant to cover the moment before the guest re-modes. If the guest has not
+       followed within a couple of seconds -- it is busy, or it refused the mode -- fall back to
+       scaling the whole screen down, so nothing can be left permanently off the edge. */
+    if (oversizeSince && performance.now() - oversizeSince > 2000) {
+      const scale = Math.min(1, vw / src.width, vh / src.height);
+      return { x: 0, y: 0, w: src.width, h: src.height, scale, ox: Math.max(0, Math.floor((vw - src.width * scale) / 2)) };
+    }
+    const w = Math.min(src.width, Math.max(1, Math.ceil(vw)));
+    const h = Math.min(src.height, Math.max(1, Math.ceil(vh)));
+    return { x: 0, y: 0, w, h, scale: 1, ox: Math.max(0, Math.floor((vw - w) / 2)) };
   }
   /* Portrait: the whole shell column fits the screen. Landscape: fitting the column's full
      height would make everything tiny, so the desktop is scaled to show its top 480 rows (caption,
@@ -2399,7 +2416,13 @@ function presentOnce() {
     comp.viewPx += vw * vh;
     if (!dmg) { comp.empty++; return; }                  // nothing changed: the canvas is already right
     for (const r of dmg.rects) comp.dmgPx += r.w * r.h;
-    if (dmg.full) { g.fillStyle = "#000"; g.fillRect(0, 0, fw, fh); }   // safe areas and letterbox
+    /* Safe areas and letterbox. On the desktop the leftovers are the few columns the mode
+       rounding leaves and whatever a half-finished resize has uncovered, and next to a Windows
+       desktop black reads as a fault: they take the desktop's own colour instead. */
+    if (dmg.full) {
+      g.fillStyle = narrow() ? "#000" : sampleColour(src, src.width - 6, src.height - 6);
+      g.fillRect(0, 0, fw, fh);
+    }
     g.save();
     g.translate(safe.l, safe.t);                         // everything else in the safe rectangle
     /* A full frame takes no clip at all: it is the old compositor exactly, and a clip that covers
@@ -3520,6 +3543,20 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     const { px, py } = hostPoint(ev);
     const win = layerUnder({ x: ev.clientX, y: ev.clientY });
     let slot = win && win.slot >= 0 ? win.slot : -1;
+    /* On the desktop there are no placed layers -- the whole guest screen is shown as it is -- so
+       hitTest can only ever answer "desktop" and the wheel scrolled Program Manager's group
+       wherever the pointer was. The window under the pointer has to be found in the guest's own
+       coordinates instead, front to back through the published list. */
+    if (slot < 0 && !narrow()) {
+      const h = hitTest(px, py);
+      for (let i = layers.length - 1; i >= 0; i--) {
+        const L = layers[i];
+        if (L.kind !== "W" && L.kind !== "S" && L.kind !== "O") continue;
+        if (h.x < L.wx || h.x >= L.wx + L.ww || h.y < L.wy || h.y >= L.wy + L.wh) continue;
+        slot = L.kind === "S" ? SHELL_SCROLL_SLOT : L.slot;
+        break;
+      }
+    }
     if (slot < 0) {
       const h = hitTest(px, py);
       if (h && (h.kind === "desktop" || h.kind === "client")) slot = h.win && h.win.slot >= 0 ? h.win.slot : SHELL_SCROLL_SLOT;
