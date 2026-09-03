@@ -2294,3 +2294,58 @@ fail=2, the two pre-existing geometry checks (PBRUSH `fit 640x424>352x760`, Note
   -> pan 288 (clamped), the strip shows "…ns Help"; tap on Help -> `T 953,83 192x108 #32768` placed
   at host x=26 under the Help item (shot); Esc; drag right -> pan 0; tap File -> the File menu at
   `T 644,83` placed at x=4.
+
+### 2026-09-03 — QBasic: a full-screen PIF, and an INT above the IDT limit that killed the emulator
+Two separate causes behind "running QBasic reboots the guest" (TODO 4). Neither is a reboot: the
+guest never resets and Windows never exits.
+- **Launch.** The stock `C:\WINDOWS\QBASIC.PIF` (the "Microsoft QBASIC" item in the Applications
+  group, the only QBasic entry point in the shell) has `fFullScreen` set: `PfW386Flags 0x00021008
+  = fFullScreen fHasHotKey fGlobalProtect`, priorities 100/50. Starting it puts the display in an
+  80x25 text mode, and the host turns that into a restart from the shipped snapshot — the
+  `screen-set-size` handler in `web/app.js` treats `bpp === 0` after `desktopReady` as "Windows
+  exited to DOS" — so the page goes back to the boot sequence. Evidence (`tools/probe.mjs`, which
+  now logs every mode change as `[mode] WxH bpp N`): `run QBASIC.PIF -> 5222`, then `[mode] 80x25
+  bpp 0` 0.6 s later, the window published as an icon (`PVI 0 Microsoft QBASIC`), and PVMON's
+  heartbeat starved for 13 s. Same class as the MS-DOS Prompt before 2026-09-02.
+  Fix: `image/changes/windows/QBASIC.PIF`, the stock PIF through `tools/pifwin.py` (windowed,
+  Alt+Enter disabled, close enabled, priorities 20/10). Memory settings are left as the PIF has
+  them (640/330 KB conventional, no EMS/XMS); QBasic starts fine with them. The window is the
+  usual DOS-box size, `[PVMon] Size.WINOA386` = 352x360, i.e. ~44 of the 80 columns with a
+  horizontal scroll bar, exactly like the MS-DOS Prompt.
+- **Running a program (F5) took the whole emulator down**, which also looks like a reboot because
+  the page reloads. `panicked at src/rust/cpu/cpu.rs:857: Unimplemented: #GP handler`. Caught in a
+  harness that dumps the CPU at the panic and decodes the faulting instruction through the guest
+  page tables: `2514:7205` in the DOS VM, `CD EF` = **INT EFh**, V86 mode, IOPL 3, CPL 3, and
+  `idtr_size 767` — an IDT of 96 entries, vectors 0..5Fh. Windows 3.x runs its 386 enhanced DOS
+  boxes with IOPL 3, so a software INT is *not* redirected to the VMM by the IOPL check v86 already
+  implements; it goes through the protected-mode IDT, and a vector above 5Fh is past the limit. A
+  real 386 raises `#GP(vector*8 + 2)` there and WIN386's own #GP handler reflects the interrupt
+  into the VM's real-mode vector table. v86 panicked instead.
+  Fix (`v86/src/rust/cpu/cpu.rs`, `call_interrupt_vector`): `trigger_gp(interrupt_nr << 3 | 2)`
+  in place of the panic — the same call the function already makes two branches later for
+  `dpl < cpl`. Needs a `v86.wasm` rebuild (`make -C v86 build/v86.wasm`). Any DOS program with a
+  high INT vector was killing the emulator, not just QBasic.
+- **Verified** (headless, `tools/probe.mjs` against the rebuilt image + snapshot): launch — no
+  `[mode]` line at all, `PVW 0 640 0 352 360 ... "Microsoft QBASIC"` in 0.5 s, heartbeats a steady
+  1.38 s, `PVK 1` (keyboard asked for); Esc dismisses QBasic's welcome box; typing lands
+  (`PRINT hello` in the editor, `shots/qbasic-typed.png`); F5 runs it and returns to the editor on
+  a keypress (`shots/qbasic-ran.png`, `shots/qbasic-back.png`), display still 8 bpp, guest alive;
+  `CMD_CLOSE` raises WINOLDAP's "Application still active. Choose OK to end it." box, and unlike
+  the 2026-09-02 DOS-box lockup it is *published* (`PVO 0 640 360 352 180`, wrapped to 352 by
+  PVHOOK and placed below its owner — `shots/qbasic-close-box.png`), so the host draws it and a tap
+  reaches it; Enter ends the VM and the layer list is back to the shell alone.
+- **Neighbours.** The Applications group's QBasic item is the only DOS program in any Program
+  Manager group besides the MS-DOS Prompt (Main/Accessories/Network/Games are all Win16 EXEs plus
+  README.WRI). `C:\DOS\EDIT.EXE` (the MS-DOS Editor, which is QBASIC.EXE in edit mode) has no PIF
+  of its own, so it runs under `_DEFAULT.PIF`, already windowed: launched from File Manager it
+  comes up as a 352x360 window, no mode change, heartbeats steady (`shots/edit.png`). There is no
+  `HELP.COM`/`HELP.EXE` on this image. All three PIFs on the disk (`_DEFAULT`, `DOSPRMPT`,
+  `QBASIC`) are now windowed with Alt+Enter disabled, so no shell path can full-screen the display.
+- `node tools/tour.mjs --apps DOSPRMPT,NOTEPAD` passes, and the full tour with the rebuilt CPU is
+  unchanged: `pass=146 fail=5 dead=false`, the five being the already-known ones (CALENDAR is not
+  on the image; Paintbrush is deliberately 640x424 across two slots; Notepad/Write File Open 604
+  wide; Hearts' welcome dialog 531 wide). `v86/tests/pv/banked-vga.mjs` 77/77.
+- Not done, deliberately: the host still treats any `bpp === 0` after the desktop is up as an exit
+  to DOS. With all three PIFs windowed and Alt+Enter disabled there is no shell path left to a
+  full-screen DOS session, so a second line of defence (suppress the restart while a DOS-box layer
+  exists) was left out rather than guessing at a rule.
