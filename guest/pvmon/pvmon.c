@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 36     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 37     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 /* Windows 3.x rounds SetTimer up to the 18.2 Hz PC tick, so the 40 ms poll really fires every
@@ -1715,8 +1715,12 @@ static void run_host_command_1(void)
         }
         return;
     }
-    if (arg >= MAX_SLOTS) return;
-    hwnd = g_slotWnd[arg];
+    /* Slot 15 means the shell, as it does for CMD_SCROLL: the phone's window switch cycles
+       Program Manager along with the applications, because bringing the desktop forward is one of
+       the things you switch TO. */
+    if (arg == 15) hwnd = FindWindow("Progman", NULL);
+    else if (arg >= MAX_SLOTS) return;
+    else hwnd = g_slotWnd[arg];
     if (!hwnd || !IsWindow(hwnd)) return;
     switch (cmd) {
     case CMD_ACTIVATE:
