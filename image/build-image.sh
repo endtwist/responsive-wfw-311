@@ -59,6 +59,7 @@ if [ "$GAMES" = 1 ] && [ -n "${GAMEDIRS# }" ]; then
     done
   done
   mcopy -o $M $TMP/GAMES.GRP ::/WINDOWS/GAMES.GRP
+fi
 
 # The first-run note (SPEC 2026-09-03): "Read Me First" in Main shows it again after it has been
 # dismissed (ABOUT.EXE on its own honours [PVMon] AboutShown; the argument overrides it).
@@ -67,7 +68,14 @@ if [ -f changes/windows/ABOUT.EXE ]; then
   python3 ../tools/grpadd.py $TMP/MAIN.GRP "Read Me First" "ABOUT.EXE /show" --exe changes/windows/ABOUT.EXE
   mcopy -o $M $TMP/MAIN.GRP ::/WINDOWS/MAIN.GRP
 fi
-fi
+
+# Every group laid out for the phone: three icons across, the window the width of Program Manager's
+# client and maximised, so no group has a horizontal scroll bar (tools/grpadd.py --relayout).
+for g in MAIN ACCESSOR GAMES STARTUP APPLICAT NETWORK; do
+  if mcopy -n $M "::/WINDOWS/$g.GRP" "$TMP/$g.GRP" 2>/dev/null; then
+    python3 ../tools/grpadd.py "$TMP/$g.GRP" --relayout && mcopy -o $M "$TMP/$g.GRP" "::/WINDOWS/$g.GRP"
+  fi
+done
 # boot=win (default): AUTOEXEC runs WIN in a loop, so PVMON's exit-to-DOS resize comes straight
 # back up at the new mode. boot=pvtest: run the DOS adapter test first, then WIN. boot=dos: prompt.
 {

@@ -126,11 +126,27 @@ def vga_icon_from_exe(exe, ordinal):
     return bytes(hdr), bytes(andp), bytes(xorp)
 
 
+def relayout(path):
+    """Re-flow an existing group for the phone without adding anything."""
+    g = open(path, "rb").read()
+    grp = parse(g)
+    COLS, CELLW, CELLH = int(os.environ.get("GRP_COLS", 3)), int(os.environ.get("GRP_CELLW", 100)), int(os.environ.get("GRP_CELLH", 78))
+    for i, it in enumerate(grp["items"]):
+        it["pt"] = (12 + CELLW * (i % COLS), 4 + CELLH * (i // COLS))
+    grp["rc"] = (0, 0, int(os.environ.get("GRP_W", 344)), int(os.environ.get("GRP_H", 460)))
+    grp["ncmd"] = 3
+    open(path, "wb").write(build(grp))
+    print("relaid out %s: %d items, %d columns" % (grp["gname"], len(grp["items"]), COLS))
+    return 0
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__); return 2
     path = argv[1]
     grp = parse(open(path, "rb").read())
+    if argv[2] == "--relayout":
+        return relayout(path)
     if argv[2] == "--list":
         print("%s: %d items, icon format 0x%04x" % (grp["gname"], len(grp["items"]), grp["fmt"]))
         for it in grp["items"]:
@@ -156,6 +172,11 @@ def main(argv):
     COLS, CELLW, CELLH = int(os.environ.get("GRP_COLS", 3)), int(os.environ.get("GRP_CELLW", 100)), int(os.environ.get("GRP_CELLH", 78))
     for i, it in enumerate(items):
         it["pt"] = (12 + CELLW * (i % COLS), 4 + CELLH * (i // COLS))
+    # The group window itself: as wide as Program Manager's client on the phone and maximised, so
+    # three columns fit with no horizontal scroll bar. A stored rect from a 640x480 desktop is what
+    # put a scroll bar under every group.
+    grp["rc"] = (0, 0, int(os.environ.get("GRP_W", 344)), int(os.environ.get("GRP_H", 460)))
+    grp["ncmd"] = 3          # SW_SHOWMAXIMIZED: the group fills the MDI client
     grp["items"] = items
     out = build(grp)
     parse(out)                                         # round-trips
