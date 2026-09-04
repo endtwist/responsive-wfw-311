@@ -39,9 +39,32 @@ being struck through in place. Slugs in brackets are the safer way to refer to o
 7. [share-sheet] **Share sheet for printed PDFs.** A print currently downloads. Hand it to the iOS share
    sheet instead so printing feels finished.
 
-8. [networking] **Networking.** This is Windows *for Workgroups*, and v86 has a network card with a
-   fetch-based backend. Even partial TCP/IP puts a period-correct browser and file sharing in
-   reach. The largest item on the list and the most distinctive.
+8. [networking] **Networking.** Started 2026-09-04, host half built and tested; the guest half needs
+   an asset decision from Josh. Architecture, which is Josh's (a proxy, off-device, reached through
+   a simulated serial port):
+   - **The guest dials up.** WFW 3.11 shipped NetBEUI and IPX and no TCP/IP at all (the install
+     source on the image has NDIS and PROTMAN and nothing else), and it could not do TLS if it had.
+     So it gets a period-correct dial-up link: a Winsock over SLIP on COM1, which is how everyone
+     reached the internet in 1994. v86 already emulates the UART, so there is no device to write --
+     bytes arrive as `serial0-output` and go back as `serial0-input`.
+   - **The host is the terminal server** (`web/net.js`, done): SLIP framing, IPv4, ICMP echo so
+     `ping` proves the link, a DNS responder that hands every name an address out of 10.64/16 and
+     remembers whose it is, and enough TCP for a handshake, in-order data and a close. A request to
+     port 80 is handed up as (host, bytes); the response is streamed back. 37/37 checks in
+     `v86/tests/pv/slipnet.mjs`, driven with synthetic frames -- no emulator needed.
+   - **The real internet is a function** (`api/fetch.js`, done): the page cannot fetch arbitrary
+     sites itself (CORS), and the guest cannot do TLS, so the request is made server-side. GET and
+     HEAD only, http/https only, private and loopback addresses refused, 4 MB and 15 s limits, a
+     period user agent, nothing forwarded from the caller. The guest asks for http and gets what
+     the site serves over TLS, knowing nothing about it.
+   - **Still to do**: wire `web/net.js` to the bus and `api/fetch.js` (an afternoon); then the guest
+     side. Two ways, and it is Josh's call because it is an asset question: **Trumpet Winsock**
+     (shareware, SLIP over COM1, no NIC driver -- matches this design exactly) or **Microsoft
+     TCP/IP-32** (free at the time, needs an NDIS driver for v86's NE2000, and then the link is
+     ethernet rather than serial and `web/net.js` grows an ARP responder).
+   - Not yet: UDP beyond DNS, more than one connection at a time (the code allows it, nothing has
+     tested it), retransmission (a local link that never drops a packet does not need it, and a
+     1994 stack will retransmit at us anyway, which the sequence handling tolerates).
 
 9. [deep-links] **Deep links with state.** `/solitaire` exists; extend to opening a specific document
    (Write, Notepad, Paintbrush) and to resuming a saved session, so a link is shareable.
