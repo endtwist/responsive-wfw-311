@@ -1,8 +1,10 @@
 // Minimal static dev server with HTTP Range support (v86 lazy disk loading needs it).
 // Usage: node tools/devserver.mjs [port] [root]
 import http from "node:http";
+import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 // Byte accounting, so the first-load delivery budget can be measured: GET /__stats
 const stats = { bytes: 0, byPath: {} };
 const remote = { devices: new Map(), device(name) {
@@ -16,7 +18,27 @@ const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".
   ".wasm": "application/wasm", ".json": "application/json", ".css": "text/css", ".img": "application/octet-stream",
   ".bin": "application/octet-stream", ".png": "image/png", ".svg": "image/svg+xml", ".map": "application/json",
   ".webmanifest": "application/manifest+json", ".gz": "application/gzip" };
-http.createServer((req, res) => {
+/* The phone needs a SECURE origin for three things the page wants: the Web Share API (a printed
+   PDF reaching the iOS share sheet), the microphone (Sound Recorder), and SharedArrayBuffer for
+   the worker's pixels. Plain http can never be one, whatever the address, so `--https` starts a
+   second listener with a self-signed certificate on port+1: accept the warning once on the phone
+   and that origin is secure, which makes the LAN behave like the deploy. The certificate is
+   generated on first use and kept out of git. */
+const wantHttps = process.argv.includes("--https");
+function selfSignedCert() {
+  const dir = path.join(root, ".certs");
+  const key = path.join(dir, "dev-key.pem"), crt = path.join(dir, "dev-cert.pem");
+  if (!fs.existsSync(key) || !fs.existsSync(crt)) {
+    fs.mkdirSync(dir, { recursive: true });
+    execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "825",
+      "-keyout", key, "-out", crt, "-subj", "/CN=responsive-wfw311.local",
+      "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:192.168.4.62"], { stdio: "ignore" });
+    console.log(`generated a self-signed certificate in ${dir}`);
+  }
+  return { key: fs.readFileSync(key), cert: fs.readFileSync(crt) };
+}
+
+const handler = (req, res) => {
   const url = decodeURIComponent(new URL(req.url, "http://x").pathname);
   // Screenshots: the page POSTs a PNG data URL here so a frame can be captured even when the
   // browser pane is not compositing and no screenshot API is available.
@@ -199,4 +221,14 @@ http.createServer((req, res) => {
   if (req.method === "HEAD") return res.end();
   count(size);
   fs.createReadStream(file).pipe(res);
-}).listen(port, "0.0.0.0", () => console.log(`dev server http://0.0.0.0:${port}/ (LAN ok) root=${root}`));
+};
+http.createServer(handler).listen(port, "0.0.0.0",
+  () => console.log(`dev server http://0.0.0.0:${port}/ (LAN ok) root=${root}`));
+if (wantHttps) {
+  try {
+    https.createServer(selfSignedCert(), handler).listen(port + 1, "0.0.0.0",
+      () => console.log(`dev server https://0.0.0.0:${port + 1}/ (secure context: share sheet, microphone, SharedArrayBuffer)`));
+  } catch (e) {
+    console.error(`--https failed (${e.message}); http only`);
+  }
+}

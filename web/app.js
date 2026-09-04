@@ -800,7 +800,16 @@ async function shareFile(bytes, name, type) {
 }
 async function offerShareOrDownload(bytes, name, type) {
   const file = new File([bytes], name, { type });
-  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+  /* The Web Share API only exists in a secure context, so on the plain-http LAN dev server -- the
+     origin the phone is parked on -- navigator.share is not there at all and a print can only be a
+     download. Say so rather than silently falling back, because "the share sheet did not open" on
+     that origin is the platform, not this code. */
+  if (!navigator.canShare) {
+    report("print", `no share sheet here (secure context: ${window.isSecureContext}); downloading ${name}`);
+    offerDownload(bytes, name, type);
+    return;
+  }
+  if (navigator.canShare({ files: [file] })) {
     pendingShare = { bytes, name, type };
     diag(`print: ${name} waiting for a touch to reach the share sheet`);
     /* Try immediately as well: on the desktop a print often follows a click closely enough that
@@ -1238,6 +1247,8 @@ function unlockAudio(why) {
   if (silentEl && silentEl.paused) silentEl.play().then(() => { audioUnlocked = true; audioLog(why + " media"); }, e => report("audio", `silent media failed: ${e && e.name}`));
   audioLog(why);
 }
+for (const evn of ["touchend", "click"])
+  window.addEventListener(evn, () => flushPendingShare(), { passive: true });
 for (const evn of ["touchend", "click", "keydown", "pointerup"])
   document.addEventListener(evn, () => unlockAudio(evn), { capture: true, passive: true });
 /* Nothing composites while the page is hidden (the worker's pixel conversion stops with it), so
