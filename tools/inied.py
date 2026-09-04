@@ -59,9 +59,22 @@ elif disp == "vga":
     setkey(secs, "boot", "display.drv", "vga.drv"); setkey(secs, "boot", "386grabber", "vga.3gr"); setkey(secs, "386Enh", "display", "*vddvga")
 elif disp == "pvdisp":
     setkey(secs, "boot", "display.drv", "pvdisp.drv"); setkey(secs, "boot", "386grabber", "vgadib.3gr"); setkey(secs, "386Enh", "display", "*vddvga"); setkey(secs, "boot.description", "display.drv", "Responsive paravirtual display (256 colors)")
+# net=1: the NE2000 with Microsoft TCP/IP-32 over NDIS 3 (image/changes/net). The VxD list and
+# where each file goes come from TCP32B's own OEMSETUP.INF; the card's driver name and its
+# parameter names come from WFW's NETWORK.INF ([ms$ne2000], [ms$ne2clone_nif]). v86's card sits at
+# I/O 0x300 and its PCI interrupt is routed to ISA line 10 (tools/probe.mjs netcard).
+if opts.get("net") == "1":
+    setkey(secs, "network drivers", "netcard", "ne2000.386")
+    setkey(secs, "network drivers", "devdir", "C:\\WINDOWS")
+    setkey(secs, "network drivers", "LoadRMDrivers", "No")
+    for vxd in ("ndis.386", "ne2000.386", "vip.386", "vtcp.386", "vudp.386", "vtdi.386",
+                "vdhcp.386", "vnbt.386", "wsock.386", "wstcp.386"):
+        addline(secs, "386Enh", f"device={vxd}")
+    setkey(secs, "386Enh", "TimerCriticalSection", "5000")   # what WFW's own network setup writes
+
 out = []
 for name, lines in secs:
     if name: out.append(f"[{name}]")
     out.extend(lines)
 open(path, "wb").write(("\n".join(out)).replace("\n", "\r\n").encode("cp437"))
-print(f"{path}: display={disp} res={res} dpi={dpi}")
+print(f"{path}: display={disp} res={res} dpi={dpi}" + (" net=1" if opts.get("net") == "1" else ""))

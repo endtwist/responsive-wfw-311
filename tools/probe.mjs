@@ -51,6 +51,7 @@
  *   mips:1000               instructions per second over that window (the idle check)
  *   dismiss                 Enter/Esc until only the shell is left
  *   getclip[:file]          what the guest has on its clipboard (PVCB off the debug channel)
+​ *   screen                  the 80x25 text screen out of B8000 (a failed boot's own explanation)
  *   netcard                 the NE2000's io base, the ISA line its PCI interrupt was routed to, its MAC
  */
 import fs from "node:fs";
@@ -95,6 +96,58 @@ const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, space: 0x
   f1: 0x3B, f2: 0x3C, f3: 0x3D, f4: 0x3E, f5: 0x3F, f6: 0x40, f7: 0x41, f8: 0x42, f9: 0x43, f10: 0x44,
   down: 0x50, right: 0x4D, left: 0x4B, up: 0x48, home: 0x47, end: 0x4F, del: 0x53, back: 0x0E };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+/* The 80x25 text screen, straight out of B8000. When a boot fails this is the whole story -- a
+   missing VxD, a CONFIG.SYS line, "Cannot find file" -- and without it a failed boot says only
+   "desktop not ready". */
+/* The 16-colour planar screen as a PNG. Windows' own boot screen -- and every error box it puts up
+   before the display driver is running -- lives here and nowhere else, and reading it as if it were
+   text gives four planes of nonsense. Four planes, one bit of the colour index each, then the DAC. */
+function vgaShot(file) {
+    const v = emulator.v86.cpu.devices.vga;
+    const W = v.svga_width || 640, H = v.svga_height || 480, stride = W >> 3;
+        const raw = Buffer.alloc((W * 3 + 1) * H);
+    const planes = [v.plane0, v.plane1, v.plane2, v.plane3];
+    for (let y = 0; y < H; y++) {
+      raw[y * (W * 3 + 1)] = 0;
+      for (let x = 0; x < W; x++) {
+        const off = y * stride + (x >> 3), bit = 7 - (x & 7);
+        let idx = 0;
+        for (let pl = 0; pl < 4; pl++) idx |= ((planes[pl][off] >> bit) & 1) << pl;
+        const c = v.vga256_palette[v.dac_map ? v.dac_map[idx] : idx] | 0;
+        const o = y * (W * 3 + 1) + 1 + x * 3;
+        raw[o] = (c >> 16) & 255; raw[o + 1] = (c >> 8) & 255; raw[o + 2] = c & 255;
+      }
+    }
+    const crcT = new Int32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcT[n] = c; }
+    const crc = b => { let c = -1; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ -1) >>> 0; };
+    const chunk = (type, data) => {
+      const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
+      const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+      const ck = Buffer.alloc(4); ck.writeUInt32BE(crc(body), 0);
+      return Buffer.concat([len, body, ck]);
+    };
+    const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4); ihdr[8] = 8; ihdr[9] = 2;
+    fs.writeFileSync(path.resolve(root, file), Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]));
+  return `${W}x${H} -> ${file}`;
+}
+
+function textScreen() {
+  const v = emulator.v86.cpu.devices.vga;
+  if (!v || !v.vga_memory) return "(no vga memory)";
+  const cols = v.max_cols || 80, rows = v.max_rows || 25, base = 0xB8000 - 0xA0000;
+  const out = [];
+  for (let y = 0; y < rows; y++) {
+    let line = "";
+    for (let x = 0; x < cols; x++) {
+      const ch = v.vga_memory[base + (y * cols + x) * 2];
+      line += ch >= 32 && ch < 127 ? String.fromCharCode(ch) : (ch === 0 ? " " : ".");
+    }
+    out.push(line.replace(/\s+$/, ""));
+  }
+  while (out.length && !out[out.length - 1]) out.pop();
+  return out.join("\n");
+}
 
 const emulator = new V86({
   wasm_path: path.join(root, "v86/build/v86.wasm"),
@@ -256,7 +309,15 @@ if (STATE) {
   emulator.run();
 }
 while (!st.desktopReady && performance.now() - t0 < 240000) await sleep(100);
-if (!st.desktopReady) { console.error("desktop not ready"); process.exit(1); }
+if (!st.desktopReady) {
+  console.error("desktop not ready");
+  /* Whatever DOS or Windows left on the screen, which is the reason. Both, because a boot can die
+     in text mode (CONFIG.SYS, a DOS message) or in Windows' 16-colour boot screen (a missing VxD,
+     an error box), and which one it was is not known until it is looked at. */
+  console.error(textScreen());
+  try { console.error("screen written to " + vgaShot("shots/boot-fail.png")); } catch (e) {}
+  process.exit(1);
+}
 if (!st.shell.h) { emulator.bus.send("pv-command", [6, 0]); await until(() => st.shell.h, 5000); }
 console.log(`desktop ready in ${Math.round(performance.now() - t0)} ms (${STATE ? "snapshot" : "cold"}); shell ${st.shell.w}x${st.shell.h} pvmon v${st.shell.ver}`);
 
@@ -329,6 +390,8 @@ for (const s of steps) {
     await sleep(200);
     console.log(`${ts()} raw ${arg}`);
   }
+  else if (op === "screen") { console.log(`${ts()} text screen:\n${textScreen()}`); }
+  else if (op === "vgashot") { console.log(`${ts()} vgashot ${vgaShot(arg || "shots/vga.png")}`); }
   else if (op === "netcard") {
     /* The NE2000 as the guest can see it: where its registers are, and which ISA line the BIOS
        routed its PCI interrupt to -- that number is what PROTOCOL.INI has to say, and it is

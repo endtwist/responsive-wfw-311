@@ -22,8 +22,8 @@
 #        [games=1|0]  -- install changes/games/ as C:\GAMES with Program Manager items (default 1)
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; games=*) GAMES=${a#*=};; esac; done
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1; NET=0
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; games=*) GAMES=${a#*=};; net=*) NET=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
@@ -77,6 +77,24 @@ if [ -d changes/trumpet ]; then
   [ "$LOAD" = - ] || LOAD="${LOAD:+$LOAD }C:\\TRUMPET\\TCPMAN.EXE"
 fi
 
+# Microsoft TCP/IP-32 over NDIS 3 on v86's NE2000 (net=1). changes/net/windows -> C:\WINDOWS and
+# changes/net/system -> C:\WINDOWS\SYSTEM, laid out the way TCP32B's OEMSETUP.INF says, plus a
+# PROTOCOL.INI describing the card and the transport. The card's settings are v86's: I/O 0x300, and
+# ISA line 10, which is where the bus routes its PCI interrupt (tools/probe.mjs netcard).
+if [ "$NET" = 1 ] && [ -d changes/net ]; then
+  for f in changes/net/windows/*; do [ -f "$f" ] && mcopy -o $M "$f" ::/WINDOWS/; done
+  for f in changes/net/system/*;  do [ -f "$f" ] && mcopy -o $M "$f" ::/WINDOWS/SYSTEM/; done
+  {
+    printf '[network.setup]\r\nversion=0x3110\r\nnetcard=ms$ne2clone,1,MS$NE2CLONE,1\r\n'
+    printf 'transport=MSTCP32,MSTCP32\r\nlana0=ms$ne2clone,1,MSTCP32\r\n\r\n'
+    printf '[MS$NE2CLONE]\r\nDriverName=MS2000$\r\nIOBASE=0x300\r\nINTERRUPT=10\r\n\r\n'
+    printf '[MSTCP32]\r\nDriverName=TCPIP$\r\nBINDINGS=MS$NE2CLONE\r\nLANABASE=0\r\n'
+    printf 'IPAddress0=10 0 2 15\r\nIPMask0=255 255 255 0\r\nDefaultGateway0=10 0 2 2\r\n'
+    printf 'NameServer=10 0 2 2\r\nDisableDHCP=1\r\n'
+  } > $TMP/PROTOCOL.INI
+  mcopy -o $M $TMP/PROTOCOL.INI ::/WINDOWS/PROTOCOL.INI
+fi
+
 # The guest's web client (guest/fetch): Windows for Workgroups shipped no HTTP client, so this is
 # one, and it is a Windows program for the same reason everything else here is. It needs Trumpet's
 # WINSOCK.DLL, so it goes in after the Trumpet block and takes its own item in Main.
@@ -124,13 +142,13 @@ done
 } > $TMP/AUTOEXEC.BAT
 mcopy -o $M $TMP/AUTOEXEC.BAT ::/AUTOEXEC.BAT
 mcopy -n $M ::/WINDOWS/SYSTEM.INI $TMP/SYSTEM.INI
-python3 ../tools/inied.py $TMP/SYSTEM.INI display=$DISPLAY_DRV res=$RES dpi=$DPI ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND}
+python3 ../tools/inied.py $TMP/SYSTEM.INI display=$DISPLAY_DRV res=$RES dpi=$DPI ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND} net=$NET
 mcopy -o $M $TMP/SYSTEM.INI ::/WINDOWS/SYSTEM.INI
 # DPI variants for PVDPI.EXE to choose between at each Windows start (SPEC 2.6).
 # Fonts must match the DPI PVDISP.DRV reports from HOST_DPI or text metrics go wrong.
 for d in 96 120; do
   cp $TMP/SYSTEM.INI $TMP/SYSTEM.$d
-  python3 ../tools/inied.py $TMP/SYSTEM.$d display=$DISPLAY_DRV res=$RES dpi=$d ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND}
+  python3 ../tools/inied.py $TMP/SYSTEM.$d display=$DISPLAY_DRV res=$RES dpi=$d ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND} net=$NET
   mcopy -o $M $TMP/SYSTEM.$d ::/WINDOWS/SYSTEM.$d
 done
 # WIN.INI: [windows] load= (companion utility), e.g. load=PVMON.EXE; load=- clears it
