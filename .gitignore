@@ -37,3 +37,4 @@ image/boot-*.state.gz
 
 # python bytecode (tools/grpadd.py imports ne-icons.py)
 __pycache__/
+.claude/worktrees/
