@@ -2715,7 +2715,7 @@ void main() {
      the whole panel through a diffuser that never worked properly: brightest along that edge,
      falling off across, and blotchy everywhere -- a few broad lobes of light and shade that are a
      property of the panel, so they do not move. Then the corner falloff every one of these had. */
-  float edge = exp(-(1.0 - uv.x) * 4.0);
+  float edge = exp(-(1.0 - uv.x) * 2.6);          // the tube lights well across the panel
   float blotch = sin(uv.x * 3.1 + 1.7) * sin(uv.y * 2.3 + 0.4)
                + 0.60 * sin(uv.x * 6.7 + 2.9) * sin(uv.y * 5.1 + 1.2)
                + 0.35 * sin(uv.x * 11.3 + 0.8) * sin(uv.y * 9.7 + 2.4);
@@ -2725,10 +2725,11 @@ void main() {
      nothing at all to white -- white is already the panel wide open. So the unevenness is applied
      as a lift weighted by how dark the pixel is, which keeps the whites bright (Josh: "lights need
      to be brighter") while making the gradient and the blotches plainly visible. */
-  float glow = 0.10 + 0.55 * edge + 0.30 * blotch;
-  c += vec3(0.20, 0.24, 0.22) * glow * (1.0 - l);
-  /* Plus a gentler unevenness across everything, so the mid greys move too. */
-  c *= 0.95 + 0.13 * (0.6 * edge + 0.4 * blotch);
+  float glow = 0.10 + 0.95 * edge + 0.55 * blotch;
+  c += vec3(0.30, 0.35, 0.32) * glow * (1.0 - l);
+  /* And across everything, hard enough to see: the far side of one of these panels is dim, the
+     tube side is hot, and the diffuser puts broad patches between them. */
+  c *= 0.82 + 0.34 * edge + 0.16 * blotch;
   vec2 v = uv - 0.5;
   c *= 1.0 - 0.30 * dot(v, v);
 
