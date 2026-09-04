@@ -146,14 +146,19 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
         return 0;
     case WM_HSCROLL: {
+        /* Win16 packs this message differently from Win32, and reading it the Win32 way is why the
+           thumb jumped to zero on the first drag: the code is the WHOLE of wParam, the position is
+           the LOW word of lParam, and the control's handle is the HIGH word. Taking the position
+           from HIWORD(wParam) read a word that is always zero, so every thumb track reported 0. */
+        int code = (int)wParam, pos = (int)LOWORD(lParam);
         HWND bar = (HWND)HIWORD(lParam);
-        if (bar == hBright) g_bright = bar_pos(bar, LOWORD(wParam), HIWORD(wParam), g_bright);
-        else if (bar == hContr) g_contr = bar_pos(bar, LOWORD(wParam), HIWORD(wParam), g_contr);
+        if (bar == hBright) g_bright = bar_pos(bar, code, pos, g_bright);
+        else if (bar == hContr) g_contr = bar_pos(bar, code, pos, g_contr);
         else return 0;
         report();
         /* WIN.INI is written on the release, not on every pixel of a drag: a scroll bar sends
            SB_THUMBTRACK continuously and each write is file I/O. */
-        if (LOWORD(wParam) == SB_THUMBPOSITION || LOWORD(wParam) == SB_ENDSCROLL) save();
+        if (code == SB_THUMBPOSITION || code == SB_ENDSCROLL) save();
         return 0;
     }
     case WM_DESTROY:
@@ -183,7 +188,10 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         wc.style = 0; wc.lpfnWndProc = WndProc; wc.cbClsExtra = 0; wc.cbWndExtra = 0;
         wc.hInstance = inst; wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)GetStockObject(LTGRAY_BRUSH);
+        /* COLOR_WINDOW, like every other 3.1 dialog and like ABOUT.EXE: the grey dialog body
+           belongs to Windows 95. It also matches what the static labels paint behind their own
+           text, which is what made the labels read as pale bands on a grey sheet. */
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszMenuName = NULL; wc.lpszClassName = szClass;
         if (!RegisterClass(&wc)) return 0;
     }
