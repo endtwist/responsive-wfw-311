@@ -3675,6 +3675,33 @@ ask for the 3200x970 screen the image ships) now passes every check both ways: `
 rects of 3200x970 to 1280x800`, and the MS-DOS Prompt's exit warning still lands inside its slot at
 640,360 rather than centred half off the edge.
 
+### 2026-09-04 — the line is not slow: 49 KB/s, and three bugs that made it look like 2.4
+Josh: "There's no way to go faster than 2.4 KB/s". There was. 2.4 KB/s was never the link -- it was
+measured on a build with three defects, each of which hid the next.
+
+- **A 16-bit `int` cannot hold 59999.** FETCH.EXE's read loop had `int room = (int)(RAW_MAX - 1 -
+  rawn)`, which went negative on the first packet: `_fmemcpy` copied 59999 bytes out of a 1 KB stack
+  buffer, `rawn` wrapped straight past the cap, and every reply came back "first 60K only" having
+  read one packet. That is what the frozen "59999 bytes..." was, not a slow transfer.
+- **Trumpet drops segments and never volunteers a window update.** With that overflow fixed the
+  transfer stopped dead at 2048 bytes -- `rwin`. The host sent up to the window, Trumpet did not
+  acknowledge the last segment (its 2 KB buffer was nearly full), and a sender that only reacts to
+  ACKs has nothing left to react to. `web/net.js` now keeps sent bytes until they are acknowledged
+  and has a retransmission timer that doubles as the window probe.
+- **The timer was too slow.** At a flat 300 ms every window Trumpet drained cost a wait, and the
+  page spent most of its time idle: 8.6 KB/s. Starting at 40 ms and backing off to 500 ms gives
+  **49.0 KB/s** measured (78 KB of planetary.co in 1.6 s, about 400 kbit/s). `tools/probe.mjs`'s
+  `net` step reports the rate now, so this is a number rather than an impression.
+
+The guest was never the bottleneck either: 0.6 MIPS during a transfer, i.e. idle almost the whole
+time. v86's UART records the baud divisor and never paces by it, so the emulated line has no speed
+of its own.
+
+**And the reply reads.** A 2026 page is minified -- the whole document can be one line tens of
+thousands of characters long, and a stock edit control shows a window into the middle of such a line
+rather than its start, which looked like the head of the page had been lost. The display now breaks
+after a tag once a line passes 200 characters.
+
 **A 2026 front page does not fit.** FETCH.EXE keeps 60 KB (a 16-bit program, one segment for the
 reply), and draining the rest of a 400 KB page to be polite left the window on "59999 bytes..." for
 minutes with nothing to show -- which is what Josh saw on `https://planetary.co`. It now hangs up as

@@ -228,18 +228,20 @@ export class SlipNet {
                fast as it could build frames -- half a megabyte of Wikipedia at once -- and the
                guest, which reads it a few hundred bytes at a time, saw the first 16 KB and lost the
                rest. */
-            q: [], qoff: 0, qbytes: 0, una: 0, win: ((t[14] << 8) | t[15]) || 2048,
-            wantFin: false, finSent: false };
+            out: new Uint8Array(0), base: 0, una: 0, win: ((t[14] << 8) | t[15]) || 2048,
+            wantFin: false, finSent: false, timer: null, tries: 0 };
       this.conns.set(key, c);
       this.tcp(c, SYN | ACK);
       c.mine = (c.mine + 1) >>> 0;
-      c.una = c.mine;
+      c.una = c.base = c.mine;
       this.log(`tcp: connection to ${c.host}:${dport} opened (mss ${mss})`);
       return;
     }
     if (!c) { return; }                                             // stray segment: nothing to reset to
     if (flags & ACK) {
       const ack = (t[8] << 24 | t[9] << 16 | t[10] << 8 | t[11]) >>> 0;
+      const adv = (ack - c.base) >>> 0;
+      if (adv && adv <= c.out.length) { c.out = c.out.subarray(adv); c.base = ack; c.tries = 0; }
       if (((ack - c.una) >>> 0) < 0x80000000) c.una = ack;           // sequence arithmetic wraps
       /* A window of zero would stall the connection until the guest sent an update of its own
          accord; one segment is offered instead, which is what a zero-window probe does. */
@@ -262,8 +264,7 @@ export class SlipNet {
     if (flags & FIN) {
       c.theirs = (c.theirs + 1) >>> 0;
       this.tcp(c, ACK | FIN);
-      c.open = false;
-      this.conns.delete(key);
+      this.forget(c);
       this.log(`tcp: ${c.host}:${c.dport} closed by the guest`);
     }
   }
@@ -271,8 +272,9 @@ export class SlipNet {
      the wire, and when, is pump()'s business. */
   deliver(c, bytes) {
     if (!c.open || !bytes.length) return;
-    c.q.push(bytes);
-    c.qbytes += bytes.length;
+    const n = new Uint8Array(c.out.length + bytes.length);
+    n.set(c.out); n.set(bytes, c.out.length);
+    c.out = n;
     this.pump(c);
   }
   finish(c) {
@@ -280,35 +282,53 @@ export class SlipNet {
     c.wantFin = true;
     this.pump(c);
   }
-  /* Send as much as the guest's window has room for, a segment at a time, and close once the queue
-     is empty. Called again from every ACK, which is what turns a 500 KB page into a conversation
-     the guest can keep up with. */
+  forget(c) {
+    if (c.timer !== null) { clearTimeout(c.timer); c.timer = null; }
+    c.open = false;
+    c.out = new Uint8Array(0);
+    this.conns.delete(c.key);
+  }
+  /* Send what the guest's window has room for, a segment at a time, and close when everything has
+     gone. Bytes are kept until they are acknowledged, because they do get lost: Trumpet drops a
+     segment that arrives when its 2 KB receive buffer is nearly full and says nothing, and it sends
+     no window update when the program drains it either -- so a sender that only reacts to ACKs
+     stops dead, which is exactly what "2048 bytes..." was. A timer resends from the last
+     acknowledged byte, which doubles as the window probe. */
   pump(c) {
+    if (!c.open) return;
     const mss = c.mss || 536;
     for (;;) {
-      const inflight = (c.mine - c.una) >>> 0;
-      const room = Math.min(c.win - inflight, mss, c.qbytes);
+      const off = (c.mine - c.base) >>> 0;                  // sent, not yet acknowledged
+      const room = Math.min(c.win - off, mss, c.out.length - off);
       if (room <= 0) break;
-      const seg = new Uint8Array(room);
-      let n = 0;
-      while (n < room) {
-        const head = c.q[0];
-        const take = Math.min(head.length - c.qoff, room - n);
-        seg.set(head.subarray(c.qoff, c.qoff + take), n);
-        n += take; c.qoff += take;
-        if (c.qoff >= head.length) { c.q.shift(); c.qoff = 0; }
-      }
-      c.qbytes -= room;
-      this.tcp(c, ACK | PSH, seg);
+      this.tcp(c, ACK | PSH, c.out.subarray(off, off + room));
       c.mine = (c.mine + room) >>> 0;
     }
-    if (c.wantFin && !c.qbytes && !c.finSent) {
+    const off = (c.mine - c.base) >>> 0;
+    if (c.wantFin && off >= c.out.length && !c.finSent) {
       c.finSent = true;
       this.tcp(c, ACK | FIN);
       c.mine = (c.mine + 1) >>> 0;
-      c.open = false;
-      this.conns.delete(c.key);
     }
+    /* Anything unacknowledged (data, or the FIN) keeps the retransmission timer running. */
+    const waiting = c.out.length > 0 || (c.finSent && ((c.mine - c.una) >>> 0) > 0);
+    if (c.timer !== null) { clearTimeout(c.timer); c.timer = null; }
+    if (!waiting) { if (c.finSent) this.forget(c); return; }
+    if (c.tries >= 60) { this.log(`tcp: ${c.host}:${c.dport} gave up after ${c.tries} retries`); this.forget(c); return; }
+    /* Short first, then backing off. Trumpet never volunteers a window update, so every window it
+       drains costs one of these waits: at a flat 300 ms a 60 KB page spent most of its time idle
+       (8.6 KB/s measured). Starting at 40 ms and doubling to half a second keeps a healthy
+       transfer moving at close to what the link can do, and still gives up politely on a guest that
+       has genuinely stopped listening. */
+    const wait = Math.min(40 << Math.min(c.tries, 4), 500);
+    c.timer = setTimeout(() => {
+      c.timer = null;
+      if (!c.open) return;
+      c.tries++;
+      c.mine = c.base;                                      // go back to the last acknowledged byte
+      c.finSent = false;
+      this.pump(c);
+    }, wait);
   }
   tcp(c, flags, payload) {
     const body = payload || new Uint8Array(0);

@@ -70,13 +70,10 @@ fi
 if [ -d changes/trumpet ]; then
   mmd $M ::/TRUMPET 2>/dev/null || true
   for f in changes/trumpet/*; do [ -f "$f" ] && mcopy -o $M "$f" ::/TRUMPET/; done
-  mcopy -n $M ::/WINDOWS/MAIN.GRP $TMP/MAIN.TRU 2>/dev/null || true
-  python3 ../tools/grpadd.py $TMP/MAIN.TRU "Trumpet Winsock" "C:\\TRUMPET\\TCPMAN.EXE" --exe changes/trumpet/TCPMAN.EXE
-  python3 ../tools/grpadd.py $TMP/MAIN.TRU "Ping" "C:\\TRUMPET\\TRUMPING.EXE" --exe changes/trumpet/TRUMPING.EXE
-  mcopy -o $M $TMP/MAIN.TRU ::/WINDOWS/MAIN.GRP
-  # The stack has to be running before any Winsock program can do anything, and WIN.INI's load=
-  # starts a program iconic -- which is what a resident TCP/IP stack should be. So networking is
-  # live from the moment the desktop is up, without a window standing in a column.
+  # No Program Manager items: a TCP/IP stack is not something anyone launches by hand, and the
+  # diagnostic tools (TCPMAN, Ping, Dig, Hop) are all on the PATH for a DOS box or File Manager.
+  # WIN.INI's load= starts TCPMAN with Windows, and [PVMon] HideApps hides its window altogether
+  # (PVMON v41) -- so networking is live from the moment the desktop is up with nothing to look at.
   [ "$LOAD" = - ] || LOAD="${LOAD:+$LOAD }C:\\TRUMPET\\TCPMAN.EXE"
 fi
 
@@ -153,7 +150,7 @@ H=$SHELLH; [ "$H" = 0 ] && H=760
 # bottom of its own 576x456 window at 120 dpi: +44 px brings it back). SPEC 2026-09-03.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
-  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 Paintbrush.width=536 Paintbrush.height=300 PVMon.Size.SKI=${W}x${H} PVMon.Size.TETRIS=${W}x470 PVMon.Size.BLAKJAK=576x500 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZBALL TETRIS TETRAVEX TRIPEAKS TUTSTOMB FREECELL GOLF CHIPS RODENT PIPE TP BLAKJAK" \
+  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 Paintbrush.width=536 Paintbrush.height=300 PVMon.Size.SKI=${W}x${H} PVMon.Size.TETRIS=${W}x470 PVMon.Size.BLAKJAK=576x500 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" "PVMon.HideApps=TCPMAN" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZBALL TETRIS TETRAVEX TRIPEAKS TUTSTOMB FREECELL GOLF CHIPS RODENT PIPE TP BLAKJAK" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
   "windows.device=$( [ "$PRINTER" = TTY ] && echo "Text Printer,TTY" || echo "PDF Printer,PSCRIPT" ),C:\\PRINT.PRN" \

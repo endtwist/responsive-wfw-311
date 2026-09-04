@@ -174,7 +174,7 @@ static void present(void)
 {
     HGLOBAL sh;
     char FAR *out;
-    unsigned i = 0, n = 0, start = 0;
+    unsigned i = 0, n = 0, start = 0, col = 0;
     char line[80];
     int k;
 
@@ -193,13 +193,21 @@ static void present(void)
     sh = GlobalAlloc(GMEM_MOVEABLE, (DWORD)SHOW_MAX + 2);
     if (!sh) return;
     out = (char FAR *)GlobalLock(sh);
-    for (i = start; i < rawn && n < SHOW_MAX - 2; i++) {
-        if (raw[i] == '\n' && (i == 0 || raw[i - 1] != '\r')) out[n++] = '\r';
-        if (raw[i] == '\t') { out[n++] = ' '; continue; }
+    for (i = start; i < rawn && n < SHOW_MAX - 4; i++) {
+        if (raw[i] == '\n' && (i == 0 || raw[i - 1] != '\r')) { out[n++] = '\r'; col = 0; }
+        else if (raw[i] == '\r') col = 0;
+        if (raw[i] == '\t') { out[n++] = ' '; col++; continue; }
         out[n++] = raw[i];
+        col++;
+        /* A 2026 page is minified: the whole document can be one line tens of thousands of
+           characters long, and a stock edit control shows a window into the middle of such a line
+           rather than its start. Broken after a tag once the line is long enough, it reads. */
+        if (col > 200 && raw[i] == '>') { out[n++] = '\r'; out[n++] = '\n'; col = 0; }
     }
     out[n] = 0;
     SetWindowText(hBody, out);
+    SendMessage(hBody, EM_SETSEL, 0, MAKELONG(0, 0));   /* show the top of the page, not the caret */
+    SendMessage(hBody, WM_VSCROLL, SB_TOP, 0L);
     GlobalUnlock(sh);
     GlobalFree(sh);
 }
@@ -275,15 +283,17 @@ static void read_some(void)
         if (n <= 0) break;                        /* 0 = the peer closed, SOCKET_ERROR = would block */
         took += n;
         if (rawn < RAW_MAX - 1) {
-            int room = (int)(RAW_MAX - 1 - rawn);
-            int take = n < room ? n : room;
+            /* Unsigned all the way. An int here holds 32767, and RAW_MAX - 1 is 59999: the cast
+               made `room` negative, _fmemcpy copied 59999 bytes out of a 1 KB stack buffer, rawn
+               wrapped straight past the cap, and every reply came back "first 60K only" on the
+               first packet. That, not the line, is what looked like a stall at 59999 bytes. */
+            unsigned room = RAW_MAX - 1 - rawn;
+            unsigned take = (unsigned)n < room ? (unsigned)n : room;
             _fmemcpy(raw + rawn, buf, take);
             rawn += take;
         }
-        /* Full. A 2026 front page is several hundred kilobytes and this machine reads a couple of
-           kilobytes a second, so draining the rest to be polite would leave the window sitting on
-           "59999 bytes..." for minutes with nothing to show. Hang up and show what arrived, which
-           is what a client with a 64 KB address space would always have had to do. */
+        /* Full: hang up and show what arrived rather than draining a 400 KB page nobody can be
+           shown. A client with a 64 KB address space would always have had to do exactly that. */
         if (rawn >= RAW_MAX - 1) {
             trunc = TRUE;
             drop();

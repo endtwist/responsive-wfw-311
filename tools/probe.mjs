@@ -197,8 +197,14 @@ if (val("--date")) {
 }
 
 const netLog = [];
+const netBytes = { in: 0, out: 0, first: 0, last: 0 };   /* what crossed the line, and when */
 const slip = new SlipNet({
-  send: bytes => { for (const b of bytes) emulator.bus.send("serial1-input", b); },   // one turn, in order
+  send: bytes => {
+    netBytes.out += bytes.length;
+    if (!netBytes.first) netBytes.first = performance.now();
+    netBytes.last = performance.now();
+    for (const b of bytes) emulator.bus.send("serial1-input", b);   // one turn, in order
+  },
   request: async (host, port, data, conn) => {
     const text = String.fromCharCode(...data);
     netLog.push(`request ${host}:${port} ${text.split("\r\n")[0]}`);
@@ -225,7 +231,7 @@ emulator.bus.register("pv-debug", line => {
     { clipOut.text = Buffer.from(clipOut.lines.join(""), "base64").toString("latin1"); clipOut.lines = null; }
 });
 
-emulator.bus.register("serial1-output-byte", byte => slip.fromGuest([byte & 0xFF]));
+emulator.bus.register("serial1-output-byte", byte => { netBytes.in++; slip.fromGuest([byte & 0xFF]); });
 /* The modem's control lines. A real 14k4 on the end of the cable asserts DCD, DSR and CTS, and
    Trumpet's SLIP driver -- like every other 1994 stack -- will not transmit a byte until CTS is
    there: hardware handshaking is on by default. Without these the line is open, the guest says
@@ -321,7 +327,10 @@ for (const s of steps) {
     console.log(`${ts()} raw ${arg}`);
   }
   else if (op === "net") {
+    const secs = (netBytes.last - netBytes.first) / 1000;
+    const rate = secs > 0.05 ? `, ${(netBytes.out / 1024 / secs).toFixed(1)} KB/s down over ${secs.toFixed(1)}s` : "";
     console.log(`${ts()} net: ${netLog.length ? netLog.slice(-8).join(" | ") : "nothing on the line"}`);
+    console.log(`${ts()} net: ${netBytes.out} bytes to the guest, ${netBytes.in} from it${rate}`);
   }
   else if (op === "getclip") {
     /* What the guest has on its clipboard, decoded off the debug channel: PVMON sends it as

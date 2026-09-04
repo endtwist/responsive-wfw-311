@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 40     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 41     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 /* Windows 3.x rounds SetTimer up to the 18.2 Hz PC tick, so the 40 ms poll really fires every
@@ -1099,12 +1099,29 @@ static WndRec g_wnds[MAX_WND];
 static int g_nWnds;
 static HWND g_slotWnd[MAX_SLOTS];
 
+static BOOL module_of(HWND hwnd, char *out, int outlen);
+static BOOL in_list_of(const char *list, const char *mod);
+static char g_hideList[80];              /* [PVMon] HideApps, read alongside KeepSize */
+
 BOOL CALLBACK __export FindApp(HWND hwnd, LPARAM lParam)
 {
     char cls[24];
     WndRec *r;
     if (g_nWnds >= MAX_WND) return FALSE;
     if (!IsWindowVisible(hwnd) || is_dead(hwnd)) return TRUE;
+    /* [PVMon] HideApps: programs that should run with no window at all. A TCP/IP stack is the
+       case this exists for -- TCPMAN has to be running for any Winsock program to work, and
+       WIN.INI's load= starts it iconic, which puts a Trumpet icon on the desktop for something
+       nobody needs to look at. Hidden is what Trumpet's own Special/Hide does, and it keeps
+       pumping messages; its error boxes still come up, owned by a window nobody can see, and
+       PVMON gives those a column of their own. */
+    if (g_hideList[0]) {
+        char mod[16];
+        if (module_of(hwnd, mod, sizeof(mod)) && mod[0] && in_list_of(g_hideList, mod)) {
+            ShowWindow(hwnd, SW_HIDE);
+            return TRUE;
+        }
+    }
     if (is_transient(hwnd, cls, sizeof(cls))) {
         if (lstrcmp(cls, "PVMonitor") == 0) return TRUE;
         r = &g_wnds[g_nWnds++]; r->hwnd = hwnd; r->kind = 'T'; r->owner = NULL;
@@ -1981,6 +1998,7 @@ static void run_host_command_1(void)
         if (arg >= 300 && arg <= (unsigned)(int)g_realH) g_shellH = arg;
         GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
         GetProfileString("PVMon", "KeyboardApps", "", g_kbdList, sizeof(g_kbdList));
+        GetProfileString("PVMon", "HideApps", "", g_hideList, sizeof(g_hideList));
         if (g_desktop) { send_pvd(); return; }          /* kept for the way back; no column to arrange */
         apply_fake_screen();
         hook_set_shell();
@@ -2333,6 +2351,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         g_dlgReflow = GetProfileInt("PVMon", "DialogReflow", 1) != 0;
         GetProfileString("PVMon", "KeepSize", "", g_keepList, sizeof(g_keepList));
         GetProfileString("PVMon", "KeyboardApps", "", g_kbdList, sizeof(g_kbdList));
+        GetProfileString("PVMon", "HideApps", "", g_hideList, sizeof(g_hideList));
         g_shellW = (unsigned)GetProfileInt("PVMon", "ShellWidth", 0);
         g_shellH = (unsigned)GetProfileInt("PVMon", "ShellHeight", 0);
         /* The screen is now one row of columns, so the shell column is the full screen height
