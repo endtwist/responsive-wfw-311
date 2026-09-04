@@ -6,55 +6,12 @@ PLAN.md holds the invariants these all have to respect.
 Guiding idea (Josh): a website in the shape of an OS. Portrait is the target, the way most
 people hold a phone. Landscape is explicitly not a priority.
 
-Numbers are stable: a finished item keeps its number and is struck through in place, so a
-reference like "item 3" always means the same thing. Slugs in brackets are the safer way to
-refer to one.
+Numbers are stable: an item keeps its number for life, so a reference like "item 3" always
+means the same thing. Finished items keep their numbers under **Completed** below rather than
+being struck through in place. Slugs in brackets are the safer way to refer to one.
 
 ## Agreed with Josh
 
-0. ~~**Emulator off the main thread (smoothness).**~~ Done 2026-09-03 (SPEC): the wasm CPU, the
-   devices, the disk fetches and the pixel conversion run in a worker; the page keeps the
-   compositor, the input, the audio and the snapshots. Guest pixels come across as dirty rows
-   only, through a `SharedArrayBuffer` where the page is cross-origin isolated (headers now in
-   `vercel.json` and the dev server) and as transferred `ImageBitmap`s otherwise — the plain-http
-   LAN origin can never be a secure context, and that is the one Josh's phone uses; the path is
-   chosen at run time, logged, and `?nosab=1` forces the transfer one. At 6x CPU throttle (this
-   Mac standing in for the phone) a repainting guest took the composite to 31 fps with a 68 ms
-   p95 frame and a 141 ms p95 input queue; it is now 60 fps, 20 ms p95, 29 ms p95 input queue,
-   with the absolute-pointer round trip still at 5 ms and its tail improved from 71 ms to 5 ms.
-   `tools/composite-bench.mjs` is the harness. Still open, and now cheap:
-   - Turn off v86's debug flag (assertion and logging branches live in the hot paths) — left to
-     the driver pass, which owns the build.
-   - Composite only layers whose pixels changed. The information is published now
-     (`pvRectDirty`, `pvRectDirtySince`, backed by a ring of the worker's dirty rectangles with
-     generations); what is left is the skip itself in `drawWindow`/`placeLayers`.
-0. [emulator-worker] **Emulator off the main thread (smoothness).** Today one thread runs the guest, converts
-   its pixels and composites, so a busy guest delays both the frame and your finger. Run the
-   emulator in a worker so the composite keeps its own frame budget (60, and 120 on Josh's
-   phone, which is ProMotion and our composite is cheap) and input is never blocked. Modest
-   throughput gain too, from not being interrupted. Blockers to solve: getting guest pixels
-   across without a copy needs a shared buffer, which needs cross-origin isolation headers
-   (we control them on the Vercel deploy, not on the plain-http LAN dev server), so keep a
-   copy-based fallback. This is the single biggest change in how the thing feels under load.
-   Companions to it, both nearly free and worth doing first:
-   - ~~Turn off v86's debug flag.~~ Done 2026-09-03 (SPEC): `log.js`/`cjs.js` default `DEBUG`
-     off, `globalThis.V86_DEBUG` or `V86_DEBUG=1` turns it back on. No measurable gain on node
-     once the per-pixel work was in wasm; kept because a phone pays more for dead branches.
-   - Composite only layers whose pixels changed (the emulator already tracks dirty rows; we
-     re-blit every layer every frame).
-   - ~~Stop the per-frame `getImageData` readback in the dialog hole fill.~~ Done 2026-09-03
-     (SPEC): `sampleColour` caches per point; since the worker landed, an entry is invalidated
-     only when the guest has actually painted over that pixel, so there is no timer and no
-     readback on a still background. The watchdog's frame signature (25 rows every 8th frame)
-     is gone with it: the worker says which rows changed.
-   - (Rejected by Josh: optimistic scrolling, i.e. sliding the layer's own pixels with the
-     finger and filling the leading edge with a sampled background colour. No faked pixels
-     standing in for the guest's real scroll; fix the latency instead — the driver blit pass
-     and fast delivery below are the real fixes.)
-   - ~~Deliver scroll requests without waiting for the poll.~~ Done 2026-09-03 (SPEC, PVMON v36):
-     the host arms `CMD_FASTPOLL` for the length of a gesture and PVMON's message loop peeks
-     instead of blocking — 54 ms median delivery down to 1-2 ms, idle unchanged at 0.4 MIPS.
-   - (Rejected by Josh: drawing ahead of the viewport by oversizing scroll windows.)
 1. [blitting] **Blitting for OS-level actions.** Mostly done 2026-09-03 (SPEC): the adapter copies
    rectangles inside the frame buffer for the driver (DISPI 0x20-0x26, seven port writes
    instead of a read-plus-write per four pixels), and the rust A000 fast path now covers
@@ -67,33 +24,31 @@ refer to one.
    AllocSelector alone cannot reach physical 0xE0000000. Still repaint-bound and untouched:
    window switch and resize (neither blits in the phone layout) and File Manager's list
    scroll (GDI does it, not a screen-to-screen blit).
-2. [edge-swipe] ~~**Edge swipe to switch windows.**~~ Done 2026-09-03 (SPEC): a level leftward swipe starting in
-   the right 24 px brings the back-most window forward (CMD_ACTIVATE), so repeated swipes cycle;
-   the right edge only, never over chrome (the menu-bar pan and the caption boxes keep their
-   gestures), and a vertical wander or a tap in the margin is handed to the ordinary pipeline.
+
 3. [screen-rect] **Per-app screen rectangle = its slot.** On each task switch, write that app's slot into
    the screen size and desktop rectangle USER keeps in memory; real values for the shell and
    PVMON. Fixes screen-rect intersections (Paintbrush's cursor clip), dialog centring, self
    sizing, default placement. Does not replace host scaling or input translation. Scope as a
    measured experiment with the tour as the yardstick.
-4. [qbasic] ~~**QBasic reboots the guest.**~~ Done 2026-09-03 (SPEC): the stock `QBASIC.PIF` was
-   full-screen, so launching it put the display in an 80x25 text mode and the host restarted from
-   the snapshot; and running a program (F5) panicked v86 on `INT EFh`, a vector past the DOS VM's
-   IDT limit, which is a `#GP` on a real 386. A windowed PIF plus a one-line CPU fix; EDIT and the
-   other DOS programs run under the already-windowed `_DEFAULT.PIF`.
+
 5. [files-io] **Files in and out.** Nothing can enter or leave today except a printed PDF. Give the guest
    a second disk the host reads and writes (a FAT image mounted as a drive), so a file dropped
    on the page appears in File Manager, and anything saved there comes back to the phone. The
    guest just sees a disk; no chrome.
+
 6. [clipboard] **Clipboard bridge.** Copy in Notepad or Write and paste into iOS, and the reverse. The
    guest clipboard plus the hidden input, no visible UI.
+
 7. [share-sheet] **Share sheet for printed PDFs.** A print currently downloads. Hand it to the iOS share
    sheet instead so printing feels finished.
+
 8. [networking] **Networking.** This is Windows *for Workgroups*, and v86 has a network card with a
    fetch-based backend. Even partial TCP/IP puts a period-correct browser and file sharing in
    reach. The largest item on the list and the most distinctive.
+
 9. [deep-links] **Deep links with state.** `/solitaire` exists; extend to opening a specific document
    (Write, Notepad, Paintbrush) and to resuming a saved session, so a link is shareable.
+
 9b. [session-snapshots] **Shareable session snapshots (blob-backed).** A link that drops someone into a
     mid-Solitaire game, which encoded state cannot do because the deal lives in app memory.
     The page already saves and restores whole-machine state; add: host gzips it (~2 MB) and
@@ -119,24 +74,94 @@ refer to one.
       unguessable, not sequential.
     - Sequence after items 5 (files in/out) and 6 (clipboard), which unlock the smaller
       sharing wins first.
+
 10. [screen-reader] **Screen-reader access.** The page is pixels, so VoiceOver sees nothing. Build an invisible
     accessibility tree from the window, menu and control information the guest already
     reports. Not visible chrome, so it stays inside the rule.
-11. [about-exe] **First-run note as ABOUT.EXE.** Done 2026-09-03 (SPEC): `guest/about/` builds ABOUT.EXE with
+
+15. [pointer-base] **Measure the size USER scales an absolute mouse position by.** The host
+    normalises a pointer placement against its own idea of the screen; USER keeps a copy of that
+    size which neither the live re-mode nor FakeScreen reaches, so any change of screen size
+    silently misplaces every tap and drag. That is what 2026-09-04's bad afternoon was: taps
+    hundreds of pixels from the finger, drags that never confirmed and retried instead, a card in
+    Solitaire lagging behind. The fix is to measure rather than assume -- place the pointer at a
+    known fraction, read back where the guest says it went, divide -- and to re-measure on every
+    mode change. A first attempt is written and WRONG (a tap landed at 200,200 where it should
+    have been 175,175, off by exactly the view scale, so something is mapped twice); the patch is
+    parked, not shipped, because this is the path that broke everything. **Prerequisite for items
+    16 and 17.**
+16. [dynamic-slots] **Grow and shrink the application columns on demand.** Four fixed columns
+    (2026-09-04) are enough for the note plus a double-width program plus one more, but each costs
+    640 x 970 x 4 bytes of pixel buffer and widens every dirty-row conversion whether it is in use
+    or not. PVMON already re-modes live to widen the screen while a dialog is up and narrow it
+    afterwards, which is the mechanism; add hysteresis and grow when a program has nowhere to go.
+    Needs [pointer-base] first, since the mouse base moves with every re-mode.
+17. [tiles] **Popup and dialog tiles, off by default.** Painting a menu or a dialog in rows the
+    phone never shows means it never takes its owner's pixels, and it worked: the menu ghost and
+    the dismiss flash stop existing rather than being papered over (`maskShellDialogCopies`, the
+    coincident-dialog path, `holdRegion`). Dialog tiling additionally needs the host to treat a
+    tiled dialog as a first-class layer -- the tall-dialog column pan, the drag, and the pointer
+    mapping all assume a dialog is where Windows put it. Behind `[PVMon] PopupTiles=1` and
+    `DialogTiles=1`. Needs [pointer-base] first: the tiles make the screen taller, which is what
+    moved the mouse base.
+18. [verify-touch] **Confirm two fixes on the device.** Both are deployed and neither has been
+    seen working by Josh or measured on the phone: the scroll-bar touch-drag (a finger on the
+    client's right or bottom strip is a pointer drag, not a scroll), and where the MS-DOS/QBASIC
+    exit dialog lands (reported bottom-right, from a tab several rebuilds old).
+
+## Completed
+
+Finished, newest work last within its number. Numbers are for life.
+
+0. ~~**Emulator off the main thread (smoothness).**~~ Done 2026-09-03 (SPEC): the wasm CPU, the
+   devices, the disk fetches and the pixel conversion run in a worker; the page keeps the
+   compositor, the input, the audio and the snapshots. Guest pixels come across as dirty rows
+   only, through a `SharedArrayBuffer` where the page is cross-origin isolated (headers now in
+   `vercel.json` and the dev server) and as transferred `ImageBitmap`s otherwise — the plain-http
+   LAN origin can never be a secure context, and that is the one Josh's phone uses; the path is
+   chosen at run time, logged, and `?nosab=1` forces the transfer one. At 6x CPU throttle (this
+   Mac standing in for the phone) a repainting guest took the composite to 31 fps with a 68 ms
+   p95 frame and a 141 ms p95 input queue; it is now 60 fps, 20 ms p95, 29 ms p95 input queue,
+   with the absolute-pointer round trip still at 5 ms and its tail improved from 71 ms to 5 ms.
+   `tools/composite-bench.mjs` is the harness. Still open, and now cheap:
+   - Turn off v86's debug flag (assertion and logging branches live in the hot paths) — left to
+     the driver pass, which owns the build.
+   - Composite only layers whose pixels changed. The information is published now
+     (`pvRectDirty`, `pvRectDirtySince`, backed by a ring of the worker's dirty rectangles with
+     generations); what is left is the skip itself in `drawWindow`/`placeLayers`.
+   Rejected along the way, and recorded so they are not proposed again: **optimistic
+   scrolling** (sliding a layer's own pixels with the finger and filling the leading edge with a
+   sampled colour -- no faked pixels standing in for the guest's real scroll) and **drawing ahead
+   of the viewport** by oversizing scroll windows.
+
+2. [edge-swipe] ~~**Edge swipe to switch windows.**~~ Done 2026-09-03 (SPEC): a level leftward swipe starting in
+   the right 24 px brings the back-most window forward (CMD_ACTIVATE), so repeated swipes cycle;
+   the right edge only, never over chrome (the menu-bar pan and the caption boxes keep their
+   gestures), and a vertical wander or a tap in the margin is handed to the ordinary pipeline.
+
+4. [qbasic] ~~**QBasic reboots the guest.**~~ Done 2026-09-03 (SPEC): the stock `QBASIC.PIF` was
+   full-screen, so launching it put the display in an 80x25 text mode and the host restarted from
+   the snapshot; and running a program (F5) panicked v86 on `INT EFh`, a vector past the DOS VM's
+   IDT limit, which is a `#GP` on a real 386. A windowed PIF plus a one-line CPU fix; EDIT and the
+   other DOS programs run under the already-windowed `_DEFAULT.PIF`.
+
+11. [about-exe] ~~**First-run note as ABOUT.EXE.**~~ Done 2026-09-03 (SPEC): `guest/about/` builds ABOUT.EXE with
     the Watcom toolchain, staged as `image/changes/windows/ABOUT.EXE`, opened once by WIN.INI
     `[windows] run=` and suppressed afterwards by `[PVMon] AboutShown`; "Read Me First" in Main
     shows it again. Remaining: the `/about` alias in `web/app.js`'s `APPS` table.
 
-14. [first-open] **First-open latency.** Launching a program takes about a second on the phone, and it is all
-    guest work: Windows loading the executable and painting its first window. The driver agent
-    measured the cost and it is NOT port-trapped disk I/O (this guest uses ATA DMA; a Paintbrush
-    launch does zero IDE data-port reads) — it is INT 13h reflection through WIN386 plus the
-    first paint. Candidates, in order: (a) reflect INT 13h in the emulator rather than letting
-    WIN386 emulate it instruction by instruction; (b) pre-warm the disk cache for the shell's own
-    programs at boot (SMARTDRV is already loaded, so a second launch is already quicker — do it
-    for the first); (c) cut the first paint with the PV blit engine (already in) and by measuring
-    what else the launch repaints. Measure with tools/redraw-bench.mjs' cold-launch op.
-14. **First-open latency.** Mostly done 2026-09-03 (SPEC): the measurement (`redraw-bench.mjs
+12. [switcher] ~~**Card app switcher.**~~ Done 2026-09-04: a swipe up from the bottom edge lays
+    every open window out as a card -- its own frame and client, blitted from the guest frame
+    buffer and scaled, on the desktop's own colour. Pan the strip, tap to raise, flick a card up
+    to close (CMD_CLOSE), swipe down to leave. Cards are laid out from their real widths so the
+    neighbours peek in, and the list is re-read every frame so a program that moves or closes
+    itself is never drawn from a stale rectangle. Nothing was added to the guest for it.
+13. [pointer-shape] ~~**The host pointer matches the guest's.**~~ Done 2026-09-03 (SPEC, PVMON
+    v39): PVMON classifies `GetCursor` against the standard cursors and reports `PVC <name>`;
+    the host sets the CSS cursor from it (arrow, ibeam, all four resize shapes) and hands the
+    pointer back to the guest for an application's own cursor. `wait` was never observed -- 3.11's
+    hourglass is shorter than PVMON's poll -- and Paintbrush's canvas genuinely has no cursor.
+14. [first-open] ~~**First-open latency.**~~ Mostly done 2026-09-03 (SPEC): the measurement (`redraw-bench.mjs
     --ops cold`, which restores the snapshot before every launch and splits load from paint) found
     that a quarter to a half of a launch was the guest **emulating SeaBIOS's wait loop** for a disk
     read the emulator was already fetching — a `main_loop` slice runs for a whole frame, so it
@@ -161,6 +186,44 @@ refer to one.
       disk time roughly in proportion. (Chunk readahead in `buffer.js` was built and measured and
       rejected: a launch's reads are too scattered to predict — 16 speculative fetches to remove 4
       of 10 stalls.)
+
+19. [popup-publish] ~~**A popup is reported the moment it is shown.**~~ Done 2026-09-04: nothing
+    activates when a menu pops up, so the CBT hook never fired and the host learned of it only at
+    PVMON's next poll -- 287 ms during which the popup was already painted and composited at
+    guest coordinates that hang off a phone-wide column, then drawn again, shifted, as its own
+    layer. PVHOOK publishes from `WM_WINDOWPOSCHANGED` when a real popup is shown or hidden,
+    before it paints. Measured on the phone: tap to layer 287 ms -> 84 ms.
+20. [momentum] ~~**Momentum scrolling.**~~ Done 2026-09-04: a swipe that ends moving keeps
+    scrolling and decays, stopping at the end of a list or on the next touch. Velocity is
+    measured over the last 120 ms rather than between two events (touch moves arrive in bursts
+    with no time between them), and scroll the guest cannot keep up with is dropped rather than
+    queued -- the backlog after a flick in a program group was the "everything freezes for a
+    minute".
+21. [hold-select] ~~**Hold to select text.**~~ Done 2026-09-04: holding still on a scrolling
+    surface presses the left button where the finger is, so the caret jumps there and the drag
+    that follows is a selection -- the guest's own version of the cue iOS gives with its
+    magnifier. Dragging into the edge band keeps feeding points past the edge so an Edit keeps
+    scrolling the selection.
+22. [wheel] ~~**Wheel and scroll bars on the desktop.**~~ Done 2026-09-04: the wheel finds the
+    window under the pointer in the guest's own coordinates (there are no placed layers on the
+    desktop, so hit testing could only answer "desktop" and everything scrolled the shell), and
+    it scrolls the way a wheel scrolls rather than the way a finger does. A finger on a window's
+    scroll-bar strip is a pointer drag, not a scroll (unverified on the device: item 18).
+23. [keyboard-latch] ~~**The keyboard stops coming back.**~~ Done 2026-09-04: the caption hold
+    latches the keyboard on, and dismissing it with its own key does not go through us, so the
+    latch stayed on and every later tap raised it again. The latch drops when a gesture starts
+    with the keyboard not showing, and the class the hold taught is unlearned at the same moment
+    -- one stray hold on Solitaire's title bar had made every tap on the cards raise the
+    keyboard. `?forget=1` empties a learned set that has already gone wrong.
+24. [four-columns] ~~**A fourth application column.**~~ Done 2026-09-04: the first-run note takes
+    a column and a fixed-layout program wider than one takes two, so a third program found none
+    left and opened as a caption-high stub in the staging area. Screen 3200x970.
+25. [browser-resize] ~~**A browser resize uncovers the desktop instead of shrinking it.**~~ Done
+    2026-09-04: the guest screen stays its old size until the resize settles, and scaling it down
+    made the whole desktop shrink inside black bars for the length of the drag. It is cropped
+    instead, the leftover columns take the desktop's own colour, and if the guest has not followed
+    within two seconds the old scale-to-fit comes back so nothing is stranded off the edge. The
+    saved first frame is only shown to a window the same shape as the one that saved it.
 
 ## Known, not yet scheduled
 
