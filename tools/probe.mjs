@@ -64,12 +64,13 @@ const val = n => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null
 const flag = n => args.includes(n);
 const steps = [];
 for (let i = 0; i < args.length; i++) {
-  if (["--image", "--state", "--save"].includes(args[i])) { i++; continue; }
+  if (["--image", "--state", "--save", "--date"].includes(args[i])) { i++; continue; }
   if (args[i].startsWith("--")) continue;
   steps.push(args[i]);
 }
 
 const { V86 } = await import(path.join(root, "v86/src/browser/starter.js"));
+const { SlipNet } = await import(path.join(root, "web/net.js"));
 const { trackGuest } = await import(path.join(root, "web/selftest.js"));
 
 let IMAGE = val("--image"), STATE = val("--state");
@@ -177,6 +178,44 @@ await new Promise(res => emulator.add_listener("emulator-ready", res));
 emulator.bus.send("pv-set-dpi", 120);
 emulator.bus.send("sb16-dsp-version", [2, 1]);
 if (flag("--audio-trace")) emulator.bus.send("sb16-trace", true);   // DSP/DMA/IRQ and OPL register writes
+/* The same terminal server the page runs (web/net.js), so a guest with Trumpet can be tested
+   without a browser. Requests are answered from a canned page unless --net-live is given, in which
+   case they go out for real -- a test that reaches the internet is a test that fails on a train. */
+/* --date=1996-12-20 sets the emulated clock before the guest reads it. Shareware of the period is
+   time-limited -- Trumpet Winsock 3.0 says "your demonstration has expired" the moment it sees a
+   2026 date -- and DOS takes the date from the RTC once, at boot, so this only means anything on a
+   cold boot. The value then travels in the snapshot, which is how the shipped state carries it. */
+if (val("--date")) {
+  const when = new Date(`${val("--date")}T09:00:00Z`);
+  if (isNaN(when)) { console.error(`--date ${val("--date")} is not a date`); process.exit(2); }
+  const rtc = emulator.v86.cpu.devices.rtc;
+  rtc.rtc_time = when.getTime();
+  rtc.last_update = when.getTime();
+  console.log(`clock set to ${when.toISOString().slice(0, 16).replace("T", " ")}`);
+}
+
+const netLog = [];
+const slip = new SlipNet({
+  send: bytes => { for (const b of bytes) emulator.bus.send("serial0-input", b); },
+  request: async (host, port, data, conn) => {
+    const text = String.fromCharCode(...data);
+    netLog.push(`request ${host}:${port} ${text.split("\r\n")[0]}`);
+    let body = `<html><body><h1>${host}</h1></body></html>`;
+    if (flag("--net-live")) {
+      const m = /^([A-Z]+) (\S+)/.exec(text);
+      try {
+        const r = await fetch(`http://${host}${m ? m[2] : "/"}`);
+        body = await r.text();
+      } catch (e) { body = `could not reach ${host}: ${e.message}`; }
+    }
+    const head = `HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`;
+    slip.deliver(conn, Uint8Array.from(head + body, c => c.charCodeAt(0) & 0xFF));
+    slip.finish(conn);
+  },
+  log: m => netLog.push(m),
+});
+emulator.bus.register("serial0-output-byte", byte => slip.fromGuest([byte & 0xFF]));
+
 emulator.bus.send("pv-request-mode", [SCREEN_W, SCREEN_H]);
 const t0 = performance.now();
 if (STATE) {
@@ -212,7 +251,14 @@ for (const s of steps) {
   else if (op === "key") await press(code(arg));
   else if (op === "chord") { const ks = arg.split(","); const mods = ks.slice(0, -1).map(code); for (const m of mods) await key(m, true); await press(code(ks[ks.length - 1])); for (const m of mods.reverse()) await key(m, false); }
   else if (op === "keys") { for (const k of arg.split(",")) { if (k.includes("-")) { const ks = k.split("-").map(code); for (const m of ks.slice(0, -1)) await key(m, true); await press(ks[ks.length - 1]); for (const m of ks.slice(0, -1).reverse()) await key(m, false); } else await press(code(k)); await sleep(150); } }
-  else if (op === "text") { const map = { a: 0x1E, b: 0x30, c: 0x2E, d: 0x20, e: 0x12, f: 0x21, g: 0x22, h: 0x23, i: 0x17, j: 0x24, k: 0x25, l: 0x26, m: 0x32, n: 0x31, o: 0x18, p: 0x19, q: 0x10, r: 0x13, s: 0x1F, t: 0x14, u: 0x16, v: 0x2F, w: 0x11, x: 0x2D, y: 0x15, z: 0x2C, " ": 0x39 }; for (const ch of arg) if (map[ch]) await press(map[ch]); }
+  else if (op === "text") {
+    /* Letters, digits and the punctuation an address needs -- typing 10.0.2.15 into a dialog is
+       the whole point of having this step, and it could not before. */
+    const map = { a: 0x1E, b: 0x30, c: 0x2E, d: 0x20, e: 0x12, f: 0x21, g: 0x22, h: 0x23, i: 0x17, j: 0x24, k: 0x25, l: 0x26, m: 0x32, n: 0x31, o: 0x18, p: 0x19, q: 0x10, r: 0x13, s: 0x1F, t: 0x14, u: 0x16, v: 0x2F, w: 0x11, x: 0x2D, y: 0x15, z: 0x2C, " ": 0x39,
+                  1: 0x02, 2: 0x03, 3: 0x04, 4: 0x05, 5: 0x06, 6: 0x07, 7: 0x08, 8: 0x09, 9: 0x0A, 0: 0x0B,
+                  "-": 0x0C, "=": 0x0D, ".": 0x34, ",": 0x33, "/": 0x35, ";": 0x27, "'": 0x28, "[": 0x1A, "]": 0x1B, "\\": 0x2B, "`": 0x29 };
+    for (const ch of arg) if (map[ch] !== undefined) await press(map[ch]);
+  }
   else if (op === "pix") {
     /* what the frame buffer holds in a rectangle: 8 bpp, pitch from the adapter; the colour
        histogram tells a painted window (many colours) from unpainted desktop (one) */
@@ -242,6 +288,9 @@ for (const s of steps) {
     for (const b of arg.split(",")) emulator.bus.send("keyboard-code", Number(b));
     await sleep(200);
     console.log(`${ts()} raw ${arg}`);
+  }
+  else if (op === "net") {
+    console.log(`${ts()} net: ${netLog.length ? netLog.slice(-8).join(" | ") : "nothing on the line"}`);
   }
   else if (op === "clip") {
     /* CMD_CLIP: put text on the guest clipboard, the way the host does when the page is pasted

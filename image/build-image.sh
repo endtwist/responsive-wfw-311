@@ -61,6 +61,20 @@ if [ "$GAMES" = 1 ] && [ -n "${GAMEDIRS# }" ]; then
   mcopy -o $M $TMP/GAMES.GRP ::/WINDOWS/GAMES.GRP
 fi
 
+# Trumpet Winsock (changes/trumpet, expanded from the distribution image Josh supplied) as
+# C:\TRUMPET, with TRUMPWSK.INI already configured for the line the host answers: internal SLIP on
+# COM1, 10.0.2.15 talking to 10.0.2.2, which is web/net.js. Nothing dials -- the line is always up.
+# WINSOCK.DLL has to be findable by every Winsock program, so C:\TRUMPET goes on the PATH, and
+# TCPMAN gets a Program Manager item in Main next to the other network tools.
+if [ -d changes/trumpet ]; then
+  mmd $M ::/TRUMPET 2>/dev/null || true
+  for f in changes/trumpet/*; do [ -f "$f" ] && mcopy -o $M "$f" ::/TRUMPET/; done
+  mcopy -n $M ::/WINDOWS/MAIN.GRP $TMP/MAIN.TRU 2>/dev/null || true
+  python3 ../tools/grpadd.py $TMP/MAIN.TRU "Trumpet Winsock" "C:\\TRUMPET\\TCPMAN.EXE" --exe changes/trumpet/TCPMAN.EXE
+  python3 ../tools/grpadd.py $TMP/MAIN.TRU "Ping" "C:\\TRUMPET\\TRUMPING.EXE" --exe changes/trumpet/TRUMPING.EXE
+  mcopy -o $M $TMP/MAIN.TRU ::/WINDOWS/MAIN.GRP
+fi
+
 # The first-run note (SPEC 2026-09-03): "Read Me First" in Main shows it again after it has been
 # dismissed (ABOUT.EXE on its own honours [PVMon] AboutShown; the argument overrides it).
 if [ -f changes/windows/ABOUT.EXE ] || [ -f changes/windows/LCD.EXE ]; then
@@ -86,7 +100,7 @@ done
   # (It is not what makes their sound work: the Entertainment Pack games call sndPlaySound with a
   # bare file name and the lookup does not reach C:\GAMES, so changes-local/windows/ stages the
   # .WAVs and .MIDs into C:\WINDOWS as well — SPEC 2026-09-03.)
-  printf 'C:\\WINDOWS\\SMARTDRV.EXE\r\n@ECHO OFF\r\nPROMPT $P$G\r\nPATH C:\\WINDOWS;C:\\DOS;C:\\GAMES;\r\nSET TEMP=C:\\TEMP\r\n'
+  printf 'C:\\WINDOWS\\SMARTDRV.EXE\r\n@ECHO OFF\r\nPROMPT $P$G\r\nPATH C:\\WINDOWS;C:\\DOS;C:\\GAMES;C:\\TRUMPET;\r\nSET TEMP=C:\\TEMP\r\n'
   case $BOOT in
     win)    printf ':WINLOOP\r\nPVDPI\r\nWIN\r\nGOTO WINLOOP\r\n';;
     pvtest) printf 'PVTEST\r\nWIN\r\n';;
