@@ -520,6 +520,25 @@ emulator.bus.register("pv-debug", line => {
     }
     return;
   }
+  /* The clipboard, guest to host. PVMON is a clipboard viewer and ships CF_TEXT as base64 when
+     anything in Windows changes the clipboard. Writing to the system clipboard needs a user
+     gesture on iOS, so the text is held and written on the next touch -- copy in Notepad, touch
+     anything, and it is on the phone's clipboard. */
+  if (/^PVCB-BEGIN/.test(line)) { clipIn = []; return; }
+  if (/^PVCB /.test(line)) { if (clipIn) clipIn.push(line.slice(5)); return; }
+  if (/^PVCB-END/.test(line)) {
+    if (clipIn) {
+      try {
+        const bytes = atob(clipIn.join(""));
+        guestClip = bytes;                        // latin-1 bytes: CF_TEXT is ANSI
+        clipPending = true;
+        diag(`clipboard from the guest: ${bytes.length} bytes`);
+        offerClipboard("guest copy");
+      } catch (e) { diag(`clipboard from the guest: undecodable (${e.message})`); }
+    }
+    clipIn = null;
+    return;
+  }
   if (/^PVP-BEGIN /.test(line)) { printJob = []; return; }
   if (/^PVP /.test(line)) { if (printJob) printJob.push(line.slice(4)); return; }
   if (/^PVP-END/.test(line)) { if (printJob) finishPrintJob(printJob.join("")); printJob = null; return; }
@@ -1297,6 +1316,7 @@ setInterval(pumpCommands, 20);
 window.pvCommandQueue = () => cmdQueue.slice();
 const CMD_ACTIVATE = 1, CMD_RESTORE = 2, CMD_CLOSE = 3, CMD_MINIMIZE = 4, CMD_RUN = 5, CMD_REPUBLISH = 6;
 const CMD_FASTPOLL = 13;
+const CMD_CLIP = 14;
 
 /* A scroll command used to sit in the register until PVMON's timer came round. Windows 3.x rounds
    SetTimer up to the 18.2 Hz PC tick, so "every 40 ms" is really every 55 ms and a line of scroll
@@ -2547,6 +2567,38 @@ function composeForGuest(vw, vh) {
   emulator.bus.send("pv-compose", list);
 }
 
+/* --------------------------------------------------------------------- clipboard bridge ---
+   Windows' clipboard and the phone's, kept in step. Out: PVMON reports CF_TEXT, we write it to
+   the system clipboard -- which iOS only permits inside a user gesture, so the text waits for the
+   next touch. In: a paste anywhere on the page goes to the guest as CMD_CLIP, and PVMON puts it
+   on the clipboard where Notepad's Edit > Paste will find it. No visible UI either way. */
+let clipIn = null, guestClip = "", clipPending = false, clipLast = "";
+async function offerClipboard(why) {
+  if (!clipPending || !guestClip || guestClip === clipLast) return;
+  if (!navigator.clipboard || !navigator.clipboard.writeText) return;
+  try {
+    await navigator.clipboard.writeText(guestClip);
+    clipLast = guestClip; clipPending = false;
+    diag(`clipboard -> system (${guestClip.length} bytes, ${why})`);
+  } catch (e) {
+    diag(`clipboard -> system refused (${why}): ${e.name}`);   // no gesture yet: try again on the next touch
+  }
+}
+function pasteToGuest(text) {
+  if (!text) return;
+  const clipped = text.length > 4096 ? text.slice(0, 4096) : text;   // CLIP_MAX in pvmon.c
+  /* CF_TEXT is ANSI and lines end CRLF; anything outside Latin-1 has no representation in a
+     Windows 3.1 code page, so it becomes a question mark rather than a random byte. */
+  const ansi = clipped.replace(/\r\n|\n|\r/g, "\r\n").replace(/[^\x09\x0a\x0d\x20-\xff]/g, "?");
+  clipLast = ansi;                                  // do not bounce it straight back at us
+  sendCommandString(CMD_CLIP, ansi);
+  diag(`clipboard -> guest (${ansi.length} bytes)`);
+}
+window.addEventListener("paste", ev => {
+  const t = ev.clipboardData && ev.clipboardData.getData("text");
+  if (t) { pasteToGuest(t); ev.preventDefault(); }
+});
+
 /* ------------------------------------------------------------------------- mode controller */
 /* A mode change tears down the canvas and the guest repaints from scratch, so the screen goes
    blank for a moment. Hold the last frame over the top until the new one has been painted, so a
@@ -3513,6 +3565,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
 
   c.addEventListener("touchstart", ev => {
     unlockAudio("touchstart");
+    offerClipboard("touch");                            // iOS only lets us write inside a gesture
     stopGlide();                                          // a finger down stops the glide, as it should
     // The user dismissed the keyboard with the keyboard's own key: the input is still focused but
     // nothing shows, and iOS ignores focus() on an already-focused element. Blur now so the focus

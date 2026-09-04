@@ -236,6 +236,13 @@ for (const s of steps) {
     fs.writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]));
     console.log(`${ts()} png ${X},${Y} ${W}x${H} -> ${file}`);
   }
+  else if (op === "clip") {
+    /* CMD_CLIP: put text on the guest clipboard, the way the host does when the page is pasted
+       into. `clip:hello` then Alt+E,P in Notepad pastes it. */
+    emulator.bus.send("pv-command-string", [14, arg]);
+    await sleep(400);
+    console.log(`${ts()} clip -> guest: ${JSON.stringify(arg)}`);
+  }
   else if (op === "compose") {
     /* Design B stage 3: compose the picture the host would be showing into the adapter's
        composite rows, then read it back. The arrangement is the shell column with every window

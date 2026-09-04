@@ -83,6 +83,66 @@ static void wr(unsigned idx, unsigned v)
     do { outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); } while (inpw(DISPI_INDEX) != idx && --tries);
 }
 static void dbg(const char *s) { while (*s) wr(R_DEBUG, (unsigned char)*s++); wr(R_DEBUG, 10); }
+
+/* ------------------------------------------------------------------- clipboard bridge -----
+   Windows' clipboard and the phone's are the same clipboard as far as the user is concerned.
+   Out: PVMON is a clipboard viewer, so it hears WM_DRAWCLIPBOARD whenever anything changes the
+   clipboard, and ships CF_TEXT over the debug channel as base64 (the channel is lines of bytes;
+   clipboard text has tabs, CRs and eight-bit characters in it). In: CMD_CLIP with the text in
+   the string register, which we hand to SetClipboardData. */
+#define CLIP_MAX 4096                /* first pass: a page of text either way */
+static HWND g_wnd;                   /* our own window: the clipboard calls want an owner */
+static HWND g_clipNext;              /* the next viewer in the chain */
+static BOOL g_clipOurs;              /* we just set it: do not send it straight back */
+static void clip_send(void)
+{
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    HANDLE h; const char FAR *t; char line[76]; int n = 0, len = 0;
+    if (!IsClipboardFormatAvailable(CF_TEXT)) return;
+    if (!OpenClipboard(g_wnd)) return;
+    h = GetClipboardData(CF_TEXT);
+    t = h ? (const char FAR *)GlobalLock(h) : NULL;
+    if (!t) { CloseClipboard(); return; }
+    while (len < CLIP_MAX && t[len]) len++;
+    dbg("PVCB-BEGIN");
+    lstrcpy(line, "PVCB ");
+    n = 5;
+    { int i = 0;
+      while (i < len) {
+          unsigned long v = (unsigned long)(unsigned char)t[i] << 16;
+          int have = 1;
+          if (i + 1 < len) { v |= (unsigned long)(unsigned char)t[i + 1] << 8; have = 2; }
+          if (i + 2 < len) { v |= (unsigned long)(unsigned char)t[i + 2]; have = 3; }
+          line[n++] = b64[(int)((v >> 18) & 63)];
+          line[n++] = b64[(int)((v >> 12) & 63)];
+          line[n++] = have > 1 ? b64[(int)((v >> 6) & 63)] : '=';
+          line[n++] = have > 2 ? b64[(int)(v & 63)] : '=';
+          i += 3;
+          if (n >= 69) { line[n] = 0; dbg(line); n = 5; }
+      }
+    }
+    if (n > 5) { line[n] = 0; dbg(line); }
+    dbg("PVCB-END");
+    GlobalUnlock(h);
+    CloseClipboard();
+}
+static void clip_set(const char *text)
+{
+    HANDLE h; char FAR *p; int len = lstrlen(text);
+    if (len > CLIP_MAX) len = CLIP_MAX;
+    h = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, (DWORD)len + 1);
+    if (!h) { dbg("pvmon: clipboard alloc failed"); return; }
+    p = (char FAR *)GlobalLock(h);
+    if (!p) { GlobalFree(h); return; }
+    { int i; for (i = 0; i < len; i++) p[i] = text[i]; p[len] = 0; }
+    GlobalUnlock(h);
+    if (!OpenClipboard(g_wnd)) { GlobalFree(h); dbg("pvmon: clipboard busy"); return; }
+    EmptyClipboard();
+    g_clipOurs = TRUE;                       /* the WM_DRAWCLIPBOARD this causes is our own */
+    SetClipboardData(CF_TEXT, h);
+    CloseClipboard();
+    dbg("pvmon: clipboard set from the host");
+}
 static void dbgnum(const char *s, unsigned a, unsigned b)
 {
     char buf[64]; wsprintf(buf, "%s %ux%u", (LPSTR)s, a, b); dbg(buf);
@@ -1712,6 +1772,7 @@ static void ship_print_job(void)
 #define CMD_DESKTOP  11    /* arg 1: desktop mode (whole screen 1:1, no columns or clamps), 0: phone layout */
 #define CMD_PROBE    12    /* diagnostics to pv_dbg: metrics, cursor clip, pointer, capture, children (tools/probe.mjs "probe") */
 #define CMD_FASTPOLL 13    /* arg: ms to poll the command register in the message loop (0 = stop) */
+#define CMD_CLIP     14    /* string in R_CMDSTR: put it on the guest clipboard as CF_TEXT */
 
 /* When the fast loop stops blocking in GetMessage. GetTickCount is the 55 ms BIOS tick, which is
    plenty for a one-to-three second box. Zero = off, and off is the state whenever nothing is
@@ -1918,6 +1979,14 @@ static void run_host_command_1(void)
         /* ShowCursor keeps a display count: drive it to -1 (hidden) or 0 (shown) and keep it
            there in poll(), since applications that ShowCursor(TRUE) would bring it back. */
         g_hideCursor = (arg == 0);
+        return;
+    }
+    if (cmd == CMD_CLIP) {
+        static char clip[CLIP_MAX + 1];
+        int n = 0; unsigned b;
+        while (n < CLIP_MAX && (b = rd(R_CMDSTR) & 0xFF) != 0) clip[n++] = (char)b;
+        clip[n] = 0;
+        clip_set(clip);
         return;
     }
     if (cmd == CMD_SETPOS) {
@@ -2199,6 +2268,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     switch (msg) {
     case WM_CREATE: {
         HDC hdc; TEXTMETRIC tm; char buf[80];
+        g_wnd = hwnd;
         g_lastGen = rd(R_GEN);
         g_realW = (unsigned)GetSystemMetrics(SM_CXSCREEN);
         g_realH = (unsigned)GetSystemMetrics(SM_CYSCREEN);
@@ -2231,6 +2301,8 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (g_shellW) install_hook();
         SetTimer(hwnd, IDT_POLL, POLL_MS, NULL);
         SetTimer(hwnd, IDT_ARRANGE, ARRANGE_MS, NULL);
+        g_clipNext = SetClipboardViewer(hwnd);      /* the clipboard bridge, both directions */
+        dbg("pvmon: clipboard viewer installed");
         dbgnum("pvmon: up, screen", (int)g_realW, (int)g_realH);
         /* What GDI actually ended up with: driver DPI vs the font SYSTEM.INI loaded. If these
            disagree, text metrics and layout will not match the glyphs being drawn. */
@@ -2262,6 +2334,18 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
         else poll(hwnd);
         return 0;
+    /* The clipboard viewer chain. Windows sends WM_DRAWCLIPBOARD to the head of the chain
+       whenever anything changes the clipboard, and every viewer must pass both messages on or
+       the programs behind us stop hearing about it. */
+    case WM_DRAWCLIPBOARD:
+        if (g_clipOurs) g_clipOurs = FALSE;      /* our own SetClipboardData came back to us */
+        else clip_send();
+        if (g_clipNext) SendMessage(g_clipNext, WM_DRAWCLIPBOARD, 0, 0L);
+        return 0;
+    case WM_CHANGECBCHAIN:
+        if ((HWND)wParam == g_clipNext) g_clipNext = (HWND)LOWORD(lParam);
+        else if (g_clipNext) SendMessage(g_clipNext, WM_CHANGECBCHAIN, wParam, lParam);
+        return 0;
     case WM_USER + 1: {
         /* the hook saw a top-level window size itself past the frame: park it now */
         HWND w = (HWND)wParam; int slot;
@@ -2272,6 +2356,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (wParam) KillTimer(hwnd, IDT_POLL);
         return 0;
     case WM_DESTROY:
+        if (g_clipNext || g_wnd) ChangeClipboardChain(hwnd, g_clipNext);
         remove_hook();
         KillTimer(hwnd, IDT_ARRANGE);
         KillTimer(hwnd, IDT_POLL);
