@@ -531,6 +531,7 @@ emulator.bus.register("pv-debug", line => {
     if (wantDesktop() && shell.ver >= 34 && guestDesktop !== true) { syncDesktopMode(); return; }
     desktopReady = true;
     shellHeightSent = 0;
+    setTimeout(() => calibratePointer("desktop ready"), 400);
     if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
     /* Desktop: the browser's pointer takes over from here (see applyCursorShape). PVMON resends
        PVC with every PVA, so the shape arrives right behind this. */
@@ -2725,6 +2726,63 @@ function screenSize() {
 /* The driver reports (-1,-1) when USER has no cursor to show (an application drawing with a NULL
    cursor: Paintbrush painting) or has clamped the pointer away: it is not a position. */
 const hiddenReport = c => !!c && c.x === 65535 && c.y === 65535;
+/* The size USER scales an absolute (normalised) mouse position by is NOT necessarily the screen
+   this page asked for: USER keeps its own copy that neither the live re-mode nor FakeScreen
+   reaches, so a screen that changes size leaves the host normalising against the wrong number and
+   every placement lands somewhere else. That was the whole of 2026-09-03's bad afternoon: taps
+   hundreds of pixels from the finger, drags that never confirmed and retried instead, a card in
+   Solitaire lagging behind. So the host measures it instead of assuming: put the pointer at a
+   known fraction of the screen, read back where the guest says it went, and divide. Re-measured
+   whenever the guest reports a new layout. */
+let mouseBase = null;
+async function calibratePointer(why) {
+  if (!absPointer) return null;
+  /* Two probes, not one, and the base comes from the DIFFERENCE between them. A single probe
+     divides one reported position by one fraction, which trusts that the report belongs to this
+     probe and that USER adds no offset of its own; a stale report then yields a plausible-looking
+     base that is wrong by the view scale, which is exactly what the first version of this did.
+     Two probes cancel any fixed offset, and a report that has not moved between them fails the
+     sanity check instead of being believed. */
+  const probe = async n => {
+    const seq = cursorSeq, t0 = performance.now();
+    emulator.bus.send("pv-mouse-abs", [n, n]);
+    emulator.bus.send("mouse-delta", [1, 0]);
+    while (cursorSeq === seq && performance.now() - t0 < 500) await sleep(4);
+    if (cursorSeq === seq || !guestCursor || guestCursor.x < 0) return null;
+    return { x: guestCursor.x, y: guestCursor.y };
+  };
+  const lo = 0x2000, hi = 0x6000;                        // an eighth and three eighths across
+  const a = await probe(lo);
+  const b = await probe(hi);
+  if (!a || !b) { diag(`pointer base: no report (${why})`); return null; }
+  const w = Math.round((b.x - a.x) * 65536 / (hi - lo)), h = Math.round((b.y - a.y) * 65536 / (hi - lo));
+  if (w < 320 || h < 200 || w > 8192 || h > 8192) {
+    diag(`pointer base: ${w}x${h} from ${a.x},${a.y} -> ${b.x},${b.y} is nonsense (${why})`);
+    return null;
+  }
+  /* And then it is checked before it is trusted: place the pointer at a known point using the
+     measured base and see whether the guest lands there. This is the path whose silent failure
+     misplaced every tap and drag on 2026-09-04; it does not get to fail silently again. */
+  const was = mouseBase;
+  mouseBase = { w, h };
+  const target = { x: Math.round(w / 3), y: Math.round(h / 3) };
+  const seq = cursorSeq, t0 = performance.now();
+  emulator.bus.send("pv-mouse-abs", [Math.round((target.x + 0.5) * 65536 / w), Math.round((target.y + 0.5) * 65536 / h)]);
+  emulator.bus.send("mouse-delta", [1, 0]);
+  while (cursorSeq === seq && performance.now() - t0 < 500) await sleep(4);
+  const off = guestCursor ? Math.max(Math.abs(guestCursor.x - target.x), Math.abs(guestCursor.y - target.y)) : 9999;
+  if (cursorSeq === seq || off > 2) {
+    mouseBase = was;
+    diag(`pointer base ${w}x${h} rejected (${why}): asked ${target.x},${target.y}, got ${JSON.stringify(guestCursor)}`);
+    report("pointer", `base ${w}x${h} rejected, off by ${off}`);
+    return null;
+  }
+  diag(`pointer base ${w}x${h} verified (${why}); host screen ${screenSize().join("x")}`);
+  report("pointer", `base ${w}x${h} (${why})`);
+  return mouseBase;
+}
+function pointerBase() { return mouseBase ? [mouseBase.w, mouseBase.h] : screenSize(); }
+
 async function placePointer(pt) {
   if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) { diag(`place: bad target ${JSON.stringify(pt)}`); return; }
   const seq = cursorSeq, t0 = performance.now();
@@ -2733,7 +2791,7 @@ async function placePointer(pt) {
     pt = { x: Math.max(0, Math.min(sw - 1, Math.round(pt.x))), y: Math.max(0, Math.min(sh - 1, Math.round(pt.y))) };
   }
   if (absPointer) {
-    const [sw, sh] = screenSize();
+    const [sw, sh] = pointerBase();
     // USER maps x = norm * cxScreen / 65536, truncating: aim for the middle of the pixel
     const nx = Math.max(0, Math.min(65535, Math.round((pt.x + 0.5) * 65536 / sw)));
     const ny = Math.max(0, Math.min(65535, Math.round((pt.y + 0.5) * 65536 / sh)));
