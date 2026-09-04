@@ -2697,7 +2697,7 @@ void main() {
   /* The panel is not neutral grey: it is a green-grey, warmer in the shadows than the highlights.
      These two are sampled from the photograph -- #4a4f48 at its darkest, #c8ccc0 at its lightest. */
   vec3 dark = vec3(0.075, 0.090, 0.070);
-  vec3 light = vec3(0.945, 0.965, 0.900);
+  vec3 light = vec3(0.985, 1.000, 0.945);
   vec3 c = mix(dark, light, l);
 
   /* The grid, at the real guest-pixel pitch so it lands on pixel boundaries rather than beating
@@ -2720,13 +2720,15 @@ void main() {
                + 0.60 * sin(uv.x * 6.7 + 2.9) * sin(uv.y * 5.1 + 1.2)
                + 0.35 * sin(uv.x * 11.3 + 0.8) * sin(uv.y * 9.7 + 2.4);
   blotch /= 1.95;
-  /* Broad and unapologetic: the far side of one of these panels really is noticeably dimmer than
-     the tube side, and the diffuser really is patchy. */
-  float lit = 0.78 + 0.38 * edge + 0.17 * blotch;
-  /* Unevenness in the light multiplies what the panel transmits, so the shadows stay dark: a
-     backlight cannot make black text grey, it can only make the paper behind it patchy. */
-  c *= lit;
-  c += vec3(0.055, 0.070, 0.070) * edge * l;      // and the tube's own bloom, only where it is lit
+  /* Where an uneven backlight actually shows is in the darks. Light leaking through the panel
+     lifts black towards milky grey wherever the tube and the diffuser put more of it, and does
+     nothing at all to white -- white is already the panel wide open. So the unevenness is applied
+     as a lift weighted by how dark the pixel is, which keeps the whites bright (Josh: "lights need
+     to be brighter") while making the gradient and the blotches plainly visible. */
+  float glow = 0.10 + 0.55 * edge + 0.30 * blotch;
+  c += vec3(0.20, 0.24, 0.22) * glow * (1.0 - l);
+  /* Plus a gentler unevenness across everything, so the mid greys move too. */
+  c *= 0.95 + 0.13 * (0.6 * edge + 0.4 * blotch);
   vec2 v = uv - 0.5;
   c *= 1.0 - 0.30 * dot(v, v);
 
