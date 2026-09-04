@@ -189,7 +189,7 @@ static void remove_hook(void)
    Windows having any notion of one. */
 #define SLOT_W   640              /* each application gets a full-width slot of its own */
 #define ICON_ROW  88         /* desktop rows kept free for minimised icons: 36 px icon, gap, two 20 px label lines */
-#define MAX_SLOTS 3          /* shell column + this many application columns */
+#define MAX_SLOTS 4          /* shell column + this many application columns */
 static char g_lastPub[256];         /* last line published to the host, to avoid repeats */
 static unsigned g_fitW, g_fitH;     /* screen the window fixer is fitting to */
 static unsigned g_prevW, g_prevH;   /* screen it is fitting from */

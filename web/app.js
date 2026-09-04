@@ -116,13 +116,16 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
 const pageStart = performance.now();
 const SHELL_W = 352;             // width of the shell column on a narrow display (must match build-image shellw=)
 const SLOT_W = 640;              // width of each application column (must match pvmon.c)
-const MAX_SLOTS = 3;             // application columns (must match pvmon.c)
+/* Four, not three: the first-run note takes one and a fixed-layout program wider than a column
+   takes two, so a third program had no column left and opened as a caption-high stub in the
+   staging area. Each column costs 640 x 970 x 4 bytes in the browser's pixel buffer. */
+const MAX_SLOTS = 4;             // application columns (must match pvmon.c)
 /* The guest screen is taller than the part composited here: the visible columns, and under them
    the tiles the hook parks popups and dialogs in (TILE_Y/DLG_Y in pvhook.c) so that neither ever
    paints over the window it belongs to. Below rather than beside, and no taller than the tiles
    need: every row is a row of the browser's pixel buffer (width x height x 4 bytes), and a phone
    kills a tab that asks for too much. */
-const SCREEN_W = SLOT_W * (1 + MAX_SLOTS);   // 2560, unchanged: the visible columns
+const SCREEN_W = SLOT_W * (1 + MAX_SLOTS);   // 3200: the shell column and four application columns
 const SCREEN_H = 970;                        // the visible rows only: tiles are off (PopupTiles in pvhook.c)
 const WIN_MARGIN = 8;
 
