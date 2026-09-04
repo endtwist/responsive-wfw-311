@@ -154,6 +154,7 @@ H=$SHELLH; [ "$H" = 0 ] && H=760
 # bottom of its own 576x456 window at 120 dpi: +44 px brings it back). SPEC 2026-09-03.
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
+  windows.Beep=no \
   PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 Paintbrush.width=536 Paintbrush.height=300 PVMon.Size.SKI=${W}x${H} PVMon.Size.TETRIS=${W}x470 PVMon.Size.BLAKJAK=576x500 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" "PVMon.HideApps=TCPMAN" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZBALL TETRIS TETRAVEX TRIPEAKS TUTSTOMB FREECELL GOLF CHIPS RODENT PIPE TP BLAKJAK" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \

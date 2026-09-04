@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 41     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 42     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 /* Windows 3.x rounds SetTimer up to the 18.2 Hz PC tick, so the 40 ms poll really fires every
@@ -2034,6 +2034,16 @@ static void run_host_command_1(void)
         fast_extend();
         if (!top || !IsWindow(top) || IsIconic(top)) return;
         target = scroll_target(top, (msg == WM_VSCROLL) ? WS_VSCROLL : WS_HSCROLL);
+        /* Nothing to scroll sideways: do not send it. Nobody swipes in a perfectly straight line,
+           so a vertical flick always carries a few horizontal lines with it, and a list box with no
+           horizontal extent answers each one with MessageBeep -- every swipe dinged. An empty
+           range is the honest test for "this cannot move that way"; the vertical axis is left
+           alone, because a focused list scrolls vertically whether or not it has a bar. */
+        if (msg == WM_HSCROLL) {
+            int lo = 0, hi = 0;
+            GetScrollRange(target, SB_HORZ, &lo, &hi);
+            if (lo >= hi) return;
+        }
         if (!lines) lines = 3;
         for (k = 0; k < lines; k++) SendMessage(target, msg, sb, 0L);
         SendMessage(target, msg, SB_ENDSCROLL, 0L);

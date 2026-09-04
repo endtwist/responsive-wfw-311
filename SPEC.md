@@ -3772,3 +3772,11 @@ frame, and may run for three seconds; the floor for starting one at all came dow
 px/ms, and the backpressure damping when the guest cannot keep up is gentler (0.9 a frame, not 0.8),
 so a long glide over a slow list coasts rather than being cut off. It still stops the moment the
 guest stops painting -- the end of a list has nothing to scroll.
+
+**The ding on a sideways swipe.** Nobody swipes in a perfectly straight line, so a vertical flick
+always carries a few horizontal lines with it, and a list box with no horizontal extent answers each
+one with `MessageBeep` -- every swipe dinged. **PVMON v42** checks `GetScrollRange(target, SB_HORZ)`
+before sending `WM_HSCROLL` and drops it when the range is empty, which is the honest test for "this
+cannot move that way". The vertical axis is deliberately left alone: a focused list scrolls whether
+or not it has a bar. WIN.INI `[windows] Beep=no` covers whatever is left (over-scrolling a real list
+at its end, say); Control Panel's Sound dialog turns it back on for anyone who wants it.
