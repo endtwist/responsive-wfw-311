@@ -78,21 +78,19 @@ if [ -d changes/trumpet ]; then
 fi
 
 # Microsoft TCP/IP-32 over NDIS 3 on v86's NE2000 (net=1). changes/net/windows -> C:\WINDOWS and
-# changes/net/system -> C:\WINDOWS\SYSTEM, laid out the way TCP32B's OEMSETUP.INF says, plus a
-# PROTOCOL.INI describing the card and the transport. The card's settings are v86's: I/O 0x300, and
-# ISA line 10, which is where the bus routes its PCI interrupt (tools/probe.mjs netcard).
+# changes/net/system -> C:\WINDOWS\SYSTEM: the file set is exactly what Windows Setup's own network
+# install copied, taken from WFW's install source on the image (expanded with its own EXPAND.EXE,
+# which handles the KWAJ compression tools/msexpand.py does not) and from TCP32B. PROTOCOL.INI is
+# the file Setup wrote, read back out of that guest; the SYSTEM.INI half is in tools/inied.py.
 if [ "$NET" = 1 ] && [ -d changes/net ]; then
   for f in changes/net/windows/*; do [ -f "$f" ] && mcopy -o $M "$f" ::/WINDOWS/; done
   for f in changes/net/system/*;  do [ -f "$f" ] && mcopy -o $M "$f" ::/WINDOWS/SYSTEM/; done
-  {
-    printf '[network.setup]\r\nversion=0x3110\r\nnetcard=ms$ne2clone,1,MS$NE2CLONE,1\r\n'
-    printf 'transport=MSTCP32,MSTCP32\r\nlana0=ms$ne2clone,1,MSTCP32\r\n\r\n'
-    printf '[MS$NE2CLONE]\r\nDriverName=MS2000$\r\nIOBASE=0x300\r\nINTERRUPT=10\r\n\r\n'
-    printf '[MSTCP32]\r\nDriverName=TCPIP$\r\nBINDINGS=MS$NE2CLONE\r\nLANABASE=0\r\n'
-    printf 'IPAddress0=10 0 2 15\r\nIPMask0=255 255 255 0\r\nDefaultGateway0=10 0 2 2\r\n'
-    printf 'NameServer=10 0 2 2\r\nDisableDHCP=1\r\n'
-  } > $TMP/PROTOCOL.INI
-  mcopy -o $M $TMP/PROTOCOL.INI ::/WINDOWS/PROTOCOL.INI
+  mcopy -o $M changes/net/config/PROTOCOL.INI ::/WINDOWS/PROTOCOL.INI
+  # IFSHLP.SYS is what the redirector needs and Setup adds it here; the rest of CONFIG.SYS is the
+  # base image's.
+  mcopy -n $M ::/CONFIG.SYS $TMP/CONFIG.SYS
+  grep -qi IFSHLP $TMP/CONFIG.SYS || printf 'DEVICE=C:\\WINDOWS\\IFSHLP.SYS\r\n' >> $TMP/CONFIG.SYS
+  mcopy -o $M $TMP/CONFIG.SYS ::/CONFIG.SYS
 fi
 
 # The guest's web client (guest/fetch): Windows for Workgroups shipped no HTTP client, so this is
@@ -133,6 +131,10 @@ done
   # (It is not what makes their sound work: the Entertainment Pack games call sndPlaySound with a
   # bare file name and the lookup does not reach C:\GAMES, so changes-local/windows/ stages the
   # .WAVs and .MIDs into C:\WINDOWS as well — SPEC 2026-09-03.)
+  # The real-mode half: PROTMAN, the MAC, NDISHLP. Its output goes to COM1 as well as the screen,
+  # because by the time a boot has failed Windows has painted over the text screen and this is the
+  # only record of what the network driver said (tools/probe.mjs "serial").
+  [ "$NET" = 1 ] && printf 'C:\\WINDOWS\\net start > COM1\r\n'
   printf 'C:\\WINDOWS\\SMARTDRV.EXE\r\n@ECHO OFF\r\nPROMPT $P$G\r\nPATH C:\\WINDOWS;C:\\DOS;C:\\GAMES;C:\\TRUMPET;\r\nSET TEMP=C:\\TEMP\r\n'
   case $BOOT in
     win)    printf ':WINLOOP\r\nPVDPI\r\nWIN\r\nGOTO WINLOOP\r\n';;

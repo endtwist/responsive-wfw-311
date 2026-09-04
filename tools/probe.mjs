@@ -276,6 +276,12 @@ const slip = new SlipNet({
   },
   log: m => netLog.push(m),
 });
+/* COM1 as a serial console. DOS can be told to send its output there (AUTOEXEC "> COM1"), which is
+   the only way to read what happened before Windows started: by the time a boot has failed the
+   text screen has been painted over by Windows' own, and a guest that hangs cannot be asked. */
+let serialOut = "";
+emulator.bus.register("serial0-output-byte", byte => { serialOut += String.fromCharCode(byte & 0xFF); });
+
 /* The guest's clipboard, as PVMON puts it on the debug channel (see the getclip step). */
 const clipOut = { lines: null, text: "" };
 emulator.bus.register("pv-debug", line => {
@@ -315,6 +321,7 @@ if (!st.desktopReady) {
      in text mode (CONFIG.SYS, a DOS message) or in Windows' 16-colour boot screen (a missing VxD,
      an error box), and which one it was is not known until it is looked at. */
   console.error(textScreen());
+  if (serialOut) console.error("COM1 said:\n" + serialOut.replace(/\r/g, ""));
   try { console.error("screen written to " + vgaShot("shots/boot-fail.png")); } catch (e) {}
   process.exit(1);
 }
@@ -392,6 +399,7 @@ for (const s of steps) {
   }
   else if (op === "screen") { console.log(`${ts()} text screen:\n${textScreen()}`); }
   else if (op === "vgashot") { console.log(`${ts()} vgashot ${vgaShot(arg || "shots/vga.png")}`); }
+  else if (op === "serial") { console.log(`${ts()} COM1 said (${serialOut.length} bytes):\n${serialOut.replace(/\r/g, "")}`); }
   else if (op === "netcard") {
     /* The NE2000 as the guest can see it: where its registers are, and which ISA line the BIOS
        routed its PCI interrupt to -- that number is what PROTOCOL.INI has to say, and it is

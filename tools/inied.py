@@ -59,18 +59,46 @@ elif disp == "vga":
     setkey(secs, "boot", "display.drv", "vga.drv"); setkey(secs, "boot", "386grabber", "vga.3gr"); setkey(secs, "386Enh", "display", "*vddvga")
 elif disp == "pvdisp":
     setkey(secs, "boot", "display.drv", "pvdisp.drv"); setkey(secs, "boot", "386grabber", "vgadib.3gr"); setkey(secs, "386Enh", "display", "*vddvga"); setkey(secs, "boot.description", "display.drv", "Responsive paravirtual display (256 colors)")
-# net=1: the NE2000 with Microsoft TCP/IP-32 over NDIS 3 (image/changes/net). The VxD list and
-# where each file goes come from TCP32B's own OEMSETUP.INF; the card's driver name and its
-# parameter names come from WFW's NETWORK.INF ([ms$ne2000], [ms$ne2clone_nif]). v86's card sits at
-# I/O 0x300 and its PCI interrupt is routed to ISA line 10 (tools/probe.mjs netcard).
+# net=1: the NE2000 with Microsoft TCP/IP-32 over NDIS 3. Every key here was read back out of a
+# guest where Windows Setup had done the install itself (image/changes/net/config/SYSTEM.INI),
+# because hand-writing it does not work: the hint that matters is [386Enh] network=, which names
+# WFW's own network core. Without it NDIS.386 loads and never returns, and Windows hangs on its
+# splash screen with nothing printed at all. The TCP/IP VxDs go on the transport= line, not on
+# device= lines of their own. The card is v86's: I/O 0x300, ISA line 10 (tools/probe.mjs netcard).
 if opts.get("net") == "1":
-    setkey(secs, "network drivers", "netcard", "ne2000.386")
+    ip = opts.get("ip", "10.0.2.15"); mask = opts.get("mask", "255.255.255.0")
+    gw = opts.get("gw", "10.0.2.2"); dns = opts.get("dns", gw); host = opts.get("host", "wfw311")
+    setkey(secs, "boot", "network.drv", "wfwnet.drv")
+    setkey(secs, "boot.description", "network.drv", "Microsoft Windows Network (version 3.11)")
+    setkey(secs, "boot.description", "secondnet.drv", "No Additional Network Installed")
+    setkey(secs, "Network", "winnet", "wfwnet/00025100")
+    setkey(secs, "Network", "multinet", "nonet")
+    setkey(secs, "386Enh", "network", "*vnetbios,*vwc,vnetsup.386,vredir.386,vserver.386")
+    setkey(secs, "386Enh", "netcard", "ne2000.386")
+    setkey(secs, "386Enh", "transport",
+           "nwlink.386,nwnblink.386,netbeui.386,vip.386,vdhcp.386,vtdi.386,vtcp.386,vnbt.386")
+    setkey(secs, "386Enh", "secondnet.drv", "No Additional Network Installed")
     setkey(secs, "network drivers", "devdir", "C:\\WINDOWS")
     setkey(secs, "network drivers", "LoadRMDrivers", "No")
-    for vxd in ("ndis.386", "ne2000.386", "vip.386", "vtcp.386", "vudp.386", "vtdi.386",
-                "vdhcp.386", "vnbt.386", "wsock.386", "wstcp.386"):
-        addline(secs, "386Enh", f"device={vxd}")
-    setkey(secs, "386Enh", "TimerCriticalSection", "5000")   # what WFW's own network setup writes
+    setkey(secs, "network drivers", "netcard", "ne2000.dos")
+    setkey(secs, "network drivers", "transport", "ndishlp.sys,*netbeui")
+    # The addresses live in a per-interface section, not in PROTOCOL.INI where one would look.
+    setkey(secs, "ms$ne2clone0", "Binding", "ms$ne2clone")
+    setkey(secs, "ms$ne2clone0", "Description", "NE2000 Compatible")
+    setkey(secs, "ms$ne2clone0", "IPAddress", ip)
+    setkey(secs, "ms$ne2clone0", "IPMask", mask)
+    setkey(secs, "ms$ne2clone0", "DefaultGateway", gw)
+    setkey(secs, "MSTCP", "EnableRouting", "0")
+    setkey(secs, "MSTCP", "Interfaces", "ms$ne2clone0")
+    setkey(secs, "MSTCP", "deadgwdetect", "1")
+    setkey(secs, "MSTCP", "pmtudiscovery", "1")
+    setkey(secs, "DNS", "DNSServers", dns)
+    setkey(secs, "DNS", "HostName", host)
+    setkey(secs, "DNS", "DomainName", "")
+    setkey(secs, "DNS", "DNSDomains", "")
+    setkey(secs, "NBT", "LANABASE", "2")
+    setkey(secs, "NBT", "EnableProxy", "0")
+    setkey(secs, "NBT", "EnableDNS", "0")
 
 out = []
 for name, lines in secs:
