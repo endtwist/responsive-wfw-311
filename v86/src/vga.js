@@ -963,34 +963,36 @@ VGAScreen.prototype.pv_blt_screen_copy = function()
     const p = this.pv_blt;
     const sx = p[0], sy = p[1], dx = p[2], dy = p[3];
     let w = p[4], h = p[5];
-    const pitch = this.svga_pitch_px();
+    const pxb = this.pv_px_bytes();
+    const pitch = this.svga_pitch_px(), pitchB = pitch * pxb;
     if(w <= 0 || h <= 0) return;
     // clip to the frame buffer: a rectangle the driver never clips is a driver bug, not a crash
     const maxw = Math.min(pitch - sx, pitch - dx);
     if(maxw <= 0) return;
     if(w > maxw) w = maxw;
     const rows = Math.min(h, Math.min(
-        ((this.vga_memory_size - sx) / pitch | 0) - sy,
-        ((this.vga_memory_size - dx) / pitch | 0) - dy));
+        ((this.vga_memory_size - sx * pxb) / pitchB | 0) - sy,
+        ((this.vga_memory_size - dx * pxb) / pitchB | 0) - dy));
     if(rows <= 0) return;
     const mem = this.svga_mem();
+    const wB = w * pxb, sxB = sx * pxb, dxB = dx * pxb;
     if(dy > sy)
     {
         for(let i = rows - 1; i >= 0; i--)
         {
-            const s = (sy + i) * pitch + sx;
-            mem.copyWithin((dy + i) * pitch + dx, s, s + w);
+            const s = (sy + i) * pitchB + sxB;
+            mem.copyWithin((dy + i) * pitchB + dxB, s, s + wB);
         }
     }
     else
     {
         for(let i = 0; i < rows; i++)
         {
-            const s = (sy + i) * pitch + sx;
-            mem.copyWithin((dy + i) * pitch + dx, s, s + w);
+            const s = (sy + i) * pitchB + sxB;
+            mem.copyWithin((dy + i) * pitchB + dxB, s, s + wB);
         }
     }
-    const lo = dy * pitch + dx, hi = (dy + rows - 1) * pitch + dx + w - 1;
+    const lo = dy * pitchB + dxB, hi = (dy + rows - 1) * pitchB + dxB + wB - 1;
     if(lo < this.js_dirty_min) this.js_dirty_min = lo;
     if(hi > this.js_dirty_max) this.js_dirty_max = hi;
     this.pv_blt_count++;
@@ -1008,9 +1010,10 @@ VGAScreen.prototype.pv_blt_scaled = function()
     const p = this.pv_blt;
     const sx = p[0], sy = p[1], dx = p[2], dy = p[3], sw = p[4], sh = p[5], dw = p[6], dh = p[7];
     if(sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
-    const pitch = this.svga_pitch_px();
+    const pxb = this.pv_px_bytes();
+    const pitch = this.svga_pitch_px(), pitchB = pitch * pxb;
     const mem = this.svga_mem();
-    const rows = Math.min(dh, ((this.vga_memory_size - dx) / pitch | 0) - dy);
+    const rows = Math.min(dh, ((this.vga_memory_size - dx * pxb) / pitchB | 0) - dy);
     const cols = Math.min(dw, pitch - dx);
     if(rows <= 0 || cols <= 0) return;
     // 16.16 fixed point: the source step per destination pixel
@@ -1018,12 +1021,19 @@ VGAScreen.prototype.pv_blt_scaled = function()
     for(let j = 0; j < rows; j++)
     {
         const srcRow = sy + ((j * stepY) >> 16);
-        if(srcRow < 0 || (srcRow + 1) * pitch > this.vga_memory_size) break;
-        const s = srcRow * pitch + sx, d = (dy + j) * pitch + dx;
+        if(srcRow < 0 || (srcRow + 1) * pitchB > this.vga_memory_size) break;
+        const s = srcRow * pitchB + sx * pxb, d = (dy + j) * pitchB + dx * pxb;
         let u = 0;
-        for(let i = 0; i < cols; i++, u += stepX) mem[d + i] = mem[s + (u >> 16)];
+        if(pxb === 1)
+            for(let i = 0; i < cols; i++, u += stepX) mem[d + i] = mem[s + (u >> 16)];
+        else
+            for(let i = 0; i < cols; i++, u += stepX)
+            {
+                const so = s + (u >> 16) * pxb, dof = d + i * pxb;
+                for(let b = 0; b < pxb; b++) mem[dof + b] = mem[so + b];
+            }
     }
-    const lo = dy * pitch + dx, hi = (dy + rows - 1) * pitch + dx + cols - 1;
+    const lo = dy * pitchB + dx * pxb, hi = (dy + rows - 1) * pitchB + (dx + cols) * pxb - 1;
     if(lo < this.js_dirty_min) this.js_dirty_min = lo;
     if(hi > this.js_dirty_max) this.js_dirty_max = hi;
     this.pv_blt_count++;
@@ -2826,6 +2836,22 @@ VGAScreen.prototype.svga_pitch_px = function()
     return this.svga_pitch || this.svga_width || 1;
 };
 
+/* Bytes per pixel in the current mode. The blit engine below worked in bytes and called them
+   pixels, which is the same thing at 8 bpp and nothing like it at 16, where a row of N pixels is
+   2N bytes. Everything that addresses the frame buffer goes through this. */
+VGAScreen.prototype.pv_px_bytes = function()
+{
+    return this.svga_bpp === 15 ? 2 : (this.svga_bpp >= 8 ? this.svga_bpp >> 3 : 1);
+};
+/* The blit engine handles the packed modes: 8 bpp (a byte a pixel, the palette in the DAC) and
+   the direct-colour modes a full-colour driver would use. */
+VGAScreen.prototype.pv_blt_ok = function()
+{
+    return this.svga_enabled && !this.pv_blt_disabled &&
+           (this.svga_bpp === 8 || this.svga_bpp === 15 || this.svga_bpp === 16 ||
+            this.svga_bpp === 24 || this.svga_bpp === 32);
+};
+
 /**
  * Host side of the paravirtual resize path: record the wanted mode, bump the
  * generation counter, set STATUS.MODE_REQUEST and raise the IRQ if enabled.
@@ -2925,7 +2951,7 @@ VGAScreen.prototype.svga_register_read = function(n)
         case 0x26:
             // PV BLT capability: bit 0 = screen-to-screen copy, bit 1 = the same scaled.
             // 0 when disabled for A/B.
-            return (this.svga_enabled && this.svga_bpp === 8 && !this.pv_blt_disabled) ? 3 : 0;
+            return this.pv_blt_ok() ? 3 : 0;
 
         case 8:
             // x offset

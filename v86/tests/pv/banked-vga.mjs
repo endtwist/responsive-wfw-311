@@ -375,5 +375,35 @@ const bltScaled = (sx, sy, dx, dy, sw, sh, dw, dh) => {
     eq(px(32, tall), 0, "with no composite reserved, composing does nothing");
 }
 
+// --- 14. 16 bpp: the same engine, two bytes a pixel. A full-colour driver needs the blits to
+//     address the frame buffer in bytes rather than assuming a pixel is one -- which is what they
+//     did, harmlessly, for as long as 8 bpp was the only mode.
+{
+    const was = vga.svga_bpp;
+    vga.svga_bpp = 16;
+    eq(vga.pv_px_bytes(), 2, "16 bpp is two bytes a pixel");
+    eq(vga.svga_register_read(0x26) & 3, 3, "the blit engine is available at 16 bpp");
+    const mem = vga.svga_mem(), pitchB = pitch * 2;
+    mem.fill(0, 0, 40 * pitchB);
+    // a 4x2 source at (0,0): pixel n holds the little-endian value 0x1100 + n
+    for(let y = 0; y < 2; y++) for(let x = 0; x < 4; x++) {
+        const o = y * pitchB + x * 2;
+        mem[o] = x; mem[o + 1] = 0x11;
+    }
+    const px16 = (x, y) => vga.svga_mem()[y * pitchB + x * 2] | (vga.svga_mem()[y * pitchB + x * 2 + 1] << 8);
+    blt(0, 0, 100, 0, 4, 2);
+    eq(px16(100, 0), 0x1100, "16 bpp copy: first pixel whole");
+    eq(px16(103, 0), 0x1103, "16 bpp copy: last pixel whole");
+    eq(px16(103, 1), 0x1103, "16 bpp copy: second row too");
+    eq(px16(104, 0), 0, "16 bpp copy: nothing past the rectangle");
+    bltScaled(0, 0, 200, 0, 4, 2, 8, 4);
+    eq(px16(200, 0), 0x1100, "16 bpp scaled: doubled pixels stay whole");
+    eq(px16(201, 0), 0x1100, "16 bpp scaled: ...twice");
+    eq(px16(202, 0), 0x1101, "16 bpp scaled: and step to the next source pixel");
+    eq(px16(207, 3), 0x1103, "16 bpp scaled: bottom right lands on the last source pixel");
+    vga.svga_bpp = was;
+    eq(vga.pv_px_bytes(), 1, "back to 8 bpp: a byte a pixel");
+}
+
 console.log(`${checks - failures}/${checks} checks passed`);
 process.exit(failures ? 1 : 0);
