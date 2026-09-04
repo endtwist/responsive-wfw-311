@@ -413,10 +413,20 @@ static BOOL popup_anchor(HWND h, int FAR *ax, int FAR *ay)
 }
 /* A tile below the visible rows for an owned window. The anchor is where it would have been put
    in its owner's column, which is what the host still uses to decide where to draw it. */
+/* Dialogs are NOT tiled by default (2026-09-03). Tiling them worked -- they painted without
+   taking their owner's pixels -- but a dialog is a window the user drags, pans and reaches into,
+   and the host has a column's worth of machinery that assumes it is where Windows put it: the
+   tall-dialog column pan measured its height from a tile 1250 rows down, dragging one moved a
+   layer whose position came from the anchor instead, and the pointer mapping that follows the
+   column went with them. Menus have none of that -- they are shown, picked from and dismissed --
+   which is why popups stay tiled. [PVMon] DialogTiles=1 turns this back on for the work of
+   teaching the host to treat a tiled dialog as a first-class layer. */
+static int g_dlgTiles = -1;
 static int dialog_tile(HWND h, int ax, int ay)
 {
     int i, free = -1;
-    if (g_desktop) return -1;
+    if (g_dlgTiles < 0) g_dlgTiles = GetProfileInt("PVMon", "DialogTiles", 0);
+    if (!g_dlgTiles || g_desktop) return -1;
     for (i = 0; i < DLG_TILES; i++) {
         if (g_dlg[i].hwnd == h) { g_dlg[i].ax = ax; g_dlg[i].ay = ay; return i; }
         if (free < 0 && (!g_dlg[i].hwnd || !IsWindow(g_dlg[i].hwnd) || !IsWindowVisible(g_dlg[i].hwnd)))
