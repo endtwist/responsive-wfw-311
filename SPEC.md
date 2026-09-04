@@ -3715,3 +3715,24 @@ fetched page an ordinary file the rest of Windows can open.
 `image/build-image.sh display=pvdisp dpi=120 sysfont=PVSYS.FON mouse=PVMOUSE.DRV sound=1
 load=PVMON.EXE live=1 shellw=352 shellh=760 spooler=no printer=PSCRIPT out=work-phone.img` and a
 warmed snapshot (the usual four apps plus `run:FETCH.EXE until:W:Fetch close dismiss`).
+
+### 2026-09-04 — the LCD runs, and ?lcd=1 means it
+Josh: "the old LCDs have run - where the pixels in the X/Y axes bleed a shadow because they're old
+and pixels aren't drawn perfectly. It's most noticeable with windows and large rects but happens
+universally", with a photograph of a 9800NB showing every glyph doubled to the right and a grey wash
+carrying down the columns below a block of text.
+
+That is passive-matrix crosstalk: each cell is driven through the row and the column it sits on, the
+drive never settles inside one cell time, and what leaks lands on the cells that come after -- so a
+dark glyph or a window border trails a shadow to the RIGHT along its row and DOWNWARD along its
+column. The look pass now samples the drive level at taps behind the pixel in both axes, in **guest
+pixels** (the panel's real cells, not device pixels), in two ranges: a strong short trail of one and
+two cells, and a much fainter long one reaching five, eleven, twenty-three cells back. Only the
+darkening half is kept -- `min(l, mix(l, trail, k))` -- because crosstalk pulls a cell towards what
+came before it and it is the dark that shows. The taps are on the level texture, before the grid and
+the backlight, so the grid does not smear with it.
+
+**`?lcd=1` now means it.** It forced the filter on at startup and then lost: localStorage from a
+previous visit, and LCD.EXE's `/report` at desktop-ready, both overwrote it. The parameter now
+outranks both (and `?lcd=0` forces it off); with no parameter the guest's Screen app decides, which
+is the normal case.

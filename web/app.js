@@ -2973,15 +2973,20 @@ window.addEventListener("paste", ev => {
    <contrast>" on the debug channel whenever the user moves anything. The URL's ?lcd=1 is only the
    initial state for a page that has never been told otherwise; what the guest last said is kept
    here so a reload comes up the way it was left, and the guest keeps its own copy in WIN.INI. */
-let lcdOn = params.get("lcd") === "1";
+/* ?lcd=1 forces the filter on and ?lcd=0 forces it off, and both outrank everything else: what was
+   left in localStorage, and what the guest's own Screen app reports at startup. A switch in the URL
+   that the guest could then turn off behind you is not a switch. With no parameter at all the guest
+   decides, which is the normal case. */
+const lcdForced = params.get("lcd") === "1" ? true : params.get("lcd") === "0" ? false : null;
+let lcdOn = lcdForced === true;
 let lcdBright = 0.5, lcdContrast = 0.5;
 try {
   const saved = JSON.parse(localStorage.getItem("pv.lcd") || "null");
-  if (saved) { lcdOn = !!saved.on; lcdBright = saved.bright; lcdContrast = saved.contrast; }
+  if (saved) { if (lcdForced === null) lcdOn = !!saved.on; lcdBright = saved.bright; lcdContrast = saved.contrast; }
 } catch (e) {}
 function lcdSettings(on, bright, contrast) {
   const was = lcdOn;
-  lcdOn = !!on;
+  lcdOn = lcdForced === null ? !!on : lcdForced;
   lcdBright = Math.max(0, Math.min(1, bright / 100));
   lcdContrast = Math.max(0, Math.min(1, contrast / 100));
   try { localStorage.setItem("pv.lcd", JSON.stringify({ on: lcdOn, bright: lcdBright, contrast: lcdContrast })); } catch (e) {}
@@ -3026,6 +3031,32 @@ uniform vec2 res, pitch;     // canvas pixels, and the size of one guest pixel i
 uniform float t, bright, contrast;   // the guest's own two scroll bars, 0..1, 0.5 = as shipped
 void main() {
   float l = texture2D(lvl, uv).r;
+
+  /* "Run": the smear a passive matrix leaves along its own wiring. Every cell is driven through
+     the row and column it sits on, the drive never quite settles inside one cell time, and what
+     leaks lands on the cells that come after -- so a dark glyph or a window border trails a shadow
+     to the RIGHT along its row and DOWNWARD along its column. In Josh's photograph of the 9800NB
+     every character is doubled that way, and the columns of a block of text stay faintly grey the
+     whole height of the panel below it.
+     Two ranges, because the panel has two: a strong short trail of a couple of cells, and a much
+     fainter long one that carries tens of cells away. Taps are in guest pixels (the panel's real
+     cells), and only the darkening half is kept -- crosstalk pulls a cell towards the drive of
+     what came before it, and it is the dark that shows. */
+  vec2 cell = max(pitch, vec2(1.0)) / res;
+  float near = 0.0, far = 0.0;
+  near += 0.44 * texture2D(lvl, uv - vec2(cell.x, 0.0)).r;
+  near += 0.24 * texture2D(lvl, uv - vec2(cell.x * 2.0, 0.0)).r;
+  near += 0.20 * texture2D(lvl, uv - vec2(0.0, cell.y)).r;
+  near += 0.12 * texture2D(lvl, uv - vec2(0.0, cell.y * 2.0)).r;
+  far += 0.30 * texture2D(lvl, uv - vec2(cell.x * 5.0, 0.0)).r;
+  far += 0.22 * texture2D(lvl, uv - vec2(cell.x * 11.0, 0.0)).r;
+  far += 0.16 * texture2D(lvl, uv - vec2(cell.x * 23.0, 0.0)).r;
+  far += 0.18 * texture2D(lvl, uv - vec2(0.0, cell.y * 5.0)).r;
+  far += 0.09 * texture2D(lvl, uv - vec2(0.0, cell.y * 13.0)).r;
+  far += 0.05 * texture2D(lvl, uv - vec2(0.0, cell.y * 29.0)).r;
+  l = min(l, mix(l, near, 0.45));
+  l = min(l, mix(l, far, 0.14));
+
   /* Contrast pivots about mid grey so neither end runs away, and brightness is the backlight's
      own knob -- these panels had a wheel on the bezel for each, and this is what those did. */
   l = clamp(0.5 + (l - 0.5) * (0.55 + 1.9 * contrast), 0.0, 1.0);
