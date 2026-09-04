@@ -16,10 +16,10 @@ package-lock.json
 
 image/*
 !image/current.json
-!image/boot-20260903-224151.state.gz
+!image/boot-20260903-231051.state.gz
 !image/parts
 image/parts/*
-!image/parts/work-phone-20260903-224151
+!image/parts/work-phone-20260903-231051
 
 v86/*
 !v86/src

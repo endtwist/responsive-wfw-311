@@ -171,10 +171,12 @@ static WinInfo g_info[MAX_INFO];
 /* Window handles are recycled: a record learned for one program's window must not answer for
    the next program that gets the handle (Solitaire born with a closed Notepad's handle would be
    "resizable" and clamped to 352). Forgotten at creation and destruction. */
+static void forget_tiles(HWND hwnd);
 static void forget(HWND hwnd)
 {
     int i;
     for (i = 0; i < MAX_INFO; i++) if (g_info[i].hwnd == hwnd) g_info[i].hwnd = NULL;
+    forget_tiles(hwnd);
 }
 
 /* Windows being destroyed. PVMON's poll touches every top-level window (GetWindowText,
@@ -347,15 +349,23 @@ static char hook_kind(HWND h, HWND skip, char FAR *cls, HWND FAR *owner)
    It paints there, destroys nobody's pixels, and the host draws it over the item it belongs to
    from the anchor published with it. */
 #define VIS_W  2560            /* the part of the screen the host composites */
-#define VIS_H  970             /* ...and how much of it is visible; below that is tile space too */
+#define VIS_H  970             /* ...and how much of it is visible; below that is tile space */
+/* Tiles live BELOW the visible rows, never beside them. They were beside them first, in the
+   columns between 2560 and the 4096-pixel pitch, which cost nothing in memory -- but it made the
+   screen 4096 wide, and the frame buffer is converted to pixels a dirty row at a time: every row
+   became 1.6x more work for the phone, on every frame, whether a popup existed or not. Below the
+   visible rows the width stays 2560 and a row costs what it always did. */
 #define TILE_W 512
 #define TILES  3               /* a menu, its submenu, and one to spare */
+#define TILE_Y VIS_H           /* popups: one row of tiles straight under the visible screen */
+#define TILE_H 280             /* ...and the dialogs start after them */
 /* Dialogs are wider than a popup tile and there are more of them, so they get the strip below the
    visible rows: six columns of SLOT_W, each the full height of the off-screen area. A dialog that
    does not fit one stays where it would have gone, in its owner's column, and the compositor's
    older masking still covers it. */
 #define DLG_W  SLOT_W
-#define DLG_TILES 6
+#define DLG_TILES 4
+#define DLG_Y  (VIS_H + TILE_H)
 typedef struct { HWND hwnd; int ax, ay; } Popup;
 static Popup g_popup[TILES];
 static Popup g_dlg[DLG_TILES];
@@ -371,9 +381,21 @@ static int popup_tile(HWND h, int ax, int ay)
     g_popup[free].hwnd = h; g_popup[free].ax = ax; g_popup[free].ay = ay;
     return free;
 }
+/* Window handles are recycled. A tile entry left behind by a window that has gone would answer
+   for whatever program is given the handle next -- and everything that asks "is this window in a
+   tile?" would then leave the new window alone: unclamped, unfitted, drifting a few pixels off
+   the column (Program Manager published at 3,8 instead of 0,0). Entries die with their window,
+   at creation and destruction, and a lookup checks the window is still there. */
+static void forget_tiles(HWND hwnd)
+{
+    int i;
+    for (i = 0; i < TILES; i++) if (g_popup[i].hwnd == hwnd) g_popup[i].hwnd = NULL;
+    for (i = 0; i < DLG_TILES; i++) if (g_dlg[i].hwnd == hwnd) g_dlg[i].hwnd = NULL;
+}
 static BOOL popup_anchor(HWND h, int FAR *ax, int FAR *ay)
 {
     int i;
+    if (!h || !IsWindow(h)) return FALSE;
     for (i = 0; i < TILES; i++)
         if (g_popup[i].hwnd == h) { *ax = g_popup[i].ax; *ay = g_popup[i].ay; return TRUE; }
     for (i = 0; i < DLG_TILES; i++)
@@ -465,9 +487,9 @@ static void place_owned(HWND dlg, HWND owner, int w, int h, int FAR *px, int FAR
        its owner's pixels with it. What was computed above is kept as the anchor: the host still
        decides where an owned window is drawn, and the anchor is what tells it which column and
        which owner the dialog belongs to. */
-    if (dlg && w <= DLG_W && h <= (int)(2048 - VIS_H)) {
+    if (dlg && w <= DLG_W && h <= (int)(2048 - DLG_Y)) {
         int t = dialog_tile(dlg, x, y);
-        if (t >= 0) { *px = t * DLG_W; *py = VIS_H; }
+        if (t >= 0) { *px = t * DLG_W; *py = DLG_Y; }
     }
 }
 
@@ -665,6 +687,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
            shell's next publish, which is the grey flash on a close. The rectangle is what will be
            uncovered; the host holds those pixels until the window behind has actually painted. */
         HWND dw = (HWND)wParam;
+        forget_tiles(dw);                    /* its tile is free, and the handle will be reused */
         if (IsWindowVisible(dw) && !IsIconic(dw)) {
             RECT dr; char db[80];
             GetWindowRect(dw, &dr);
@@ -729,8 +752,8 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             cs->x = ax; cs->y = ay;
             /* the shell's own dialogs tile too: their copy in the desktop column is what the
                compositor used to have to paint over */
-            if (cs->cx <= DLG_W && cs->cy <= (int)(2048 - VIS_H) && (t = dialog_tile(hwnd, ax, ay)) >= 0) {
-                cs->x = t * DLG_W; cs->y = VIS_H;
+            if (cs->cx <= DLG_W && cs->cy <= (int)(2048 - DLG_Y) && (t = dialog_tile(hwnd, ax, ay)) >= 0) {
+                cs->x = t * DLG_W; cs->y = DLG_Y;
             }
             goto pass;
         }
@@ -836,9 +859,8 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
        again at a new place each time, so it has to be re-tiled (and its anchor updated) on every
        show. Skipping it left the menu painting where USER put it, over the window it belongs to,
        while the host drew it a second time at the anchor of the menu before it. */
-    { int tax, tay;
-      for (tax = 0; tax < DLG_TILES; tax++) if (g_dlg[tax].hwnd == hwnd) return;
-      (void)tay; }
+    { int i;
+      for (i = 0; i < DLG_TILES; i++) if (g_dlg[i].hwnd == hwnd && IsWindow(hwnd)) return; }
     if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return;
     if (transient_class(cls)) {
         /* Menus and drop-downs are relocated, not clamped: each gets a tile in the off-screen
@@ -848,8 +870,8 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
             int w = (wp->flags & SWP_NOSIZE) ? 0 : wp->cx, t;
             if (!w) { RECT rc; GetWindowRect(hwnd, &rc); w = rc.right - rc.left; }
             if (w > 0 && w <= TILE_W && (t = popup_tile(hwnd, wp->x, wp->y)) >= 0) {
-                wp->x = VIS_W + t * TILE_W;
-                wp->y = 0;
+                wp->x = t * TILE_W;
+                wp->y = TILE_Y;
             }
         }
         return;

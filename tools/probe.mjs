@@ -81,7 +81,7 @@ if (!IMAGE) {
 if (STATE === "none") STATE = null;
 if (STATE && !fs.existsSync(STATE)) { console.error("no state " + STATE + ", cold boot"); STATE = null; }
 
-const SCREEN_W = 4096, SCREEN_H = 2048;  // visible columns and rows, plus the hook's popup and dialog tiles
+const SCREEN_W = 2560, SCREEN_H = 2048;  // visible columns and rows, plus the hook's popup and dialog tiles
 /* Scancode set 1. The whole alphabet and the digit row are here so a step can drive any menu
    mnemonic (Program Manager's Window menu, a group by number) without editing this table again. */
 const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, space: 0x39, shift: 0x2A,
@@ -235,6 +235,30 @@ for (const s of steps) {
     const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4); ihdr[8] = 8; ihdr[9] = 2;
     fs.writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]));
     console.log(`${ts()} png ${X},${Y} ${W}x${H} -> ${file}`);
+  }
+  else if (op === "compose") {
+    /* Design B stage 3: compose the picture the host would be showing into the adapter's
+       composite rows, then read it back. The arrangement is the shell column with every window
+       laid over it in published order -- the same shape web/app.js sends -- so this exercises the
+       real path with real Windows pixels rather than a synthetic rectangle. */
+    const v = emulator.v86.cpu.devices.vga;
+    const [cw, ch] = (arg || "352,760").split(",").map(Number);
+    emulator.bus.send("pv-composite-size", [cw, ch]);
+    const list = [{ sx: 0, sy: 0, sw: cw, sh: ch, dx: 0, dy: 0 }];
+    for (const L of st.layers) {
+      if (L.kind === "S" || !L.ww || !L.wh) continue;
+      list.push({ sx: L.wx, sy: L.wy, sw: L.ww, sh: L.wh, dx: 0, dy: 0,
+                  dw: Math.min(cw, L.ww), dh: Math.min(ch, L.wh) });
+    }
+    emulator.bus.send("pv-compose", list);
+    const row = v.svga_register_read(0x29), pitch = v.svga_pitch_px(), mem = v.svga_memory;
+    let painted = 0; const hist = new Map();
+    for (let j = 0; j < ch; j += 4) for (let i = 0; i < cw; i += 4) {
+      const c = mem[(row + j) * pitch + i];
+      hist.set(c, (hist.get(c) || 0) + 1);
+      if (c) painted++;
+    }
+    console.log(`${ts()} compose ${cw}x${ch} at row ${row}: ${list.length} layers, ${hist.size} colours, ${painted} of ${Math.ceil(cw / 4) * Math.ceil(ch / 4)} samples painted`);
   }
   else if (op === "dump") { console.log(`${ts()} layers:`); dump(); }
   else if (op === "cursor") { const [x, y] = arg.split(",").map(Number); const c = await place(x, y); console.log(`${ts()} cursor asked ${x},${y} -> ${c ? c.x + "," + c.y : "no report"}`); }

@@ -120,7 +120,7 @@ const SLOT_W = 640;              // width of each application column (must match
    off-screen margin the hook parks popups in, a tile each (VIS_W/TILE_W in pvhook.c). The margin
    is free -- the adapter's pitch has always been 4096 pixels -- so the screen is exactly the
    pitch and the visible part is unchanged. */
-const SCREEN_W = 4096;
+const SCREEN_W = SLOT_W * (1 + MAX_SLOTS);   // 2560: the tiles are below the visible rows, not beside them
 /* The screen is taller than the shell column too: the rows below it hold a tile per owned window
    (DLG_TILES in pvhook.c), so a dialog paints without taking its owner's pixels with it. Video
    memory is 16 MB, which is what 4096 x 2048 at 8bpp needs. */
@@ -3116,7 +3116,15 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
       let pol = "drag", slot = -1, title = "";
       // Scroll and pan surfaces are the phone layout's: on the desktop every drag is a pointer drag.
       if (!narrow()) pol = "drag";
-      else if (pressLayer && !pressLayer.transient && !pressLayer.shellCopy && h0.kind === "client") { pol = surfacePolicy(pressLayer); slot = pressLayer.slot; title = pressLayer.title; }
+      else if (pressLayer && !pressLayer.transient && !pressLayer.shellCopy && h0.kind === "client") {
+        pol = surfacePolicy(pressLayer); slot = pressLayer.slot; title = pressLayer.title;
+        /* A window's scroll bars are child controls inside its reported client rectangle, so they
+           look like client to the hit test. On a surface where one finger scrolls, a finger on the
+           bar was therefore sending line messages to the window instead of dragging the thumb --
+           "I can't touch-drag scrollbars". The strip along the client's right and bottom edges is
+           a pointer drag, which is what a scroll bar wants. */
+        if (pol === "scroll" && onScrollbar(h0)) { pol = "drag"; slot = -1; }
+      }
       else if (insideShellDialog(h0) && tallShellDialogBottom(view.h) > view.h) { pol = "pan"; title = "shell dialog"; }   // a tall shell dialog: pan the column
       else if (insideShellClient(h0)) { pol = "scroll"; slot = SHELL_SCROLL_SLOT; title = "Program Manager"; }   // PVMON targets the active group
       shellPan = pol === "pan" ? { startY: py, base: shellPanY, panning: false } : null;
@@ -3432,6 +3440,12 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     // nothing shows, and iOS ignores focus() on an already-focused element. Blur now so the focus
     // on this tap's release is a fresh one and brings the keyboard back.
     { const k = $("kbd"); if (k && document.activeElement === k && !softKeyboardShowing()) { k.blur(); kbdLog("touchstart: blur stale focus"); } }
+    /* The caption hold latches the keyboard on (keyboardHeld) so it survives taps that the guest
+       would otherwise take as "nothing text-capable has the focus". Dismissing the keyboard with
+       its own key does not go through us, so the latch stayed on and every following tap brought
+       it back -- "dismissing it is transient". A keyboard that is not showing when a new gesture
+       starts has been dismissed, and the latch goes with it. */
+    if (keyboardHeld && !softKeyboardShowing()) { keyboardHeld = false; kbdLog("touchstart: hold cleared, the keyboard was dismissed"); }
     setGuestCursor(false);
     if (switcher && ev.touches.length !== 1) { ev.preventDefault(); return; }   // modal: no pinch/scroll behind it
     if (ev.touches.length === 2) {
