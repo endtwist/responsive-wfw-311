@@ -22,7 +22,7 @@ const { trackGuest } = await import(path.join(root, "web/selftest.js"));
 const glog = fs.createWriteStream(path.join(OUT, "guest.log"));
 const orig = console.log; console.log = (...a) => { const s = String(a[0]); if (/^\[guest\]/.test(s)) glog.write(s + "\n"); else orig(...a); };
 const emulator = new V86({
-  wasm_path: path.join(root, "v86/build/v86.wasm"), memory_size: 32 * 1024 * 1024, vga_memory_size: 8 * 1024 * 1024,
+  wasm_path: path.join(root, "v86/build/v86.wasm"), memory_size: 32 * 1024 * 1024, vga_memory_size: 16 * 1024 * 1024,
   bios: { url: path.join(root, "v86/bios/seabios.bin") }, vga_bios: { url: path.join(root, "v86/bios/vgabios.bin") },
   hda: { url: IMAGE, async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
   boot_order: 0x132, autostart: false, disable_keyboard: true, disable_mouse: true, disable_speaker: true,

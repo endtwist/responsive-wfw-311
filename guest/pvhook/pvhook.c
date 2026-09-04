@@ -347,10 +347,18 @@ static char hook_kind(HWND h, HWND skip, char FAR *cls, HWND FAR *owner)
    It paints there, destroys nobody's pixels, and the host draws it over the item it belongs to
    from the anchor published with it. */
 #define VIS_W  2560            /* the part of the screen the host composites */
+#define VIS_H  970             /* ...and how much of it is visible; below that is tile space too */
 #define TILE_W 512
 #define TILES  3               /* a menu, its submenu, and one to spare */
+/* Dialogs are wider than a popup tile and there are more of them, so they get the strip below the
+   visible rows: six columns of SLOT_W, each the full height of the off-screen area. A dialog that
+   does not fit one stays where it would have gone, in its owner's column, and the compositor's
+   older masking still covers it. */
+#define DLG_W  SLOT_W
+#define DLG_TILES 6
 typedef struct { HWND hwnd; int ax, ay; } Popup;
 static Popup g_popup[TILES];
+static Popup g_dlg[DLG_TILES];
 static int popup_tile(HWND h, int ax, int ay)
 {
     int i, free = -1;
@@ -368,7 +376,23 @@ static BOOL popup_anchor(HWND h, int FAR *ax, int FAR *ay)
     int i;
     for (i = 0; i < TILES; i++)
         if (g_popup[i].hwnd == h) { *ax = g_popup[i].ax; *ay = g_popup[i].ay; return TRUE; }
+    for (i = 0; i < DLG_TILES; i++)
+        if (g_dlg[i].hwnd == h) { *ax = g_dlg[i].ax; *ay = g_dlg[i].ay; return TRUE; }
     return FALSE;
+}
+/* A tile below the visible rows for an owned window. The anchor is where it would have been put
+   in its owner's column, which is what the host still uses to decide where to draw it. */
+static int dialog_tile(HWND h, int ax, int ay)
+{
+    int i, free = -1;
+    for (i = 0; i < DLG_TILES; i++) {
+        if (g_dlg[i].hwnd == h) { g_dlg[i].ax = ax; g_dlg[i].ay = ay; return i; }
+        if (free < 0 && (!g_dlg[i].hwnd || !IsWindow(g_dlg[i].hwnd) || !IsWindowVisible(g_dlg[i].hwnd)))
+            free = i;
+    }
+    if (free < 0) return -1;
+    g_dlg[free].hwnd = h; g_dlg[free].ax = ax; g_dlg[free].ay = ay;
+    return free;
 }
 /* PVMON publishes the same window list from its own poll, so it needs the anchors too. */
 BOOL FAR PASCAL __export PvHookPopupAnchor(HWND h, int FAR *ax, int FAR *ay) { return popup_anchor(h, ax, ay); }
@@ -394,9 +418,13 @@ static void hook_publish(HWND skip)
                        to, not at the tile it actually paints in */
                     if (popup_anchor(h, &ax, &ay) && m + 24 < 128) wsprintf(line + m, " @%d,%d", ax, ay); }
                   break;
-        case 'O': { RECT orc; int hops; HWND o = owner;
+        case 'O': { RECT orc; int hops, ax, ay, m; HWND o = owner;
                     for (hops = 0; o && hops < 8 && GetWindow(o, GW_OWNER); hops++) o = GetWindow(o, GW_OWNER);
-                    GetWindowRect(o, &orc); describe(h, line, "PVO", col_slot(orc.left)); break; }
+                    GetWindowRect(o, &orc); describe(h, line, "PVO", col_slot(orc.left));
+                    m = lstrlen(line);
+                    /* parked in a tile below the visible rows: say where it belongs */
+                    if (popup_anchor(h, &ax, &ay) && m + 24 < 128) wsprintf(line + m, " @%d,%d", ax, ay);
+                    break; }
         case 'A': describe(h, line, rc.left >= SLOT_W ? "PVW" : "PVX", col_slot(rc.left)); break;
         case 'I': { char t[24]; t[0] = 0; GetWindowText(h, t, sizeof(t)); wsprintf(line, "PVI %d %s", -1, (LPSTR)t); break; }
         }
@@ -412,7 +440,7 @@ static void hook_publish(HWND skip)
    dialog centred on its program; what this buys is that the owner's own client area, which the
    host captures from the frame buffer, no longer contains the dialog too. Dialogs owned by the
    shell stay inside the shell column, which the phone shows as the desktop. */
-static void place_owned(HWND owner, int w, int h, int FAR *px, int FAR *py)
+static void place_owned(HWND dlg, HWND owner, int w, int h, int FAR *px, int FAR *py)
 {
     RECT orc;
     int colX, colR, frameH, x, y;
@@ -433,6 +461,14 @@ static void place_owned(HWND owner, int w, int h, int FAR *px, int FAR *py)
     if (y + h > frameH) y = frameH - h;
     if (y < 0) y = 0;
     *px = x; *py = y;
+    /* ...and then it goes to a tile below the visible rows instead, so it paints without taking
+       its owner's pixels with it. What was computed above is kept as the anchor: the host still
+       decides where an owned window is drawn, and the anchor is what tells it which column and
+       which owner the dialog belongs to. */
+    if (dlg && w <= DLG_W && h <= (int)(2048 - VIS_H)) {
+        int t = dialog_tile(dlg, x, y);
+        if (t >= 0) { *px = t * DLG_W; *py = VIS_H; }
+    }
 }
 
 /* A MessageBox wider than the phone (Print Manager's "has been turned off" is 924 wide at the
@@ -679,17 +715,23 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
                by their program, would otherwise land anywhere on the 2560-column screen */
             w = cs->cx; h = cs->cy;
             if (w <= 0 || h <= 0) goto pass;                      /* CW_USEDEFAULT: let Windows decide */
-            place_owned(cs->hwndParent, w, h, &cs->x, &cs->y);
+            place_owned(hwnd, cs->hwndParent, w, h, &cs->x, &cs->y);
             goto pass;
         }
         if (lstrcmp(cls, "#32770") == 0 && !shell_task(hwnd) && cs->cx > 0 && cs->cy > 0) {
             HWND o = task_main_window(hwnd);            /* WinOldAp's box belongs to the DOS window */
-            if (o) { place_owned(o, cs->cx, cs->cy, &cs->x, &cs->y); goto pass; }
+            if (o) { place_owned(hwnd, o, cs->cx, cs->cy, &cs->x, &cs->y); goto pass; }
         }
         if (lstrcmp(cls, "#32770") == 0 && shell_task(hwnd) && cs->cx > 0 && cs->cy > 0) {
-            cs->x = (shell_w() - cs->cx) / 2; cs->y = (shell_h() - cs->cy) / 2;
-            if (cs->x < 0) cs->x = 0;
-            if (cs->y < 0) cs->y = 0;
+            int ax = (shell_w() - cs->cx) / 2, ay = (shell_h() - cs->cy) / 2, t;
+            if (ax < 0) ax = 0;
+            if (ay < 0) ay = 0;
+            cs->x = ax; cs->y = ay;
+            /* the shell's own dialogs tile too: their copy in the desktop column is what the
+               compositor used to have to paint over */
+            if (cs->cx <= DLG_W && cs->cy <= (int)(2048 - VIS_H) && (t = dialog_tile(hwnd, ax, ay)) >= 0) {
+                cs->x = t * DLG_W; cs->y = VIS_H;
+            }
             goto pass;
         }
         /* a top-level application window: born in the staging column, phone-sized unless it
@@ -789,6 +831,8 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
     if ((wp->flags & SWP_NOSIZE) && (wp->flags & SWP_NOMOVE)) return;
     if (GetWindowLong(hwnd, GWL_STYLE) & WS_CHILD) return;
     if (IsIconic(hwnd) || (wp->cx <= 64 && wp->cy <= 64 && !(wp->flags & SWP_NOSIZE))) return;  /* icons */
+    { int tax, tay;                     /* already parked in a tile: the clamps are the column's, not its */
+      if (popup_anchor(hwnd, &tax, &tay)) return; }
     if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return;
     if (transient_class(cls)) {
         /* Menus and drop-downs are relocated, not clamped: each gets a tile in the off-screen

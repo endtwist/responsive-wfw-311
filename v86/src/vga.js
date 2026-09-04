@@ -13,7 +13,7 @@ import { round_up_to_next_power_of_2, view } from "./lib.js";
 const VGA_BANK_SIZE = 64 * 1024;
 
 const MAX_XRES = 4096;
-const MAX_YRES = 1600;
+const MAX_YRES = 2048;
 const MAX_BPP = 32;
 const PV_IRQ = 9; // ISA IRQ used by the paravirtual resize signal (optional; polling is the default)
 

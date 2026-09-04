@@ -81,7 +81,7 @@ if (!IMAGE) {
 if (STATE === "none") STATE = null;
 if (STATE && !fs.existsSync(STATE)) { console.error("no state " + STATE + ", cold boot"); STATE = null; }
 
-const SCREEN_W = 4096, SCREEN_H = 970;   // the guest screen: visible columns + the hook's popup tiles
+const SCREEN_W = 4096, SCREEN_H = 2048;  // visible columns and rows, plus the hook's popup and dialog tiles
 /* Scancode set 1. The whole alphabet and the digit row are here so a step can drive any menu
    mnemonic (Program Manager's Window menu, a group by number) without editing this table again. */
 const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, space: 0x39, shift: 0x2A,
@@ -96,7 +96,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const emulator = new V86({
   wasm_path: path.join(root, "v86/build/v86.wasm"),
   memory_size: 32 * 1024 * 1024,
-  vga_memory_size: 8 * 1024 * 1024,
+  vga_memory_size: 16 * 1024 * 1024,
   bios: { url: path.join(root, "v86/bios/seabios.bin") },
   vga_bios: { url: path.join(root, "v86/bios/vgabios.bin") },
   hda: { url: IMAGE, async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },

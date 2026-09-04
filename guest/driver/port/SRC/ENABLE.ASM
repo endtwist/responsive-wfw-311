@@ -409,7 +409,7 @@ enable_read_profile	PROC	NEAR
 	ja	erp_defaults
 	cmp	VScreen_Height,200
 	jb	erp_defaults
-	cmp	VScreen_Height,1600
+	cmp	VScreen_Height,2048
 	ja	erp_defaults
 	jmp	short erp_have_mode
 erp_defaults:

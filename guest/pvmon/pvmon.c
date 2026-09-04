@@ -270,6 +270,8 @@ BOOL CALLBACK __export FitWindow(HWND hwnd, LPARAM lParam)
         if (w > (int)g_fitW) w = (int)g_fitW;
         if (h > (int)g_fitH) h = (int)g_fitH;
     }
+    { int tax, tay;                       /* parked in a tile by the hook: not ours to move */
+      if (g_popupAnchor && g_popupAnchor(hwnd, &tax, &tay)) return TRUE; }
     if (x + w > (int)g_fitW) x = (int)g_fitW - w;
     if (y + h > (int)g_fitH) y = (int)g_fitH - h;
     if (x < 0) x = 0;
@@ -945,7 +947,11 @@ static BOOL reflow_dialog(HWND dlg, int screenW)
     /* The dialog's own resize is left to redraw normally: suppressing it means Windows never
        invalidates the area the dialog uncovers as it shrinks, which leaves the old right-hand
        column of buttons painted on the desktop behind it. */
-    SetWindowPos(dlg, NULL, DLG_MARGIN, dr.top, newW, newH, SWP_NOZORDER | SWP_NOACTIVATE);
+    { /* A dialog the hook has parked in an off-screen tile must stay there: the reflow is about
+         its width, not where it lives, and dragging it back into the column would put its pixels
+         over the shell again. */
+      int tax, tay, dx = (g_popupAnchor && g_popupAnchor(dlg, &tax, &tay)) ? dr.left : DLG_MARGIN;
+      SetWindowPos(dlg, NULL, dx, dr.top, newW, newH, SWP_NOZORDER | SWP_NOACTIVATE); }
     InvalidateRect(dlg, NULL, TRUE);     /* one erase and one paint, for the whole dialog */
     UpdateWindow(dlg);
     dbgnum("pvmon: reflowed a dialog to", (unsigned)newW, (unsigned)newH);
@@ -1561,8 +1567,11 @@ static void publish_layout(void)
     for (i = 0; i < g_nWnds; i++)
         if (g_wnds[i].kind == 'O') {
             RECT rc, orc;
-            int slotX, colR, frameH, w, h, x, y;
+            int slotX, colR, frameH, w, h, x, y, tax, tay;
             BOOL fresh = owned_seen(g_wnds[i].hwnd);
+            /* The hook has parked it in a tile of its own, off the part of the screen the host
+               shows, so that it paints without taking its owner's pixels: leave it there. */
+            if (g_popupAnchor && g_popupAnchor(g_wnds[i].hwnd, &tax, &tay)) continue;
             GetWindowRect(g_wnds[i].hwnd, &rc);
             w = rc.right - rc.left; h = rc.bottom - rc.top;
             slot = owner_slot(g_wnds[i].owner);
@@ -1617,9 +1626,14 @@ static void publish_layout(void)
             if (slot < 0) { describe(g_wnds[i].hwnd, line, "PVX", -1); break; }   /* no room */
             describe(g_wnds[i].hwnd, line, "PVW", slot);
             break;
-        case 'O':
+        case 'O': {
+            int ax, ay, n;
             describe(g_wnds[i].hwnd, line, "PVO", owner_slot(g_wnds[i].owner));
+            n = lstrlen(line);
+            if (g_popupAnchor && g_popupAnchor(g_wnds[i].hwnd, &ax, &ay) && n + 24 < 128)
+                wsprintf(line + n, " @%d,%d", ax, ay);
             break;
+        }
         case 'T': {
             char cls[24]; int n, ax, ay;
             describe(g_wnds[i].hwnd, line, "PVT", -1);

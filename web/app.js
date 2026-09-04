@@ -121,6 +121,10 @@ const SLOT_W = 640;              // width of each application column (must match
    is free -- the adapter's pitch has always been 4096 pixels -- so the screen is exactly the
    pitch and the visible part is unchanged. */
 const SCREEN_W = 4096;
+/* The screen is taller than the shell column too: the rows below it hold a tile per owned window
+   (DLG_TILES in pvhook.c), so a dialog paints without taking its owner's pixels with it. Video
+   memory is 16 MB, which is what 4096 x 2048 at 8bpp needs. */
+const SCREEN_H = 2048;
 const MAX_SLOTS = 3;             // application columns (must match pvmon.c)
 const WIN_MARGIN = 8;
 
@@ -154,7 +158,7 @@ function syncDesktopMode() {
 function computeMode() {
   const [vw, vh] = viewport();
   // The phone layout, and a wide viewport until the guest has switched to desktop mode.
-  if (!wantDesktop() || guestDesktop !== true) return { w: SCREEN_W, h: SHELL_H, zoom: 1, shellH: SHELL_H };
+  if (!wantDesktop() || guestDesktop !== true) return { w: SCREEN_W, h: SCREEN_H, zoom: 1, shellH: SHELL_H };
   // Desktop: one guest pixel per CSS pixel (the canvas is painted nearest-neighbour at the device
   // pixel ratio, so it is crisp on HiDPI too), the size a multiple of 8 x 2 within the adapter's
   // limits. Windows 3.x wants at least 640 columns; a smaller window scales the screen down.
@@ -339,7 +343,7 @@ const emulator = new V86Worker({
   shared: params.get("nosab") === "1" ? false : undefined,
   wasm_path: abs("../v86/build/" + (params.get("wasm") || "v86.wasm")),   // ?wasm=v86-base.wasm for A/B
   memory_size: 32 * 1024 * 1024,
-  vga_memory_size: 8 * 1024 * 1024,
+  vga_memory_size: 16 * 1024 * 1024,
   screen_container: $("screen_container"),
   bios: { url: abs("../v86/bios/seabios.bin") },
   vga_bios: { url: abs("../v86/bios/vgabios.bin") },
@@ -1384,14 +1388,17 @@ function placeLayers(src) {
     // A dialog owned by the shell already shows in the desktop column at desktop scale, and
     // PVMON reflows it to fit there; a second copy as a layer would be a double image.
     if (L.kind === "O" && L.slot < 0) {
-      if (L.ww <= shell.w) return;                     // fits the column: the desktop copy is the dialog
+      /* A dialog parked in a tile has no copy in the column to be, so it is always its own layer;
+         without an anchor (an older guest) a narrow one is still the copy in the column. */
+      if (L.ax == null && L.ww <= shell.w) return;
       /* A shell dialog wider than the column (About Program Manager 505 wide, Run un-reflowed) has
          its right part, OK included, off the column and unreachable. It becomes its own layer:
          the whole window scaled to fit the viewport, placed over its copy in the column (the copy
          is masked in presentOnce), hit-tested transient-style so every control maps to guest pixels. */
       const s = Math.min(c, vw / L.ww, vh / L.wh);
       const hw = Math.round(L.ww * s), hh = Math.round(L.wh * s);
-      let x = Math.round(view.ox + (L.wx - view.x) * c), y = Math.round((L.wy - view.y) * c);
+      const ax = L.ax != null ? L.ax : L.wx, ay = L.ay != null ? L.ay : L.wy;
+      let x = Math.round(view.ox + (ax - view.x) * c), y = Math.round((ay - view.y) * c);
       x = Math.max(0, Math.min(vw - hw, x));
       y = Math.max(0, Math.min(vh - hh, y));
       out.push({ ...L, src: L, key, s, c: s, cw: hw, ch: hh, hw, hh, x, y, hl: 0, ht: 0, hb: 0,
@@ -2663,9 +2670,9 @@ let absPointer = params.get("relmouse") ? false : true, absMisses = 0;
    phone layout here (the host requests that mode until the guest reports the switch), so in
    desktop mode the base is the phone screen; in the phone layout the canvas is that screen. */
 function screenSize() {
-  if (guestDesktop === true) return [SCREEN_W, SHELL_H];
+  if (guestDesktop === true) return [SCREEN_W, SCREEN_H];
   const src = document.querySelector("#screen_container canvas");
-  return src && src.width ? [src.width, src.height] : [SCREEN_W, SHELL_H];
+  return src && src.width ? [src.width, src.height] : [SCREEN_W, SCREEN_H];
 }
 /* The driver reports (-1,-1) when USER has no cursor to show (an application drawing with a NULL
    cursor: Paintbrush painting) or has clamped the pointer away: it is not a position. */
