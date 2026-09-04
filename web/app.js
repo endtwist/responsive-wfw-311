@@ -113,6 +113,8 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
  * and crisp instead of shrinking with them. Windows itself sees none of this: as far as it is
  * concerned the windows sit side by side on one wide screen.
  */
+import { SlipNet } from "./net.js";
+
 const pageStart = performance.now();
 const SHELL_W = 352;             // width of the shell column on a narrow display (must match build-image shellw=)
 const SLOT_W = 640;              // width of each application column (must match pvmon.c)
@@ -665,6 +667,7 @@ emulator.bus.register("pv-debug", line => {
        argument as a second program to launch and puts up "cannot find file"), so the host asks
        once the desktop is up instead. */
     if (!lcdAsked) { lcdAsked = true; setTimeout(() => sendCommandString(CMD_RUN, "LCD.EXE /report"), 1200); }
+    if (!slipNet) slipNet = initNet();                 // COM1 becomes a dial-up line
     if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
     /* Desktop: the browser's pointer takes over from here (see applyCursorShape). PVMON resends
        PVC with every PVA, so the shape arrives right behind this. */
@@ -2767,6 +2770,74 @@ function composeForGuest(vw, vh) {
   }
   emulator.bus.send("pv-compose", list);
 }
+
+/* ------------------------------------------------------------------------- the modem ------
+   The guest's internet arrives down COM1 (web/net.js explains the whole arrangement): the guest
+   runs a Winsock over SLIP, the host is the terminal server at the other end of the cable, and
+   the real request is made off-device by /api/fetch, which can do TLS and is not subject to the
+   other site's CORS policy the way this page is.
+
+   ?net=0 leaves the port silent, which is what a guest with no Winsock installed should see. */
+let slipNet = null, slipBytes = { in: 0, out: 0 }, slipReqs = 0;
+function initNet() {
+  if (params.get("net") === "0") return null;
+  const net = new SlipNet({
+    /* v86's UART takes one byte at a time; a frame is up to about 1500 of them, which is nothing
+       for a loop but would be a poor idea inside the compositor's frame, so it is chunked across
+       tasks and the guest sees it arrive as a modem would deliver it. */
+    send: bytes => {
+      slipBytes.out += bytes.length;
+      let i = 0;
+      const push = () => {
+        const end = Math.min(i + 256, bytes.length);
+        for (; i < end; i++) emulator.bus.send("serial0-input", bytes[i]);
+        if (i < bytes.length) setTimeout(push, 0);
+      };
+      push();
+    },
+    request: async (host, port, data, conn) => {
+      const text = String.fromCharCode(...data);
+      const line = /^([A-Z]+) (\S+) HTTP\/1\.[01]/.exec(text);
+      slipReqs++;
+      if (!line) { net.finish(conn); return; }
+      const [, method, target] = line;
+      const url = /^https?:\/\//i.test(target) ? target
+                : `http://${host}${port === 80 ? "" : ":" + port}${target.startsWith("/") ? "" : "/"}${target}`;
+      diag(`net: ${method} ${url}`);
+      report("net", `${method} ${url}`);
+      try {
+        const r = await fetch(`/api/fetch?url=${encodeURIComponent(url)}`, { method: method === "HEAD" ? "HEAD" : "GET" });
+        const body = new Uint8Array(await r.arrayBuffer());
+        const status = r.headers.get("x-upstream-status") || String(r.status);
+        const type = r.headers.get("content-type") || "text/html";
+        /* HTTP/1.0 on purpose: it is what the guest asked for, and a 1994 browser does not
+           understand chunked transfer or a keep-alive it did not request. */
+        const head = `HTTP/1.0 ${status} ${r.ok ? "OK" : "Error"}\r\n` +
+                     `Content-Type: ${type}\r\n` +
+                     `Content-Length: ${body.length}\r\n` +
+                     `Connection: close\r\n\r\n`;
+        const out = new Uint8Array(head.length + body.length);
+        for (let i = 0; i < head.length; i++) out[i] = head.charCodeAt(i) & 0xFF;
+        out.set(body, head.length);
+        net.deliver(conn, out);
+      } catch (e) {
+        const msg = `HTTP/1.0 502 Gateway\r\nContent-Type: text/plain\r\n\r\n${host}: ${e && e.message}`;
+        net.deliver(conn, Uint8Array.from(msg, c => c.charCodeAt(0) & 0xFF));
+      }
+      net.finish(conn);
+    },
+    log: m => diag(`net: ${m}`),
+  });
+  emulator.bus.register("serial0-output-byte", byte => { slipBytes.in++; net.fromGuest([byte & 0xFF]); });
+  report("net", "COM1 is a SLIP line to the host");
+  return net;
+}
+window.pvNet = () => ({ on: !!slipNet, bytes: slipBytes, requests: slipReqs,
+                        names: slipNet ? [...slipNet.names.keys()] : [] });
+/* Feed the line as if the guest had written it, for a test harness: the emulated UART lives in the
+   worker and there is no way to make it emit bytes from here, so an integration check pushes
+   frames in at this end. pvKeys and pvText exist for the same reason. */
+window.pvNetFeed = bytes => { if (slipNet) { slipBytes.in += bytes.length; slipNet.fromGuest(bytes); } };
 
 /* --------------------------------------------------------------------- clipboard bridge ---
    Windows' clipboard and the phone's, kept in step. Out: PVMON reports CF_TEXT, we write it to

@@ -86,6 +86,29 @@ const handler = (req, res) => {
     return;
   }
   // Diagnostics from phones: the page posts uncaught errors and a periodic heartbeat here.
+  /* The guest's internet, locally: the same contract as api/fetch.js on the deploy, so the LAN
+     behaves the same. Kept as narrow as that one -- GET/HEAD, http/https, nothing private. */
+  if (url === "/api/fetch") {
+    const target = new URL(req.url, "http://x").searchParams.get("url") || "";
+    let u = null;
+    try { u = new URL(target); } catch (e) {}
+    const priv = u && /^(localhost$|.*\.local$|127\.|10\.|192\.168\.|169\.254\.|0\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(u.hostname);
+    if (!u || (u.protocol !== "http:" && u.protocol !== "https:") || priv) {
+      res.writeHead(400, { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" });
+      return res.end("bad url");
+    }
+    fetch(u, { method: req.method === "HEAD" ? "HEAD" : "GET",
+               headers: { "user-agent": "Mozilla/1.22 (Windows; I; 16bit)", accept: "*/*" } })
+      .then(async r => {
+        const buf = Buffer.from(await r.arrayBuffer());
+        res.writeHead(200, { "Content-Type": r.headers.get("content-type") || "application/octet-stream",
+                             "Access-Control-Allow-Origin": "*", "x-upstream-status": String(r.status),
+                             "Cache-Control": "no-store" });
+        res.end(req.method === "HEAD" ? undefined : buf);
+      })
+      .catch(e => { res.writeHead(502, { "Content-Type": "text/plain" }); res.end(`upstream: ${e.message}`); });
+    return;
+  }
   if (url === "/__log" && req.method === "POST") {
     const chunks = [];
     req.on("data", c => chunks.push(c));
