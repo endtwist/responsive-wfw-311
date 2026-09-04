@@ -3024,38 +3024,54 @@ void main() {
 }`;
 
 /* Pass 2: what the eye gets. */
+/* Pass 1b: the row wash. A dark run of cells drags the drive for the whole line it is on, so the
+   rows carrying text are greyer right across the panel -- that is the band in Josh's photograph,
+   tens of cells past the last character in both directions. Point taps cannot make it: eight
+   samples at 6, 15, 32... cells back give eight legible ghost copies of the text marching across
+   the row, which is what the first attempt looked like. So it is built properly, as a separable
+   box blur along x only, run twice at different scales: eight taps at one cell, then eight taps at
+   eight cells on the result, which is a smooth 64-cell average for sixteen texture reads. */
+const LCD_ROW = `precision mediump float;
+varying vec2 uv;
+uniform sampler2D src;
+uniform vec2 step;           // how far apart the taps are, in uv
+void main() {
+  float a = 0.0;
+  for (int i = -4; i <= 3; i++) a += texture2D(src, uv + step * (float(i) + 0.5)).r;
+  gl_FragColor = vec4(a * 0.125, 0.0, 0.0, 1.0);
+}`;
+
 const LCD_LOOK = `precision mediump float;
 varying vec2 uv;
-uniform sampler2D lvl;
+uniform sampler2D lvl, row;
 uniform vec2 res, pitch;     // canvas pixels, and the size of one guest pixel in them
 uniform float t, bright, contrast;   // the guest's own two scroll bars, 0..1, 0.5 = as shipped
 void main() {
   float l = texture2D(lvl, uv).r;
 
-  /* "Run": the smear a passive matrix leaves along its own wiring. Every cell is driven through
-     the row and column it sits on, the drive never quite settles inside one cell time, and what
-     leaks lands on the cells that come after -- so a dark glyph or a window border trails a shadow
-     to the RIGHT along its row and DOWNWARD along its column. In Josh's photograph of the 9800NB
-     every character is doubled that way, and the columns of a block of text stay faintly grey the
-     whole height of the panel below it.
-     Two ranges, because the panel has two: a strong short trail of a couple of cells, and a much
-     fainter long one that carries tens of cells away. Taps are in guest pixels (the panel's real
-     cells), and only the darkening half is kept -- crosstalk pulls a cell towards the drive of
-     what came before it, and it is the dark that shows. */
+  /* "Run": the smear a passive matrix leaves along its own wiring, and it is not the same in the
+     two axes -- which is the whole character of it in Josh's photograph of the 9800NB.
+     Short range, both axes: a dark glyph doubles into the cell after it along the row and the cell
+     below it, which is what gives the text its embossed look in the photograph. A little bleeds
+     backwards too.
+     Long range, along the row only: a row is driven as a whole line, and a dark run of cells drags
+     the drive for everything else on that line, so the rows carrying text stay greyer for the full
+     width of the panel. That comes from the blurred row texture, not from taps at points.
+     Down the column there is no long range: column coupling is cell to cell, and below a block of
+     text the panel goes clean again. (A long vertical wash was tried first and is plainly wrong --
+     it hung a grey shadow under Solitaire halfway down the screen.)
+     Taps are in guest pixels, the panel's real cells, and only the darkening half is kept:
+     crosstalk pulls a cell towards the drive of its neighbours, and it is the dark that shows. */
   vec2 cell = max(pitch, vec2(1.0)) / res;
-  float near = 0.0, far = 0.0;
-  near += 0.44 * texture2D(lvl, uv - vec2(cell.x, 0.0)).r;
-  near += 0.24 * texture2D(lvl, uv - vec2(cell.x * 2.0, 0.0)).r;
-  near += 0.20 * texture2D(lvl, uv - vec2(0.0, cell.y)).r;
+  float near = 0.0;
+  near += 0.34 * texture2D(lvl, uv - vec2(cell.x, 0.0)).r;          // one cell behind, along the row
+  near += 0.18 * texture2D(lvl, uv - vec2(cell.x * 2.0, 0.0)).r;
+  near += 0.28 * texture2D(lvl, uv - vec2(0.0, cell.y)).r;          // one cell up: the glyph doubles
   near += 0.12 * texture2D(lvl, uv - vec2(0.0, cell.y * 2.0)).r;
-  far += 0.30 * texture2D(lvl, uv - vec2(cell.x * 5.0, 0.0)).r;
-  far += 0.22 * texture2D(lvl, uv - vec2(cell.x * 11.0, 0.0)).r;
-  far += 0.16 * texture2D(lvl, uv - vec2(cell.x * 23.0, 0.0)).r;
-  far += 0.18 * texture2D(lvl, uv - vec2(0.0, cell.y * 5.0)).r;
-  far += 0.09 * texture2D(lvl, uv - vec2(0.0, cell.y * 13.0)).r;
-  far += 0.05 * texture2D(lvl, uv - vec2(0.0, cell.y * 29.0)).r;
+  near += 0.08 * texture2D(lvl, uv + vec2(cell.x, 0.0)).r;          // a little bleeds backwards too
+  float wash = texture2D(row, uv - vec2(cell.x * 6.0, 0.0)).r;      // the band, biased after the run
   l = min(l, mix(l, near, 0.45));
-  l = min(l, mix(l, far, 0.14));
+  l = min(l, mix(l, wash, 0.20));
 
   /* Contrast pivots about mid grey so neither end runs away, and brightness is the backlight's
      own knob -- these panels had a wheel on the bezel for each, and this is what those did. */
@@ -3145,14 +3161,17 @@ function initLcd() {
   const gl = cv.getContext("webgl", { alpha: false, antialias: false, depth: false, preserveDrawingBuffer: false });
   if (!gl) { report("lcd", "no webgl: the filter stays off"); return null; }
   const lag = lcdProgram(gl, LCD_LAG, "lag pass"), look = lcdProgram(gl, LCD_LOOK, "look pass");
-  if (!lag || !look) return null;
+  const rowp = lcdProgram(gl, LCD_ROW, "row pass");
+  if (!lag || !look || !rowp) return null;
   const quad = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
   const st = {
-    gl, cv, lag, look, quad, tex: lcdTexture(gl, 0, 0),
+    gl, cv, lag, look, rowp, quad, tex: lcdTexture(gl, 0, 0),
     fbo: [gl.createFramebuffer(), gl.createFramebuffer()],
     lvl: [null, null], cur: 0, w: 0, h: 0, seed: 1, settle: 0, gen: -1,
+    /* the row wash: two half-width buffers, blurred along x and ping-ponged between */
+    rowFbo: [gl.createFramebuffer(), gl.createFramebuffer()], rowTex: [null, null],
   };
   cv.classList.add("on");
   report("lcd", "filter on");
@@ -3174,6 +3193,12 @@ function lcdResize(st, w, h) {
     st.lvl[i] = lcdTexture(gl, w, h);
     gl.bindFramebuffer(gl.FRAMEBUFFER, st.fbo[i]);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, st.lvl[i], 0);
+  }
+  for (let i = 0; i < 2; i++) {
+    if (st.rowTex[i]) gl.deleteTexture(st.rowTex[i]);
+    st.rowTex[i] = lcdTexture(gl, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, st.rowFbo[i]);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, st.rowTex[i], 0);
   }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   st.seed = 1;                              // no history at this size
@@ -3217,12 +3242,29 @@ function lcdFrame(changed) {
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   st.seed = 0;
 
+  /* pass 1b: the row wash -- the level blurred along x only, twice, so a dark run of cells greys
+     its whole line instead of leaving a row of legible ghosts behind it. */
+  const cellPx = Math.max(1, (view && view.scale ? view.scale : 1) * (window.devicePixelRatio || 1));
+  for (let i = 0; i < 2; i++) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, st.rowFbo[i]);
+    gl.viewport(0, 0, st.w, st.h);
+    lcdBind(st, st.rowp);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, i === 0 ? st.lvl[next] : st.rowTex[0]);
+    gl.uniform1i(gl.getUniformLocation(st.rowp, "src"), 0);
+    /* one cell apart, then eight cells apart on the result: a smooth 64-cell average */
+    gl.uniform2f(gl.getUniformLocation(st.rowp, "step"), (i === 0 ? cellPx : cellPx * 8) / st.w, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
   // pass 2: the look
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, st.w, st.h);
   lcdBind(st, st.look);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, st.lvl[next]);
   gl.uniform1i(gl.getUniformLocation(st.look, "lvl"), 0);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, st.rowTex[1]);
+  gl.uniform1i(gl.getUniformLocation(st.look, "row"), 2);
   gl.uniform2f(gl.getUniformLocation(st.look, "res"), st.w, st.h);
   const dpr = window.devicePixelRatio || 1;
   const pitch = Math.max(1, (view && view.scale ? view.scale : 1) * dpr);

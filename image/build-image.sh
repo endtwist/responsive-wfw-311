@@ -99,9 +99,13 @@ fi
 
 # Every group laid out for the phone: three icons across, the window the width of Program Manager's
 # client and maximised, so no group has a horizontal scroll bar (tools/grpadd.py --relayout).
+# Only Main is open: Program Manager restores whatever each group was left as, and a fresh install
+# leaves them all open, which in one phone column means every group stacked on top of the one that
+# matters. The rest come up as icons along the bottom of Program Manager, where they belong.
 for g in MAIN ACCESSOR GAMES STARTUP APPLICAT NETWORK; do
   if mcopy -n $M "::/WINDOWS/$g.GRP" "$TMP/$g.GRP" 2>/dev/null; then
-    python3 ../tools/grpadd.py "$TMP/$g.GRP" --relayout && mcopy -o $M "$TMP/$g.GRP" "::/WINDOWS/$g.GRP"
+    [ "$g" = MAIN ] && ICONIC= || ICONIC=--iconic
+    python3 ../tools/grpadd.py "$TMP/$g.GRP" --relayout $ICONIC && mcopy -o $M "$TMP/$g.GRP" "::/WINDOWS/$g.GRP"
   fi
 done
 # boot=win (default): AUTOEXEC runs WIN in a loop, so PVMON's exit-to-DOS resize comes straight

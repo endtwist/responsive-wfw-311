@@ -3722,15 +3722,30 @@ and pixels aren't drawn perfectly. It's most noticeable with windows and large r
 universally", with a photograph of a 9800NB showing every glyph doubled to the right and a grey wash
 carrying down the columns below a block of text.
 
-That is passive-matrix crosstalk: each cell is driven through the row and the column it sits on, the
-drive never settles inside one cell time, and what leaks lands on the cells that come after -- so a
-dark glyph or a window border trails a shadow to the RIGHT along its row and DOWNWARD along its
-column. The look pass now samples the drive level at taps behind the pixel in both axes, in **guest
-pixels** (the panel's real cells, not device pixels), in two ranges: a strong short trail of one and
-two cells, and a much fainter long one reaching five, eleven, twenty-three cells back. Only the
-darkening half is kept -- `min(l, mix(l, trail, k))` -- because crosstalk pulls a cell towards what
-came before it and it is the dark that shows. The taps are on the level texture, before the grid and
-the backlight, so the grid does not smear with it.
+That is passive-matrix crosstalk, and looking properly at the photograph it is **not the same in the
+two axes** -- which is the whole character of it:
+- **Across the row it carries a very long way.** A row is driven as a whole line, and a dark run of
+  cells drags the drive for everything else on that line: in the photograph the rows carrying text
+  are visibly greyer for the full width of the panel, left and right of the text, tens of cells past
+  the last character.
+- **Down the column it is short.** Column coupling is cell to cell: a glyph doubles into the one or
+  two cells below it and stops. Below the block of text the panel goes clean again -- a long
+  vertical wash is plainly wrong, and the first attempt here had one, hanging a grey shadow under
+  Solitaire halfway down the screen.
+
+The short range is five taps on the level texture (one and two cells back along the row, one and two
+up the column, a little forward). The long one **cannot** be taps: eight samples at 6, 15, 32... cells
+back give eight legible ghost copies of the text marching across the row, which is exactly what the
+first version looked like. It is a separable box blur along x only (`LCD_ROW`), run twice at
+different scales -- eight taps one cell apart, then eight taps eight cells apart on the result -- a
+smooth 64-cell average for sixteen texture reads. Only the darkening half of either is kept, because
+crosstalk pulls a cell towards its neighbours' drive and it is the dark that shows. All of it is on
+the level texture, before the grid and the backlight, so the grid does not smear with it.
+
+**Program Manager opens with Main and nothing else.** A fresh install leaves every group open, and
+in one phone column that means every group stacked on top of the one that matters. `grpadd.py
+--relayout --iconic` writes `SW_SHOWMINIMIZED` into the group file's header instead of
+`SW_SHOWMAXIMIZED`, and `build-image.sh` passes it for everything except MAIN.
 
 **`?lcd=1` now means it.** It forced the filter on at startup and then lost: localStorage from a
 previous visit, and LCD.EXE's `/report` at desktop-ready, both overwrote it. The parameter now
