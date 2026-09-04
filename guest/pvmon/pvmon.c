@@ -847,6 +847,8 @@ static void set_desktop_mode(BOOL on)
     if (on) {
         g_phoneW = g_shellW; g_shellW = 0;
         if (g_fakeScreen & 1) set_screen_metrics(g_realW, g_realH);
+        { RECT scr; scr.left = 0; scr.top = 0; scr.right = (int)g_realW; scr.bottom = (int)g_realH;
+          ClipCursor(&scr); }                 /* and USER's own screen rectangle with it */
     } else {
         g_shellW = g_phoneW;
         apply_fake_screen();
@@ -2186,7 +2188,13 @@ static BOOL live_remode(unsigned w, unsigned h)
     GetCursorPos(&pt);
     if (pt.x >= (int)w) pt.x = (int)w - 1;
     if (pt.y >= (int)h) pt.y = (int)h - 1;
-    ClipCursor(NULL);
+    /* ClipCursor(NULL) means "the whole screen", and USER expands that from a rectangle of its
+       own that the re-mode does not touch: after switching from the phone layout to a desktop it
+       still read 0,0-3200,970 (CMD_PROBE, 2026-09-04), the screen Windows started with. USER
+       centres a system-modal box on that rectangle, which is why the MS-DOS Prompt's exit warning
+       appeared at x=1425 on a 1512-wide screen -- (3200-350)/2 -- half of it off the edge. Handing
+       ClipCursor the real rectangle makes USER recompute from that instead. */
+    { RECT scr; scr.left = 0; scr.top = 0; scr.right = (int)w; scr.bottom = (int)h; ClipCursor(&scr); }
     SetCursorPos(pt.x, pt.y);
     ShowCursor(TRUE);
     InvalidateRect(NULL, NULL, TRUE);        /* repaint everything we can reach */
