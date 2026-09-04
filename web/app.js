@@ -3735,14 +3735,19 @@ function installTouch() {
   const stopGlide = () => { if (glide) { cancelAnimationFrame(glide.raf); glide = null; } };
   const startGlide = (slot, vx, vy) => {
     stopGlide();
-    if (slot < 0 || Math.max(Math.abs(vx), Math.abs(vy)) < 0.35) { diag(`glide declined slot=${slot} v=${vx.toFixed(2)},${vy.toFixed(2)}`); return; }   // a slow lift just stops
-    const g0 = { slot, vx, vy, accX: 0, accY: 0, t: performance.now(), until: performance.now() + 1500, gen: dirtyGen, still: 0, raf: 0 };
+    if (slot < 0 || Math.max(Math.abs(vx), Math.abs(vy)) < 0.25) { diag(`glide declined slot=${slot} v=${vx.toFixed(2)},${vy.toFixed(2)}`); return; }   // a slow lift just stops
+    /* A flick throws the list further than the finger was moving, and it keeps going for a while:
+       the first version decayed 6% a frame from the release velocity and was over in well under a
+       second, which reads as a list that does not want to move. 1.4x off the finger, 2.5% a frame,
+       and up to three seconds. */
+    vx *= 1.4; vy *= 1.4;
+    const g0 = { slot, vx, vy, accX: 0, accY: 0, t: performance.now(), until: performance.now() + 3000, gen: dirtyGen, still: 0, raf: 0 };
     glide = g0;
     const step = () => {
       if (glide !== g0) return;
       const now = performance.now(), dt = Math.min(50, now - g0.t);
       g0.t = now;
-      const decay = Math.pow(0.94, dt / 16);              // ~6% per frame
+      const decay = Math.pow(0.975, dt / 16);             // ~2.5% per frame: a long, unhurried glide
       g0.vx *= decay; g0.vy *= decay;
       g0.accX += g0.vx * dt; g0.accY += g0.vy * dt;
       const ny = Math.trunc(g0.accY / SCROLL_STEP), nx = Math.trunc(g0.accX / SCROLL_STEP);
@@ -3751,9 +3756,9 @@ function installTouch() {
       // nothing painted for a quarter of a second while we are asking it to scroll: it has hit the end
       if (ny || nx) { g0.still = rectDirtySince(g0.gen, 0, 0, 2560, 970) ? 0 : g0.still + 1; g0.gen = dirtyGen; }
       const behind = cmdQueue.reduce((n, c) => n + (c.cmd === CMD_SCROLL ? 1 : 0), 0) >= 3;
-      if (behind) { g0.vx *= 0.8; g0.vy *= 0.8; }          // the guest cannot keep up: coast down, do not pile up
-      if (Math.max(Math.abs(g0.vx), Math.abs(g0.vy)) < 0.05 || now > g0.until || g0.still > 15) {
-        diag(`glide ended after ${Math.round(now - (g0.until - 1500))} ms`);
+      if (behind) { g0.vx *= 0.9; g0.vy *= 0.9; }          // the guest cannot keep up: coast down, do not pile up
+      if (Math.max(Math.abs(g0.vx), Math.abs(g0.vy)) < 0.04 || now > g0.until || g0.still > 15) {
+        diag(`glide ended after ${Math.round(now - (g0.until - 3000))} ms`);
         releaseFastPoll(); glide = null; return;
       }
       g0.raf = requestAnimationFrame(step);

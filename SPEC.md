@@ -3764,3 +3764,11 @@ the existing `/report`), and the box comes up ticked. From there the app is in c
 reports `PVLCD 0` and the host turns the filter off, whatever the URL said. LCD.EXE also sets the
 focus to its checkbox on WM_SETFOCUS -- without that the focus sat on the frame, no child ever had
 it, and Tab, Space and Alt+L all did nothing.
+
+**Momentum.** Josh: "Scroll momentum is too low". It was: the glide started at exactly the finger's
+release velocity and decayed 6% a frame, so it was over in well under a second and a list read as
+unwilling to move. A flick now throws the list 1.4x harder than the finger was going, decays 2.5% a
+frame, and may run for three seconds; the floor for starting one at all came down from 0.35 to 0.25
+px/ms, and the backpressure damping when the guest cannot keep up is gentler (0.9 a frame, not 0.8),
+so a long glide over a slow list coasts rather than being cut off. It still stops the moment the
+guest stops painting -- the end of a list has nothing to scroll.
