@@ -311,7 +311,9 @@ for (const s of steps) {
     const [x, y, w, h, file] = arg.split(","); const X = +x, Y = +y, W = +w, H = +h;
     const v = emulator.v86.cpu.devices.vga, pitch = v.svga_pitch_px(), mem = v.svga_memory, off = v.svga_offset || 0, pal = v.vga256_palette;
     const raw = Buffer.alloc((W * 3 + 1) * H);
-    for (let j = 0; j < H; j++) { raw[j * (W * 3 + 1)] = 0; for (let i = 0; i < W; i++) { const c = pal[mem[off + (Y + j) * pitch + X + i]]; const o = j * (W * 3 + 1) + 1 + i * 3; raw[o] = c & 255; raw[o + 1] = (c >> 8) & 255; raw[o + 2] = (c >> 16) & 255; } }
+    /* The DAC palette is 0xRRGGBB (port 3C9 takes red first): reading it the other way round swapped
+       red and blue in every screenshot this tool has ever written -- a red 8-track came out blue. */
+    for (let j = 0; j < H; j++) { raw[j * (W * 3 + 1)] = 0; for (let i = 0; i < W; i++) { const c = pal[mem[off + (Y + j) * pitch + X + i]]; const o = j * (W * 3 + 1) + 1 + i * 3; raw[o] = (c >> 16) & 255; raw[o + 1] = (c >> 8) & 255; raw[o + 2] = c & 255; } }
     const crcT = new Int32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcT[n] = c; }
     const crc = b => { let c = -1; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ -1) >>> 0; };
     const chunk = (tag, body) => { const len = Buffer.alloc(4); len.writeUInt32BE(body.length); const tb = Buffer.concat([Buffer.from(tag), body]); const cc = Buffer.alloc(4); cc.writeUInt32BE(crc(tb)); return Buffer.concat([len, tb, cc]); };
