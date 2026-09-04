@@ -46,7 +46,7 @@
 #define DIALOG_MIN_W  640
 #define UNDIALOG_POLLS 4       /* dialog must be gone this many polls before going back */
 
-#define PVMON_VERSION 39     /* reported in PVD so the host log shows which build a snapshot holds */
+#define PVMON_VERSION 40     /* reported in PVD so the host log shows which build a snapshot holds */
 #define HEARTBEAT_POLLS 25   /* PVH <tick> about once a second: its absence tells the host the guest is wedged */
 #define POLL_MS       40     /* host commands are polled this often: cheap, one port read */
 /* Windows 3.x rounds SetTimer up to the 18.2 Hz PC tick, so the 40 ms poll really fires every
@@ -741,16 +741,29 @@ static void find_screen_pair(unsigned oldW, unsigned oldH, unsigned w, unsigned 
 static void patch_screen_copies(unsigned oldW, unsigned oldH, unsigned w, unsigned h)
 {
     WORD __far *seg = PVFP(g_userDS, 0);
-    unsigned i, n = 0, first = 0xFFFF;
+    DWORD limit;
+    unsigned i, top, n = 0, first = 0xFFFF;
     char buf[80];
     if (!g_patchReady || !oldW || !oldH || (oldW == w && oldH == h)) return;
-    for (i = 0; i < 0x7FFE; i++) {
-        if (seg[i] != (WORD)oldW || seg[i + 1] != (WORD)oldH) continue;
-        seg[i] = (WORD)w; seg[i + 1] = (WORD)h;
+
+    /* Only whole screen rectangles, never a bare pair of numbers. The first version of this
+       rewrote every adjacent (oldW, oldH) it could find, which is fine going from 2560 to 3200 on
+       the way back from a DOS box and fatal going from 3200x970 to a desktop: two words that happen
+       to read 3200 and 970 somewhere in USER's local heap got overwritten, the heap was wrecked, and
+       the next call into USER -- the wsprintf on the line below -- took PVMON down with a UAE and
+       the desktop with it. The rectangles that matter all start at the origin, so a match now needs
+       a 0,0 in front of it: RECT(0, 0, oldW, oldH). That is the shape of the copy USER centres a
+       system-modal box on, which is what this was written for. */
+    limit = GlobalSize(GlobalHandle(g_userDS));
+    top = (limit >= 8 && limit <= 0x10000L) ? (unsigned)((limit - 8) >> 1) : 0x7FFA;
+    for (i = 0; i + 3 < top; i++) {
+        if (seg[i] || seg[i + 1]) continue;
+        if (seg[i + 2] != (WORD)oldW || seg[i + 3] != (WORD)oldH) continue;
+        seg[i + 2] = (WORD)w; seg[i + 3] = (WORD)h;
         if (first == 0xFFFF) first = i * 2;
         n++;
     }
-    wsprintf(buf, "pvmon: rewrote %u copies of %ux%u to %ux%u (first at %04X)",
+    wsprintf(buf, "pvmon: rewrote %u screen rects of %ux%u to %ux%u (first at %04X)",
              n, oldW, oldH, w, h, first);
     dbg(buf);
 }

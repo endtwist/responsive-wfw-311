@@ -29,7 +29,7 @@ const { trackGuest } = await import(path.join(root, "web/selftest.js"));
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "image/current.json"), "utf8"));
 const IMAGE = path.join(root, "image", manifest.image), STATE = path.join(root, "image", manifest.state);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const SCREEN_W = 2560, SCREEN_H = 970;
+const SCREEN_W = 3200, SCREEN_H = 970;   // the phone layout the image ships: four application columns
 
 const emulator = new V86({
   wasm_path: path.join(root, "v86/build/v86.wasm"),

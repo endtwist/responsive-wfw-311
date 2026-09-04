@@ -3661,12 +3661,22 @@ the line. It now runs on the first finished publish (PVE) whose layout matches w
 channel — how `TRUMPWSK.INI` came out), `text:` now types capitals and shifted punctuation, and the
 probe raises the modem lines like the page does.
 
-**Open, pre-existing:** desktop mode kills PVMON. `pvmon: host wants 1280x800` is answered by
-`pvmon: live re-mode returned 1x0` and the heartbeat stops (Josh's screenshot shows the UAE). Both
-main and this work behave identically, so it is not from the networking change; `tools/desktop-probe.mjs`
-still asks for 2560x970 and needs the 3200x970 screen.
+**And desktop mode killed PVMON** (Josh's screenshot: the UAE box, and the desktop gone). Not the
+networking change -- main did it too -- but this morning's `patch_screen_copies`, which rewrote
+*every* adjacent (oldW, oldH) it could find in USER's data segment. Harmless going from 2560 to 3200
+on the way back from a DOS box; fatal going from 3200x970 to a desktop, where two words that happen
+to read 3200 and 970 somewhere in USER's local heap were overwritten, the heap was wrecked, and the
+next call into USER -- the `wsprintf` on the line after the loop -- took PVMON down. Nothing was even
+logged, which is what pointed at it. **PVMON v40** now matches whole screen rectangles only: a 0,0
+in front of the pair, RECT(0, 0, oldW, oldH), which is the shape of the copy USER centres a
+system-modal box on and the only reason the routine exists. The scan is also bounded by
+`GlobalSize(GlobalHandle(userDS))` rather than running to 0xFFFC. `tools/desktop-probe.mjs` (fixed to
+ask for the 3200x970 screen the image ships) now passes every check both ways: `rewrote 3 screen
+rects of 3200x970 to 1280x800`, and the MS-DOS Prompt's exit warning still lands inside its slot at
+640,360 rather than centred half off the edge.
 
-**Rebuild in main:** `guest/fetch/build.sh`, staged as `image/changes/windows/FETCH.EXE`, then
+**Rebuild in main:** `guest/fetch/build.sh` and `guest/pvmon/build.sh` (v40), staged as
+`image/changes/windows/FETCH.EXE` and `PVMON.EXE`, then
 `image/build-image.sh display=pvdisp dpi=120 sysfont=PVSYS.FON mouse=PVMOUSE.DRV sound=1
 load=PVMON.EXE live=1 shellw=352 shellh=760 spooler=no printer=PSCRIPT out=work-phone.img` and a
 warmed snapshot (the usual four apps plus `run:FETCH.EXE until:W:Fetch close dismiss`).
