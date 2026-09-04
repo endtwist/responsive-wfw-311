@@ -116,16 +116,14 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
 const pageStart = performance.now();
 const SHELL_W = 352;             // width of the shell column on a narrow display (must match build-image shellw=)
 const SLOT_W = 640;              // width of each application column (must match pvmon.c)
-/* The guest screen is wider than the part composited here: the columns the user sees, plus an
-   off-screen margin the hook parks popups in, a tile each (VIS_W/TILE_W in pvhook.c). The margin
-   is free -- the adapter's pitch has always been 4096 pixels -- so the screen is exactly the
-   pitch and the visible part is unchanged. */
-const SCREEN_W = SLOT_W * (1 + MAX_SLOTS);   // 2560: the tiles are below the visible rows, not beside them
-/* The screen is taller than the shell column too: the rows below it hold a tile per owned window
-   (DLG_TILES in pvhook.c), so a dialog paints without taking its owner's pixels with it. Video
-   memory is 16 MB, which is what 4096 x 2048 at 8bpp needs. */
-const SCREEN_H = 2048;
 const MAX_SLOTS = 3;             // application columns (must match pvmon.c)
+/* The guest screen is taller than the part composited here: the visible columns, and under them
+   the tiles the hook parks popups and dialogs in (TILE_Y/DLG_Y in pvhook.c) so that neither ever
+   paints over the window it belongs to. Below rather than beside, and no taller than the tiles
+   need: every row is a row of the browser's pixel buffer (width x height x 4 bytes), and a phone
+   kills a tab that asks for too much. */
+const SCREEN_W = SLOT_W * (1 + MAX_SLOTS);   // 2560, unchanged: the visible columns
+const SCREEN_H = 1792;                       // 970 visible, popup tiles to 1250, dialogs below
 const WIN_MARGIN = 8;
 
 /* A phone in either orientation. The guest layout is fixed (the boot snapshot bakes it in), so
@@ -343,7 +341,7 @@ const emulator = new V86Worker({
   shared: params.get("nosab") === "1" ? false : undefined,
   wasm_path: abs("../v86/build/" + (params.get("wasm") || "v86.wasm")),   // ?wasm=v86-base.wasm for A/B
   memory_size: 32 * 1024 * 1024,
-  vga_memory_size: 16 * 1024 * 1024,
+  vga_memory_size: 8 * 1024 * 1024,
   screen_container: $("screen_container"),
   bios: { url: abs("../v86/bios/seabios.bin") },
   vga_bios: { url: abs("../v86/bios/vgabios.bin") },

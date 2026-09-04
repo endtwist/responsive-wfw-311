@@ -359,6 +359,10 @@ static char hook_kind(HWND h, HWND skip, char FAR *cls, HWND FAR *owner)
 #define TILES  3               /* a menu, its submenu, and one to spare */
 #define TILE_Y VIS_H           /* popups: one row of tiles straight under the visible screen */
 #define TILE_H 280             /* ...and the dialogs start after them */
+#define SCREEN_H 1792          /* the whole screen: visible rows, popup tiles, dialog tiles.
+                                  Every row of it is a row of the pixel buffer the browser keeps
+                                  (width x height x 4 bytes), and a phone kills a tab that asks
+                                  for too much: this is as tall as the tiles actually need. */
 /* Dialogs are wider than a popup tile and there are more of them, so they get the strip below the
    visible rows: six columns of SLOT_W, each the full height of the off-screen area. A dialog that
    does not fit one stays where it would have gone, in its owner's column, and the compositor's
@@ -487,7 +491,7 @@ static void place_owned(HWND dlg, HWND owner, int w, int h, int FAR *px, int FAR
        its owner's pixels with it. What was computed above is kept as the anchor: the host still
        decides where an owned window is drawn, and the anchor is what tells it which column and
        which owner the dialog belongs to. */
-    if (dlg && w <= DLG_W && h <= (int)(2048 - DLG_Y)) {
+    if (dlg && w <= DLG_W && h <= (int)(SCREEN_H - DLG_Y)) {
         int t = dialog_tile(dlg, x, y);
         if (t >= 0) { *px = t * DLG_W; *py = DLG_Y; }
     }
@@ -752,7 +756,7 @@ LRESULT CALLBACK __export PvCbtProc(int code, WPARAM wParam, LPARAM lParam)
             cs->x = ax; cs->y = ay;
             /* the shell's own dialogs tile too: their copy in the desktop column is what the
                compositor used to have to paint over */
-            if (cs->cx <= DLG_W && cs->cy <= (int)(2048 - DLG_Y) && (t = dialog_tile(hwnd, ax, ay)) >= 0) {
+            if (cs->cx <= DLG_W && cs->cy <= (int)(SCREEN_H - DLG_Y) && (t = dialog_tile(hwnd, ax, ay)) >= 0) {
                 cs->x = t * DLG_W; cs->y = DLG_Y;
             }
             goto pass;
