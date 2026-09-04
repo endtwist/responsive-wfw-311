@@ -63,7 +63,8 @@ fi
 
 # Trumpet Winsock (changes/trumpet, expanded from the distribution image Josh supplied) as
 # C:\TRUMPET, with TRUMPWSK.INI already configured for the line the host answers: internal SLIP on
-# COM1, 10.0.2.15 talking to 10.0.2.2, which is web/net.js. Nothing dials -- the line is always up.
+# COM2, 10.0.2.15 talking to 10.0.2.2, which is web/net.js. Nothing dials -- the line is always up
+# (the host raises DCD, DSR and CTS: Trumpet's SLIP driver will not transmit a byte without CTS).
 # WINSOCK.DLL has to be findable by every Winsock program, so C:\TRUMPET goes on the PATH, and
 # TCPMAN gets a Program Manager item in Main next to the other network tools.
 if [ -d changes/trumpet ]; then
@@ -73,6 +74,19 @@ if [ -d changes/trumpet ]; then
   python3 ../tools/grpadd.py $TMP/MAIN.TRU "Trumpet Winsock" "C:\\TRUMPET\\TCPMAN.EXE" --exe changes/trumpet/TCPMAN.EXE
   python3 ../tools/grpadd.py $TMP/MAIN.TRU "Ping" "C:\\TRUMPET\\TRUMPING.EXE" --exe changes/trumpet/TRUMPING.EXE
   mcopy -o $M $TMP/MAIN.TRU ::/WINDOWS/MAIN.GRP
+  # The stack has to be running before any Winsock program can do anything, and WIN.INI's load=
+  # starts a program iconic -- which is what a resident TCP/IP stack should be. So networking is
+  # live from the moment the desktop is up, without a window standing in a column.
+  [ "$LOAD" = - ] || LOAD="${LOAD:+$LOAD }C:\\TRUMPET\\TCPMAN.EXE"
+fi
+
+# The guest's web client (guest/fetch): Windows for Workgroups shipped no HTTP client, so this is
+# one, and it is a Windows program for the same reason everything else here is. It needs Trumpet's
+# WINSOCK.DLL, so it goes in after the Trumpet block and takes its own item in Main.
+if [ -f changes/windows/FETCH.EXE ]; then
+  mcopy -n $M ::/WINDOWS/MAIN.GRP $TMP/MAIN.FET 2>/dev/null || true
+  python3 ../tools/grpadd.py $TMP/MAIN.FET "Fetch" "FETCH.EXE" --exe changes/windows/FETCH.EXE
+  mcopy -o $M $TMP/MAIN.FET ::/WINDOWS/MAIN.GRP
 fi
 
 # The first-run note (SPEC 2026-09-03): "Read Me First" in Main shows it again after it has been

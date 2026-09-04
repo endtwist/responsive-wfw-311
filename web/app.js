@@ -347,6 +347,9 @@ const emulator = new V86Worker({
   wasm_path: abs("../v86/build/" + (params.get("wasm") || "v86.wasm")),   // ?wasm=v86-base.wasm for A/B
   memory_size: 32 * 1024 * 1024,
   vga_memory_size: 8 * 1024 * 1024,
+  /* COM2 exists so the guest can dial up: Trumpet Winsock opens 0x2F8 by default, and the host
+     answers on the other end of it (web/net.js). COM1 is left alone. */
+  uart1: true,
   screen_container: $("screen_container"),
   bios: { url: abs("../v86/bios/seabios.bin") },
   vga_bios: { url: abs("../v86/bios/vgabios.bin") },
@@ -610,6 +613,31 @@ window.pvState = () => ({ shell, layers, dock, placed, view, desktopReady, guest
                           log: pvLog.slice(-50), wd, wantKeyboard, keyboardHeld, kbd: kbdTrace.slice(-10),
                           guestFocus, learnedText: [...learnedText], kbdActive: !!($("kbd") && document.activeElement === $("kbd")),
                           firstFrame: !!firstFrame, firstFrameShown, safe, cursorShown: guestCursorShown, cmdQueue: cmdQueue.length });
+/* Everything that waits for a usable desktop: the pointer's calibration, the screen controls, the
+   dial-up line, the cursor, and any deep link in the URL. Reached from PVA in the phone layout and
+   from the mode switch in desktop mode -- PVMON publishes a fresh PVA when it rearranges the phone
+   column, but a switch to desktop mode is reported by PVD alone, and gating this on PVA left a
+   desktop-mode page with no pointer calibration, no screen controls and no network at all. */
+let guestReadyDone = false;
+function guestIsReady() {
+  if (guestReadyDone) return;
+  guestReadyDone = true;
+  desktopReady = true;
+  setTimeout(() => calibratePointer("desktop ready"), 400);
+  /* Ask the guest what the screen controls were left set to. LCD.EXE /report sends one PVLCD line
+     and exits without a window; WIN.INI's run= cannot carry an argument (Windows reads the argument
+     as a second program to launch and puts up "cannot find file"), so the host asks once the
+     desktop is up instead. */
+  if (!lcdAsked) { lcdAsked = true; setTimeout(() => sendCommandString(CMD_RUN, "LCD.EXE /report"), 1200); }
+  if (!slipNet) slipNet = initNet();                 // COM2 becomes a dial-up line
+  if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
+  /* The browser's pointer takes over from here (see applyCursorShape). PVMON resends PVC with
+     every PVA, so the shape arrives right behind this. */
+  applyCursorShape();
+  if (params.get("mkstate") && !restored) { uploadBootState(); return; }
+  launchFromUrl();
+}
+
 emulator.bus.register("pv-debug", line => {
   pvLog.push(line);
   if (pvLog.length > 200) pvLog.splice(0, pvLog.length - 150);
@@ -659,21 +687,8 @@ emulator.bus.register("pv-debug", line => {
     // A wide viewport with the guest still in the phone layout: not ready yet. PVMON publishes
     // PVA again once it has switched and arranged the desktop (finish_mode_switch).
     if (wantDesktop() && shell.ver >= 34 && guestDesktop !== true) { syncDesktopMode(); return; }
-    desktopReady = true;
-    shellHeightSent = 0;
-    setTimeout(() => calibratePointer("desktop ready"), 400);
-    /* Ask the guest what the screen controls were left set to. LCD.EXE /report sends one PVLCD
-       line and exits without a window; WIN.INI's run= cannot carry an argument (Windows reads the
-       argument as a second program to launch and puts up "cannot find file"), so the host asks
-       once the desktop is up instead. */
-    if (!lcdAsked) { lcdAsked = true; setTimeout(() => sendCommandString(CMD_RUN, "LCD.EXE /report"), 1200); }
-    if (!slipNet) slipNet = initNet();                 // COM1 becomes a dial-up line
-    if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
-    /* Desktop: the browser's pointer takes over from here (see applyCursorShape). PVMON resends
-       PVC with every PVA, so the shape arrives right behind this. */
-    applyCursorShape();
-    if (params.get("mkstate") && !restored) { uploadBootState(); return; }
-    launchFromUrl();
+    shellHeightSent = 0;                            // the shell rearranged: tell it its height again
+    guestIsReady();
     return;
   }
   /* A top-level window is being destroyed, reported from the hook BEFORE Windows erases the area
@@ -716,6 +731,11 @@ emulator.bus.register("pv-debug", line => {
     for (const k of Object.keys(layerZoom)) if (!live.has(k)) delete layerZoom[k];
     resetAim(layers.map(L => L.title));   // JezzBall gone: the next one starts vertical again
     syncA11yWindows();                    // tell a screen reader what just changed, if anything did
+    /* A finished publish is the honest "PVMON is idle" signal, and in desktop mode it is the only
+       one: PVMON republishes PVA when it rearranges the phone column, but a switch to desktop mode
+       is reported by PVD alone. Waiting for the publish matters -- asking for the pointer probes
+       and LCD.EXE while PVMON was still inside its mode switch killed it with a UAE. */
+    if (!guestReadyDone && (shell.ver < 34 || guestDesktop === wantDesktop())) guestIsReady();
   }
 });
 
@@ -2779,21 +2799,36 @@ function composeForGuest(vw, vh) {
 
    ?net=0 leaves the port silent, which is what a guest with no Winsock installed should see. */
 let slipNet = null, slipBytes = { in: 0, out: 0 }, slipReqs = 0;
+let slipOut = [], slipOff = 0, slipDraining = false;   // the one queue for the line (see send below)
 function initNet() {
   if (params.get("net") === "0") return null;
   const net = new SlipNet({
     /* v86's UART takes one byte at a time; a frame is up to about 1500 of them, which is nothing
        for a loop but would be a poor idea inside the compositor's frame, so it is chunked across
-       tasks and the guest sees it arrive as a modem would deliver it. */
+       tasks and the guest sees it arrive as a modem would deliver it.
+       One queue for the whole line, not one loop per frame: a reply goes out as several segments in
+       the same turn, and a per-frame loop had each of them pushing its own first 256 bytes before
+       any of them pushed its second -- the frames interleaved on the wire and the guest saw
+       nothing but rubbish. Everything under 256 bytes (a DNS answer, a SYN+ACK) still fitted in one
+       pass, which is why the line looked like it worked right up to the first real page. */
     send: bytes => {
       slipBytes.out += bytes.length;
-      let i = 0;
-      const push = () => {
-        const end = Math.min(i + 256, bytes.length);
-        for (; i < end; i++) emulator.bus.send("serial0-input", bytes[i]);
-        if (i < bytes.length) setTimeout(push, 0);
-      };
-      push();
+      slipOut.push(bytes);
+      if (!slipDraining) {
+        slipDraining = true;
+        const drain = () => {
+          let n = 0;
+          while (n < 512 && slipOut.length) {
+            const head = slipOut[0];
+            const end = Math.min(head.length, slipOff + 512 - n);
+            for (; slipOff < end; slipOff++, n++) emulator.bus.send("serial1-input", head[slipOff]);
+            if (slipOff >= head.length) { slipOut.shift(); slipOff = 0; }
+          }
+          if (slipOut.length) setTimeout(drain, 0);
+          else slipDraining = false;
+        };
+        drain();
+      }
     },
     request: async (host, port, data, conn) => {
       const text = String.fromCharCode(...data);
@@ -2828,8 +2863,16 @@ function initNet() {
     },
     log: m => diag(`net: ${m}`),
   });
-  emulator.bus.register("serial0-output-byte", byte => { slipBytes.in++; net.fromGuest([byte & 0xFF]); });
-  report("net", "COM1 is a SLIP line to the host");
+  emulator.bus.register("serial1-output-byte", byte => { slipBytes.in++; net.fromGuest([byte & 0xFF]); });
+  /* Raise the modem's control lines. There is no modem, but a 1994 stack behaves as though there
+     were one: Trumpet's SLIP driver has hardware handshaking on by default and will not put a byte
+     on the wire until CTS is asserted, so without this the guest reports the line open, says
+     "Trying 10.0.2.2..." and never transmits. DCD and DSR go up with it, because a driver that
+     watches for carrier loss should not see one. Sent after the snapshot has been restored -- a
+     restore brings the saved modem status register back with it. */
+  for (const line of ["carrier-detect", "data-set-ready", "clear-to-send"])
+    emulator.bus.send(`serial1-${line}-input`, true);
+  report("net", "COM2 is a SLIP line to the host");
   return net;
 }
 window.pvNet = () => ({ on: !!slipNet, bytes: slipBytes, requests: slipReqs,

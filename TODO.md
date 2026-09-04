@@ -39,33 +39,6 @@ being struck through in place. Slugs in brackets are the safer way to refer to o
 7. [share-sheet] **Share sheet for printed PDFs.** A print currently downloads. Hand it to the iOS share
    sheet instead so printing feels finished.
 
-8. [networking] **Networking.** Started 2026-09-04, host half built and tested; the guest half needs
-   an asset decision from Josh. Architecture, which is Josh's (a proxy, off-device, reached through
-   a simulated serial port):
-   - **The guest dials up.** WFW 3.11 shipped NetBEUI and IPX and no TCP/IP at all (the install
-     source on the image has NDIS and PROTMAN and nothing else), and it could not do TLS if it had.
-     So it gets a period-correct dial-up link: a Winsock over SLIP on COM1, which is how everyone
-     reached the internet in 1994. v86 already emulates the UART, so there is no device to write --
-     bytes arrive as `serial0-output` and go back as `serial0-input`.
-   - **The host is the terminal server** (`web/net.js`, done): SLIP framing, IPv4, ICMP echo so
-     `ping` proves the link, a DNS responder that hands every name an address out of 10.64/16 and
-     remembers whose it is, and enough TCP for a handshake, in-order data and a close. A request to
-     port 80 is handed up as (host, bytes); the response is streamed back. 37/37 checks in
-     `v86/tests/pv/slipnet.mjs`, driven with synthetic frames -- no emulator needed.
-   - **The real internet is a function** (`api/fetch.js`, done): the page cannot fetch arbitrary
-     sites itself (CORS), and the guest cannot do TLS, so the request is made server-side. GET and
-     HEAD only, http/https only, private and loopback addresses refused, 4 MB and 15 s limits, a
-     period user agent, nothing forwarded from the caller. The guest asks for http and gets what
-     the site serves over TLS, knowing nothing about it.
-   - **Still to do**: wire `web/net.js` to the bus and `api/fetch.js` (an afternoon); then the guest
-     side. Two ways, and it is Josh's call because it is an asset question: **Trumpet Winsock**
-     (shareware, SLIP over COM1, no NIC driver -- matches this design exactly) or **Microsoft
-     TCP/IP-32** (free at the time, needs an NDIS driver for v86's NE2000, and then the link is
-     ethernet rather than serial and `web/net.js` grows an ARP responder).
-   - Not yet: UDP beyond DNS, more than one connection at a time (the code allows it, nothing has
-     tested it), retransmission (a local link that never drops a packet does not need it, and a
-     1994 stack will retransmit at us anyway, which the sequence handling tolerates).
-
 9. [deep-links] **Deep links with state.** `/solitaire` exists; extend to opening a specific document
    (Write, Notepad, Paintbrush) and to resuming a saved session, so a link is shareable.
 
@@ -287,6 +260,26 @@ Finished, newest work last within its number. Numbers are for life.
     instead, the leftover columns take the desktop's own colour, and if the guest has not followed
     within two seconds the old scale-to-fit comes back so nothing is stranded off the edge. The
     saved first frame is only shown to a window the same shape as the one that saved it.
+
+8. ~~**Networking.**~~ Done 2026-09-04 (SPEC). The guest is on the internet, over a dial-up link
+   that does not exist, and every piece of it in the guest is period software:
+   - **The host is the terminal server** (`web/net.js`): SLIP framing, IPv4, ICMP echo, a DNS
+     responder that hands every name an address out of 10.64/16 and remembers whose it is, and
+     enough TCP for a handshake, in-order data with the guest's own window and MSS respected, and a
+     close. 37/37 checks in `v86/tests/pv/slipnet.mjs`, no emulator needed.
+   - **The real internet is a function** (`api/fetch.js`): GET and HEAD only, http/https only,
+     private and loopback refused, 4 MB and 15 s limits, a period user agent. The guest asks for
+     plain HTTP and gets what the site serves over TLS, knowing nothing about it.
+   - **The stack in the guest is Trumpet Winsock 3.0** (Josh's own copy, registered), on COM2 at
+     38400, `TRUMPWSK.INI` baked into the image so a cold boot comes up configured and registered,
+     and TCPMAN in WIN.INI `load=` so it is resident and iconic from the moment the desktop is up.
+   - **The client is FETCH.EXE** (`guest/fetch`), because Windows for Workgroups shipped no HTTP
+     client: a native Win16 window, an asynchronous socket (`WSAAsyncSelect`), Winsock taken by
+     ordinal out of `WINSOCK.DLL`, and an item in Main. `FETCH.EXE <url>` fetches on open, so a
+     deep link can reach it.
+   - Not yet: UDP beyond DNS, more than one connection at a time (the code allows it, nothing has
+     tested it), retransmission (this link never drops a packet, and a 1994 stack retransmits at us
+     anyway, which the sequence handling tolerates).
 
 ## Known, not yet scheduled
 

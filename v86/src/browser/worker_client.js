@@ -244,6 +244,9 @@ export function V86Worker(options)
                     vga_memory_size: options.vga_memory_size, bios: options.bios, vga_bios: options.vga_bios,
                     hda: options.hda, boot_order: options.boot_order,
                     shared: self_.shared, render_interval: options.render_interval || 16,
+                    /* COM2, when the page wants it: Trumpet Winsock opens 0x2F8 by default and
+                       the guest's internet arrives down that line (web/net.js). */
+                    uart1: options.uart1,
                 } });
                 break;
             case "inited":

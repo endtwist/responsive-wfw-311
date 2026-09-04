@@ -3596,3 +3596,77 @@ printer=PSCRIPT out=work-phone.img` and a fresh warmed boot snapshot (`node tool
 image/<img> --state none --save image/<state> run:NOTEPAD.EXE until:W:Notepad close run:PBRUSH.EXE
 until:W:Paintbrush close run:WINFILE.EXE until:W:File.Manager close run:SOL.EXE until:W:Solitaire
 close`). **No driver rebuild:** `PVDISP.DRV` is untouched, and `guest/pvhook` too.
+
+### 2026-09-04 — the guest is on the internet: Trumpet Winsock over a SLIP line, and FETCH.EXE
+Networking end to end (TODO 8), all of it in the guest period software.
+
+**The link.** COM2 (`uart1`) is a SLIP line to the host. Two things had to be true before a byte
+would move:
+- **The modem's control lines.** There is no modem, but a 1994 stack behaves as though there were
+  one: `TRUMPWSK.INI` has `slip-handshake=1`, and Trumpet's SLIP driver will not transmit until CTS
+  is asserted. The host now raises DCD, DSR and CTS (`serial1-carrier-detect-input`,
+  `-data-set-ready-input`, `-clear-to-send-input`) after the snapshot has been restored — a restore
+  brings the saved modem status register back with it. Before that the guest said "Trying
+  10.0.2.2..." and the line carried nothing at all.
+- **One queue for the line.** `web/app.js` chunked each frame across tasks with its own loop, so a
+  reply that went out as several segments in one turn had each segment pushing its first 256 bytes
+  before any pushed its second: the frames interleaved and the guest saw rubbish. Everything under
+  256 bytes (a DNS answer, a SYN+ACK) still fitted in one pass, which is why the line looked like it
+  worked right up to the first real page. There is now a single byte queue with one drain.
+
+**TCP had to grow up** (`web/net.js`). Two bugs, both invisible on the synthetic frames the unit
+tests use:
+- **MSS.** Trumpet advertises 512 (MTU 576) and means it: 1 KB segments were dropped whole. The SYN's
+  options are now parsed and segments never exceed what the guest asked for.
+- **Flow control.** The host pushed a whole page as fast as it could build frames — half a megabyte
+  of Wikipedia in one turn — and the guest, which reads a few hundred bytes at a time, saw the first
+  16 KB and lost the rest. `deliver()`/`finish()` now only queue; `pump()` sends what the guest's
+  advertised window has room for and is called again from every ACK.
+- The matching guest-side bug: `WSAAsyncSelect`'s FD_READ is **edge** triggered, re-armed by a recv
+  that returns WSAEWOULDBLOCK. FETCH.EXE stopped reading on a short read, so with the window
+  honoured the transfer stopped dead at exactly 2048 bytes (Trumpet's `rwin`). It reads until the
+  socket says there is nothing left.
+
+**The stack.** Trumpet Winsock 3.0 Revision D (Josh's copy) in `C:\TRUMPET`, registered, with
+`TRUMPWSK.INI` now baked into `image/changes/trumpet/` — Trumpet's own file, taken out of the
+running guest through the clipboard bridge (`tools/probe.mjs getclip`), so a cold boot comes up
+configured (SLIP, COM2, 10.0.2.15 → 10.0.2.2, DNS 10.0.2.2) and registered with no dialogs.
+`seen-license=1` is part of that. TCPMAN is in WIN.INI `load=`, which starts a program iconic, so
+the stack is resident from the moment the desktop is up without standing in a column. A stale
+instance holding COM2 is what produced "Unable to open COM2 — Device is already open"; a restart of
+TCPMAN clears it.
+
+**The client.** `guest/fetch` → FETCH.EXE, an item in Main. Windows for Workgroups shipped no HTTP
+client, so this is one: an overlapped window (PVHOOK fits it to the column), an edit control for the
+address, a read-only multi-line edit for the reply, an asynchronous socket, and Winsock taken by
+**ordinal** out of `WINSOCK.DLL` with `LoadLibrary`/`GetProcAddress(MAKELP(0, n))` — there is no
+Winsock import library in this toolchain, the 1.1 ordinals are fixed (socket 23, connect 4,
+WSAStartup 115), and it means the program starts and says so when no stack is running instead of
+failing to load. `FETCH.EXE <url>` fetches on open. `https://` is accepted and means the same thing:
+the guest speaks HTTP and `api/fetch.js` does the TLS.
+
+**Verified.** `v86/tests/pv/slipnet.mjs` 37/37. Headless (`tools/probe.mjs`): `TRUMPING.EXE
+10.0.2.2` → `id = 5 rtt = 0ms`; `TRUMPDIG.EXE` against 10.0.2.2 → `example.com A 60 10.64.0.1`;
+`FETCH.EXE http://example.com/` → `HTTP/1.0 200 OK` and the page in the window; the Wikipedia
+article (500 KB) streams past FETCH's own 60 KB cap instead of deadlocking. In the Browser pane
+through the real host path (`/api/fetch`): the same page, and `https://en.wikipedia.org/...`
+streaming at about 2.4 KB/s — a 19 kbit/s modem, near enough for the line it is pretending to be.
+
+**Also:** the ready path is no longer gated on PVA alone (`guestIsReady`). PVMON republishes PVA when
+it rearranges the phone column, but a switch to desktop mode is reported by PVD only, so a
+desktop-mode page never calibrated its pointer, never asked for the screen controls and never opened
+the line. It now runs on the first finished publish (PVE) whose layout matches what the host wants.
+
+**New tooling.** `tools/probe.mjs`: `getclip[:file]` (the guest's clipboard, decoded off the debug
+channel — how `TRUMPWSK.INI` came out), `text:` now types capitals and shifted punctuation, and the
+probe raises the modem lines like the page does.
+
+**Open, pre-existing:** desktop mode kills PVMON. `pvmon: host wants 1280x800` is answered by
+`pvmon: live re-mode returned 1x0` and the heartbeat stops (Josh's screenshot shows the UAE). Both
+main and this work behave identically, so it is not from the networking change; `tools/desktop-probe.mjs`
+still asks for 2560x970 and needs the 3200x970 screen.
+
+**Rebuild in main:** `guest/fetch/build.sh`, staged as `image/changes/windows/FETCH.EXE`, then
+`image/build-image.sh display=pvdisp dpi=120 sysfont=PVSYS.FON mouse=PVMOUSE.DRV sound=1
+load=PVMON.EXE live=1 shellw=352 shellh=760 spooler=no printer=PSCRIPT out=work-phone.img` and a
+warmed snapshot (the usual four apps plus `run:FETCH.EXE until:W:Fetch close dismiss`).

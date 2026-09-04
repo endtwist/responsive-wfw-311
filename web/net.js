@@ -206,15 +206,46 @@ export class SlipNet {
     let c = this.conns.get(key);
 
     if (flags & SYN && !(flags & ACK)) {
+      /* The guest's maximum segment size, out of the SYN's options. A peer must not send a segment
+         larger than this, and the guest here means it: Trumpet is configured with an MTU of 576 and
+         drops anything bigger, so a reply sent in 1 KB segments arrives as nothing at all and the
+         program sits on "Waiting for the reply". 536 is the default when no option is offered. */
+      let mss = 536;
+      for (let o = 20; o < doff && o < t.length; ) {
+        const kind = t[o];
+        if (kind === 0) break;                                      // end of options
+        if (kind === 1) { o++; continue; }                           // no-op padding
+        const len = t[o + 1];
+        if (!len || o + len > doff) break;
+        if (kind === 2 && len === 4) mss = (t[o + 2] << 8) | t[o + 3];
+        o += len;
+      }
+      if (mss < 128) mss = 128;
       c = { key, sport, dport, addr: dst, host: this.nameFor(dst), theirs: (seq + 1) >>> 0,
-            mine: 0x1000, req: [], open: true, sent: false };
+            mine: 0x1000, req: [], open: true, sent: false, mss,
+            /* Flow control: what is queued for the guest, how far it has acknowledged, and the
+               window it last advertised. Without this the host pushed a whole page down the line as
+               fast as it could build frames -- half a megabyte of Wikipedia at once -- and the
+               guest, which reads it a few hundred bytes at a time, saw the first 16 KB and lost the
+               rest. */
+            q: [], qoff: 0, qbytes: 0, una: 0, win: ((t[14] << 8) | t[15]) || 2048,
+            wantFin: false, finSent: false };
       this.conns.set(key, c);
       this.tcp(c, SYN | ACK);
       c.mine = (c.mine + 1) >>> 0;
-      this.log(`tcp: connection to ${c.host}:${dport} opened`);
+      c.una = c.mine;
+      this.log(`tcp: connection to ${c.host}:${dport} opened (mss ${mss})`);
       return;
     }
     if (!c) { return; }                                             // stray segment: nothing to reset to
+    if (flags & ACK) {
+      const ack = (t[8] << 24 | t[9] << 16 | t[10] << 8 | t[11]) >>> 0;
+      if (((ack - c.una) >>> 0) < 0x80000000) c.una = ack;           // sequence arithmetic wraps
+      /* A window of zero would stall the connection until the guest sent an update of its own
+         accord; one segment is offered instead, which is what a zero-window probe does. */
+      c.win = ((t[14] << 8) | t[15]) || c.mss;
+      this.pump(c);
+    }
     if (data.length) {
       c.theirs = (c.theirs + data.length) >>> 0;
       for (const b of data) c.req.push(b);
@@ -236,21 +267,48 @@ export class SlipNet {
       this.log(`tcp: ${c.host}:${c.dport} closed by the guest`);
     }
   }
-  /* The owner calls these two as its fetch produces bytes. */
+  /* The owner calls these two as its fetch produces bytes. Both only queue: what actually goes on
+     the wire, and when, is pump()'s business. */
   deliver(c, bytes) {
-    if (!c.open) return;
-    for (let i = 0; i < bytes.length; i += 1024) {
-      const chunk = bytes.subarray(i, Math.min(i + 1024, bytes.length));
-      this.tcp(c, ACK | PSH, chunk);
-      c.mine = (c.mine + chunk.length) >>> 0;
-    }
+    if (!c.open || !bytes.length) return;
+    c.q.push(bytes);
+    c.qbytes += bytes.length;
+    this.pump(c);
   }
   finish(c) {
     if (!c.open) return;
-    this.tcp(c, ACK | FIN);
-    c.mine = (c.mine + 1) >>> 0;
-    c.open = false;
-    this.conns.delete(c.key);
+    c.wantFin = true;
+    this.pump(c);
+  }
+  /* Send as much as the guest's window has room for, a segment at a time, and close once the queue
+     is empty. Called again from every ACK, which is what turns a 500 KB page into a conversation
+     the guest can keep up with. */
+  pump(c) {
+    const mss = c.mss || 536;
+    for (;;) {
+      const inflight = (c.mine - c.una) >>> 0;
+      const room = Math.min(c.win - inflight, mss, c.qbytes);
+      if (room <= 0) break;
+      const seg = new Uint8Array(room);
+      let n = 0;
+      while (n < room) {
+        const head = c.q[0];
+        const take = Math.min(head.length - c.qoff, room - n);
+        seg.set(head.subarray(c.qoff, c.qoff + take), n);
+        n += take; c.qoff += take;
+        if (c.qoff >= head.length) { c.q.shift(); c.qoff = 0; }
+      }
+      c.qbytes -= room;
+      this.tcp(c, ACK | PSH, seg);
+      c.mine = (c.mine + room) >>> 0;
+    }
+    if (c.wantFin && !c.qbytes && !c.finSent) {
+      c.finSent = true;
+      this.tcp(c, ACK | FIN);
+      c.mine = (c.mine + 1) >>> 0;
+      c.open = false;
+      this.conns.delete(c.key);
+    }
   }
   tcp(c, flags, payload) {
     const body = payload || new Uint8Array(0);

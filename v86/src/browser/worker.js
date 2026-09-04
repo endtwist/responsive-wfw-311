@@ -154,6 +154,7 @@ async function init(o)
         boot_order: o.boot_order,
         autostart: false,
         disable_keyboard: true,          // the page owns the DOM listeners
+        uart1: o.uart1,                  // COM2: the guest's dial-up line
         disable_mouse: true,
         disable_speaker: true,           // no AudioContext in a worker
         screen: { adapter: screen },

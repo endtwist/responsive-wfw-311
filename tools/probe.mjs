@@ -50,6 +50,7 @@
  *   slat:slot,n[,dir,pace]  command delivery latency: n CMD_SCROLLs, ms from the send to the ack
  *   mips:1000               instructions per second over that window (the idle check)
  *   dismiss                 Enter/Esc until only the shell is left
+ *   getclip[:file]          what the guest has on its clipboard (PVCB off the debug channel)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -98,6 +99,7 @@ const emulator = new V86({
   wasm_path: path.join(root, "v86/build/v86.wasm"),
   memory_size: 32 * 1024 * 1024,
   vga_memory_size: 8 * 1024 * 1024,
+  uart1: true,                     // COM2: the guest's dial-up line (web/net.js)
   bios: { url: path.join(root, "v86/bios/seabios.bin") },
   vga_bios: { url: path.join(root, "v86/bios/vgabios.bin") },
   hda: { url: IMAGE, async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
@@ -196,7 +198,7 @@ if (val("--date")) {
 
 const netLog = [];
 const slip = new SlipNet({
-  send: bytes => { for (const b of bytes) emulator.bus.send("serial0-input", b); },
+  send: bytes => { for (const b of bytes) emulator.bus.send("serial1-input", b); },   // one turn, in order
   request: async (host, port, data, conn) => {
     const text = String.fromCharCode(...data);
     netLog.push(`request ${host}:${port} ${text.split("\r\n")[0]}`);
@@ -214,7 +216,25 @@ const slip = new SlipNet({
   },
   log: m => netLog.push(m),
 });
-emulator.bus.register("serial0-output-byte", byte => slip.fromGuest([byte & 0xFF]));
+/* The guest's clipboard, as PVMON puts it on the debug channel (see the getclip step). */
+const clipOut = { lines: null, text: "" };
+emulator.bus.register("pv-debug", line => {
+  if (/^PVCB-BEGIN/.test(line)) clipOut.lines = [];
+  else if (/^PVCB /.test(line)) { if (clipOut.lines) clipOut.lines.push(line.slice(5)); }
+  else if (/^PVCB-END/.test(line) && clipOut.lines)
+    { clipOut.text = Buffer.from(clipOut.lines.join(""), "base64").toString("latin1"); clipOut.lines = null; }
+});
+
+emulator.bus.register("serial1-output-byte", byte => slip.fromGuest([byte & 0xFF]));
+/* The modem's control lines. A real 14k4 on the end of the cable asserts DCD, DSR and CTS, and
+   Trumpet's SLIP driver -- like every other 1994 stack -- will not transmit a byte until CTS is
+   there: hardware handshaking is on by default. Without these the line is open, the guest says
+   "Trying 10.0.2.2..." and not one byte ever leaves the UART. */
+function raiseModemLines() {
+  for (const line of ["carrier-detect", "data-set-ready", "clear-to-send"])
+    emulator.bus.send(`serial1-${line}-input`, true);
+}
+raiseModemLines();
 
 emulator.bus.send("pv-request-mode", [SCREEN_W, SCREEN_H]);
 const t0 = performance.now();
@@ -222,6 +242,7 @@ if (STATE) {
   const snap = zlib.gunzipSync(fs.readFileSync(STATE));
   await emulator.restore_state(snap.buffer.slice(snap.byteOffset, snap.byteOffset + snap.byteLength));
   emulator.run();
+  raiseModemLines();               // restore_state brought the saved MSR back with it
   await sleep(300);
   emulator.bus.send("pv-command", [6, 0]);
 } else {
@@ -257,7 +278,17 @@ for (const s of steps) {
     const map = { a: 0x1E, b: 0x30, c: 0x2E, d: 0x20, e: 0x12, f: 0x21, g: 0x22, h: 0x23, i: 0x17, j: 0x24, k: 0x25, l: 0x26, m: 0x32, n: 0x31, o: 0x18, p: 0x19, q: 0x10, r: 0x13, s: 0x1F, t: 0x14, u: 0x16, v: 0x2F, w: 0x11, x: 0x2D, y: 0x15, z: 0x2C, " ": 0x39,
                   1: 0x02, 2: 0x03, 3: 0x04, 4: 0x05, 5: 0x06, 6: 0x07, 7: 0x08, 8: 0x09, 9: 0x0A, 0: 0x0B,
                   "-": 0x0C, "=": 0x0D, ".": 0x34, ",": 0x33, "/": 0x35, ";": 0x27, "'": 0x28, "[": 0x1A, "]": 0x1B, "\\": 0x2B, "`": 0x29 };
-    for (const ch of arg) if (map[ch] !== undefined) await press(map[ch]);
+    /* Capitals and the shifted punctuation a registration key or a URL needs: the shift is held
+       across the one key, which is what a keyboard does and what USER expects to see. */
+    const shifted = { ":": ";", "?": "/", "_": "-", "+": "=", "~": "`", "!": "1", "@": "2", "#": "3",
+                      "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0" };
+    for (const ch of arg) {
+      const lower = ch >= "A" && ch <= "Z" ? ch.toLowerCase() : shifted[ch];
+      const sc = map[lower !== undefined ? lower : ch];
+      if (sc === undefined) continue;
+      if (lower !== undefined) { await key(SC.shift, true); await press(sc); await key(SC.shift, false); }
+      else await press(sc);
+    }
   }
   else if (op === "pix") {
     /* what the frame buffer holds in a rectangle: 8 bpp, pitch from the adapter; the colour
@@ -291,6 +322,17 @@ for (const s of steps) {
   }
   else if (op === "net") {
     console.log(`${ts()} net: ${netLog.length ? netLog.slice(-8).join(" | ") : "nothing on the line"}`);
+  }
+  else if (op === "getclip") {
+    /* What the guest has on its clipboard, decoded off the debug channel: PVMON sends it as
+       PVCB-BEGIN / base64 lines / PVCB-END whenever the clipboard changes (the viewer chain), so a
+       Select All + Copy in Notepad is how a file inside the guest gets out to a test. */
+    if (!clipOut.text) console.log(`${ts()} getclip: nothing has been copied`);
+    else {
+      const out = arg || null;
+      if (out) { fs.writeFileSync(out, clipOut.text); console.log(`${ts()} getclip -> ${out} (${clipOut.text.length} bytes)`); }
+      else console.log(`${ts()} getclip (${clipOut.text.length} bytes):\n${clipOut.text}`);
+    }
   }
   else if (op === "clip") {
     /* CMD_CLIP: put text on the guest clipboard, the way the host does when the page is pasted
