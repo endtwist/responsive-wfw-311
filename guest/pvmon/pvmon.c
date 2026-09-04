@@ -724,6 +724,37 @@ static void find_screen_pair(unsigned oldW, unsigned oldH, unsigned w, unsigned 
     dbg("pvmon: no cached tracking size found");
 }
 
+/* Every remaining copy of the old screen size in USER's data segment.
+
+   USER keeps the screen's dimensions in more places than the documented ones, and a live re-mode
+   reaches only the copies we know about: the metrics table, the desktop window's rectangles, the
+   DC caps. Two have already cost a day each -- the size the mouse is scaled by, and the rectangle
+   ClipCursor(NULL) expands to -- and a third was still centring system-modal boxes on a 3200-wide
+   screen after the switch to a 1512-wide desktop, half of the MS-DOS Prompt's exit warning hanging
+   off the edge, with no way to tell from outside which copy it was.
+
+   So rather than hunt them one at a time: walk the segment for adjacent word pairs that read
+   exactly (oldW, oldH) and rewrite them to the new size. The pair is specific enough to be safe on
+   a 64 KB segment -- a coincidental 3200 immediately followed by 970 is not something USER holds
+   for another purpose -- and every hit is logged with its offset, so what was patched is on the
+   record rather than guessed at. */
+static void patch_screen_copies(unsigned oldW, unsigned oldH, unsigned w, unsigned h)
+{
+    WORD __far *seg = PVFP(g_userDS, 0);
+    unsigned i, n = 0, first = 0xFFFF;
+    char buf[80];
+    if (!g_patchReady || !oldW || !oldH || (oldW == w && oldH == h)) return;
+    for (i = 0; i < 0x7FFE; i++) {
+        if (seg[i] != (WORD)oldW || seg[i + 1] != (WORD)oldH) continue;
+        seg[i] = (WORD)w; seg[i + 1] = (WORD)h;
+        if (first == 0xFFFF) first = i * 2;
+        n++;
+    }
+    wsprintf(buf, "pvmon: rewrote %u copies of %ux%u to %ux%u (first at %04X)",
+             n, oldW, oldH, w, h, first);
+    dbg(buf);
+}
+
 /* Tell USER the screen is a different size. */
 static void patch_user_metrics(unsigned w, unsigned h)
 {
@@ -2180,6 +2211,7 @@ static BOOL live_remode(unsigned w, unsigned h)
     ReleaseDC(NULL, hdc);
     dbgnum("pvmon: live re-mode returned", (unsigned)r, 0);
     if (r <= 0) { ShowCursor(TRUE); return FALSE; }
+    patch_screen_copies(g_prevW ? (unsigned)g_prevW : g_realW, g_prevH ? (unsigned)g_prevH : g_realH, w, h);
     patch_user_metrics(w, h);
     g_realW = w; g_realH = h;
     apply_fake_screen();
