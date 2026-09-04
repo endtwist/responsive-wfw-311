@@ -893,7 +893,12 @@ const KEYBAR = [
   ["←", [0xE0, 0x4B], "arrow"], ["↑", [0xE0, 0x48], "arrow"], ["↓", [0xE0, 0x50], "arrow"], ["→", [0xE0, 0x4D], "arrow"],
   ["Ctrl", "ctrl"], ["Alt", "alt"], ["Del", [0xE0, 0x53]], null,
   ["F1", [0x3B]], ["F2", [0x3C]], ["F3", [0x3D]], ["F4", [0x3E]], ["F5", [0x3F]], ["F6", [0x40]], ["F7", [0x41]], ["F8", [0x42]], ["F9", [0x43]], ["F10", [0x44]], null,
-  ["Home", [0xE0, 0x47]], ["End", [0xE0, 0x4F]], ["PgUp", [0xE0, 0x49]], ["PgDn", [0xE0, 0x51]], ["Ins", [0xE0, 0x52]],
+  ["Home", [0xE0, 0x47]], ["End", [0xE0, 0x4F]], ["PgUp", [0xE0, 0x49]], ["PgDn", [0xE0, 0x51]], ["Ins", [0xE0, 0x52]], null,
+  /* Copy and paste, because a phone has no Ctrl+Insert and iOS's own paste callout needs a visible
+     text field, which this page does not have and is not allowed to grow. These two do the whole
+     job in one tap each -- read or write the phone's clipboard, and press the keys Windows 3.1
+     listens for -- and the bar is the one piece of host chrome the rule allows. */
+  ["Copy", "copy"], ["Paste", "paste"], null,
   ["⌄", "hide"],
 ];
 /* Modifier state: 0 off, 1 armed for the next key (one tap), 2 locked (a second tap; stays until
@@ -929,6 +934,32 @@ function hideKeyboard(reason) {
   kbdLog(`hide (${reason})`);
   setTimeout(updateKeybar, 100);
 }
+/* The bar's Copy: press the keys Windows copies with, then hand what the guest reports to the
+   phone. The write has to happen inside this gesture, and PVMON's report is a moment behind the
+   keys, so the report itself does the writing (offerClipboard, with clipCopyWait still open). */
+function keybarCopy() {
+  sendChord([0x1D], [0x52]);                               // Ctrl+Insert
+  clipCopyWait = performance.now() + 1500;
+  diag("keybar: copy");
+  if (!navigator.clipboard) report("kbd", `copy: no clipboard here (secure context: ${window.isSecureContext})`);
+}
+/* And Paste: read the phone's clipboard -- iOS asks the user the first time, which is why this is
+   a deliberate tap rather than something that happens behind their back -- put it on the guest's
+   clipboard, then press Shift+Insert where the focus is. */
+async function keybarPaste() {
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    report("kbd", `paste: no clipboard here (secure context: ${window.isSecureContext})`);
+    return;
+  }
+  let text = "";
+  try { text = await navigator.clipboard.readText(); }
+  catch (e) { report("kbd", `paste refused: ${e && e.name}`); return; }
+  if (!text) { diag("keybar: paste, but the clipboard is empty"); return; }
+  pasteToGuest(text);
+  queue(async () => { await sleep(120); sendChord(CLIP_KEYS.v[0], CLIP_KEYS.v[1]); });
+  diag(`keybar: paste ${text.length} chars`);
+}
+
 function buildKeybar() {
   const bar = $("keybar");
   if (!bar || bar.childElementCount) return;
@@ -941,6 +972,8 @@ function buildKeybar() {
     const act = ev => {
       ev.preventDefault();                                 // keep the hidden input focused
       if (k[1] === "hide") { keybarOpen = false; hideKeyboard("bar"); return; }
+      if (k[1] === "copy") { keybarCopy(); return; }
+      if (k[1] === "paste") { keybarPaste(); return; }
       if (typeof k[1] === "string") { sticky[k[1]] = (sticky[k[1]] + 1) % 3; updateKeybar(); }
       else keybarPress(k[1]);
     };
