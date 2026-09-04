@@ -63,9 +63,12 @@ fi
 
 # The first-run note (SPEC 2026-09-03): "Read Me First" in Main shows it again after it has been
 # dismissed (ABOUT.EXE on its own honours [PVMon] AboutShown; the argument overrides it).
-if [ -f changes/windows/ABOUT.EXE ]; then
+if [ -f changes/windows/ABOUT.EXE ] || [ -f changes/windows/LCD.EXE ]; then
   mcopy -n $M ::/WINDOWS/MAIN.GRP $TMP/MAIN.GRP
-  python3 ../tools/grpadd.py $TMP/MAIN.GRP "Read Me First" "ABOUT.EXE /show" --exe changes/windows/ABOUT.EXE
+  [ -f changes/windows/ABOUT.EXE ] && python3 ../tools/grpadd.py $TMP/MAIN.GRP "Read Me First" "ABOUT.EXE /show" --exe changes/windows/ABOUT.EXE
+  # The screen controls for the host's LCD filter (guest/lcd): a Windows program, because that is
+  # the only kind of interface this system has.
+  [ -f changes/windows/LCD.EXE ] && python3 ../tools/grpadd.py $TMP/MAIN.GRP "Screen" "LCD.EXE" --exe changes/windows/LCD.EXE
   mcopy -o $M $TMP/MAIN.GRP ::/WINDOWS/MAIN.GRP
 fi
 

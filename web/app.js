@@ -495,6 +495,110 @@ const layerZoom = {};                // layer key -> { z, px, py }: pinch zoom a
    is a window onto the full-width bar that one finger pans sideways. Reset with the placement. */
 const menuPan = {};
 
+/* ---------------------------------------------------------------- screen-reader access (?a11y=0)
+ * The page is a canvas: VoiceOver and NVDA see one opaque picture and announce nothing about it.
+ * But the guest already tells the host everything a screen reader would need -- the layer list
+ * above (window titles, kinds, front-to-back order) and PVK's focused-control report below -- so
+ * this rebuilds that into a plain, invisible DOM tree instead of asking the guest for anything
+ * new. It is off-screen the same way #screen_container's own canvas is (position:absolute, far
+ * left): never display:none or visibility:hidden, both of which remove a node from the
+ * accessibility tree and would defeat the point. Nothing in it is focusable and it takes no
+ * pointer, so it cannot steal focus from #kbd or intercept a touch.
+ *
+ * Kept cheap on purpose: the compositor runs at 60 fps and must not slow down for this. Nothing
+ * here runs from the frame loop at all -- syncA11yWindows is called only where `layers`/`dock`
+ * are replaced wholesale (the PVE handler below), and syncA11yFocus only where PVK changes
+ * `guestFocus`, so a steady frame with nothing new to say touches no DOM.
+ */
+const A11Y_ON = params.get("a11y") !== "0";
+let a11yEls = null;            // { root, status, list }, built lazily on first use
+let a11yLayerSig = "";         // last layers+dock signature actually rendered
+let a11yFocusSig = "";         // last guestFocus signature actually rendered
+let a11yFrontLi = null;        // the <li> for the current front-most layer, patched in place on focus changes
+let a11yFrontTitle = "";       // its title, so a front-window change can be told from a first paint
+function a11yWindowKind(kind) {
+  // The guest's four layer kinds (PVW/PVO/PVT/PVX above; PVS is the shell) in the words a screen
+  // reader should say, matching the vocabulary the task calls for ("dialog", "menu", "minimised").
+  return kind === "O" ? "dialog" : kind === "T" ? "menu" : kind === "S" ? "shell" : kind === "X" ? "window" : "application";
+}
+function a11yFocusText() {
+  // PVK's flags (see guestWantsKeyboard below): e Edit, r readonly, c combo, t tty, n non-text.
+  // Read as a short parenthetical rather than the raw letters, since that is what gets spoken.
+  const f = guestFocus;
+  if (!f || !f.cls || f.cls === "-") return "";
+  const bits = [];
+  if (/c/.test(f.flags)) bits.push("combo box"); else if (/e/.test(f.flags)) bits.push("edit box");
+  if (/r/.test(f.flags)) bits.push("read-only");
+  if (/t/.test(f.flags)) bits.push("terminal");
+  if (/n/.test(f.flags)) bits.push("non-text");
+  return bits.length ? `${f.cls} (${bits.join(", ")})` : f.cls;
+}
+function a11yLine(L, front) {
+  let s = `${L.title || "(untitled)"} – ${a11yWindowKind(L.kind)}`;
+  if (front) { s += ", front window"; const d = a11yFocusText(); if (d) s += `, focused control: ${d}`; }
+  return s;
+}
+function ensureA11y() {
+  if (a11yEls) return a11yEls;
+  const root = document.createElement("div");
+  root.id = "a11y";
+  root.style.cssText = "position:absolute; left:-10000px; top:0; width:1px; height:1px; overflow:hidden; pointer-events:none;";
+  const h = document.createElement("h2");
+  h.textContent = "Windows for Workgroups 3.11 desktop";
+  const p = document.createElement("p");
+  p.textContent = "A screen-reader view of the Windows session running on this page. Windows are listed below, front to back.";
+  const status = document.createElement("div");
+  status.id = "a11y-status"; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+  const list = document.createElement("ul");
+  list.id = "a11y-windows";
+  root.append(h, p, status, list);
+  document.body.appendChild(root);
+  a11yEls = { root, status, list };
+  return a11yEls;
+}
+function a11yAnnounce(msg) {
+  const els = ensureA11y();
+  els.status.textContent = msg;
+}
+/* Called only from the PVE handler, once per layout change the guest reports -- never per frame.
+   `layers` is already back-to-front, so the DOM list is built front-to-back per requirement (2)
+   by walking it backwards. */
+function syncA11yWindows() {
+  if (!A11Y_ON) return;
+  const sig = layers.map(L => `${L.kind}:${L.slot}:${L.title}`).join("|") + "#" + dock.map(d => `${d.slot}:${d.title}`).join(",");
+  if (sig === a11yLayerSig) return;                         // nothing a screen reader could hear changed
+  const wasFront = a11yFrontTitle, hadFront = a11yLayerSig !== "";
+  a11yLayerSig = sig;
+  const els = ensureA11y();
+  els.list.textContent = "";
+  a11yFrontLi = null;
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const L = layers[i], li = document.createElement("li"), front = i === layers.length - 1;
+    li.textContent = a11yLine(L, front);
+    if (front) a11yFrontLi = li;
+    els.list.appendChild(li);
+  }
+  for (const d of dock) {
+    const li = document.createElement("li");
+    li.textContent = `${d.title || "Window"} – minimised`;
+    els.list.appendChild(li);
+  }
+  const front = layers[layers.length - 1];
+  a11yFrontTitle = front ? (front.title || a11yWindowKind(front.kind)) : "";
+  if (front && (front.kind === "T" || front.kind === "O")) a11yAnnounce(`${a11yFrontTitle} ${a11yWindowKind(front.kind)} opened`);
+  else if (hadFront && a11yFrontTitle !== wasFront) a11yAnnounce(a11yFrontTitle ? `${a11yFrontTitle} is now the front window` : "desktop");
+}
+/* Called only from guestWantsKeyboard, where PVK actually changes `guestFocus` -- patches just the
+   front row's text in place rather than rebuilding the list, so a focus change costs one string
+   compare and, at most, one textContent write. */
+function syncA11yFocus() {
+  if (!A11Y_ON) return;
+  const sig = `${guestFocus.cls}|${guestFocus.flags}`;
+  if (sig === a11yFocusSig) return;
+  a11yFocusSig = sig;
+  if (a11yFrontLi && layers.length) a11yFrontLi.textContent = a11yLine(layers[layers.length - 1], true);
+}
+
 const pvLog = [];
 /* Watchdog bookkeeping: PVMON's heartbeat (`PVH <tick>`, once a second once the guest ships it),
    the last input event, and the last time the composite changed. See watchdog() below. */
@@ -524,6 +628,9 @@ emulator.bus.register("pv-debug", line => {
      anything in Windows changes the clipboard. Writing to the system clipboard needs a user
      gesture on iOS, so the text is held and written on the next touch -- copy in Notepad, touch
      anything, and it is on the phone's clipboard. */
+  /* LCD.EXE reporting its controls: on, brightness, contrast (0..100 each). */
+  { const m2 = /^PVLCD (\d+) (\d+) (\d+)/.exec(line);
+    if (m2) { lcdSettings(+m2[1], +m2[2], +m2[3]); return; } }
   if (/^PVCB-BEGIN/.test(line)) { clipIn = []; return; }
   if (/^PVCB /.test(line)) { if (clipIn) clipIn.push(line.slice(5)); return; }
   if (/^PVCB-END/.test(line)) {
@@ -553,6 +660,11 @@ emulator.bus.register("pv-debug", line => {
     desktopReady = true;
     shellHeightSent = 0;
     setTimeout(() => calibratePointer("desktop ready"), 400);
+    /* Ask the guest what the screen controls were left set to. LCD.EXE /report sends one PVLCD
+       line and exits without a window; WIN.INI's run= cannot carry an argument (Windows reads the
+       argument as a second program to launch and puts up "cannot find file"), so the host asks
+       once the desktop is up instead. */
+    if (!lcdAsked) { lcdAsked = true; setTimeout(() => sendCommandString(CMD_RUN, "LCD.EXE /report"), 1200); }
     if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
     /* Desktop: the browser's pointer takes over from here (see applyCursorShape). PVMON resends
        PVC with every PVA, so the shape arrives right behind this. */
@@ -600,6 +712,7 @@ emulator.bus.register("pv-debug", line => {
     for (const k of Object.keys(menuPan)) if (!live.has(k)) delete menuPan[k];
     for (const k of Object.keys(layerZoom)) if (!live.has(k)) delete layerZoom[k];
     resetAim(layers.map(L => L.title));   // JezzBall gone: the next one starts vertical again
+    syncA11yWindows();                    // tell a screen reader what just changed, if anything did
   }
 });
 
@@ -664,6 +777,47 @@ async function psToPdf(psBytes) {
   if (!out || !out.length) throw new Error(`ghostscript exit ${rc}: ${errs.slice(-3).join(" | ")}`);
   return out;
 }
+/* A finished print goes to the platform's share sheet where there is one, and falls back to a
+   download where there is not. On a phone a download is a dead end -- iOS drops the file into
+   Files and says nothing -- whereas the share sheet is how everything else on the phone hands a
+   document to Mail, Messages, Books or a printer, which is what "printing" should feel like.
+   navigator.share must be called inside a user gesture, and a print finishes whenever the guest
+   finishes it, so the file waits for the next touch: `pvShare` holds it and the touch handler
+   offers it. A share the user cancels is not an error and leaves the file on offer. */
+let pendingShare = null;
+async function shareFile(bytes, name, type) {
+  const file = new File([bytes], name, { type });
+  if (!navigator.canShare || !navigator.canShare({ files: [file] })) return false;
+  try {
+    await navigator.share({ files: [file], title: name });
+    report("print", `shared ${name}`);
+    return true;
+  } catch (e) {
+    if (e && e.name === "AbortError") { report("print", "share cancelled"); return true; }
+    report("print", `share refused: ${e && e.name}`);
+    return false;
+  }
+}
+async function offerShareOrDownload(bytes, name, type) {
+  const file = new File([bytes], name, { type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    pendingShare = { bytes, name, type };
+    diag(`print: ${name} waiting for a touch to reach the share sheet`);
+    /* Try immediately as well: on the desktop a print often follows a click closely enough that
+       the gesture is still live, and there the share sheet is a nicety rather than the only way. */
+    if (await shareFile(bytes, name, type)) { pendingShare = null; return; }
+    return;
+  }
+  offerDownload(bytes, name, type);
+}
+/* Called from the touch handler: the gesture the share sheet needs. */
+async function flushPendingShare() {
+  if (!pendingShare) return;
+  const p = pendingShare; pendingShare = null;
+  if (!(await shareFile(p.bytes, p.name, p.type))) offerDownload(p.bytes, p.name, p.type);
+}
+window.pvShare = () => (pendingShare ? { name: pendingShare.name, bytes: pendingShare.bytes.length } : null);
+
 function offerDownload(bytes, name, type) {
   const url = URL.createObjectURL(new Blob([bytes], { type }));
   const a = document.createElement("a");
@@ -718,7 +872,7 @@ async function finishPrintJob(b64) {
     if (params.get("diag")) {                                      // keep a copy on the dev server (shots/print-*.pdf)
       try { fetch("/__print?ext=" + out.name.split(".").pop(), { method: "POST", body: out.bytes }); } catch (e) {}
     }
-    offerDownload(out.bytes, out.name, out.type);
+    await offerShareOrDownload(out.bytes, out.name, out.type);
   } catch (e) { report("print", "failed: " + e.message); }
 }
 
@@ -1007,7 +1161,7 @@ function guestTextFocus() {
    debounce, so a tap that moves the focus from one Edit into another does not flicker. A manual
    hold (caption long-press) overrides 0. */
 function guestWantsKeyboard(want, cls, flags) {
-  if (cls !== undefined) guestFocus = { want, cls: cls || "", flags: flags || "" };
+  if (cls !== undefined) { guestFocus = { want, cls: cls || "", flags: flags || "" }; syncA11yFocus(); }
   if (!want && guestTextFocus()) { kbdLog(`PVK 0 ${cls} ${flags} -> learned class takes text`); want = true; }
   /* A device with a real keyboard needs no hidden input: v86's own keyboard adapter takes the
      page's key events (scancodes, so Esc, arrows and F-keys work as they do on a PC); focusing the
@@ -2656,8 +2810,28 @@ window.addEventListener("paste", ev => {
    pass turns the level into what you see: the panel's green-grey tint, the grid, the backlight,
    the vignette. Keeping them apart matters -- run the cosmetics through the trail and the grid
    smears too, which looks like a broken compositor rather than a screen. */
-const lcdWanted = params.get("lcd") === "1";
-let lcd = null;
+/* On, and how bright and how contrasty, are the guest's to decide: LCD.EXE (guest/lcd) is a plain
+   Windows program with a check box and two scroll bars, and it reports "PVLCD <on> <bright>
+   <contrast>" on the debug channel whenever the user moves anything. The URL's ?lcd=1 is only the
+   initial state for a page that has never been told otherwise; what the guest last said is kept
+   here so a reload comes up the way it was left, and the guest keeps its own copy in WIN.INI. */
+let lcdOn = params.get("lcd") === "1";
+let lcdBright = 0.5, lcdContrast = 0.5;
+try {
+  const saved = JSON.parse(localStorage.getItem("pv.lcd") || "null");
+  if (saved) { lcdOn = !!saved.on; lcdBright = saved.bright; lcdContrast = saved.contrast; }
+} catch (e) {}
+function lcdSettings(on, bright, contrast) {
+  const was = lcdOn;
+  lcdOn = !!on;
+  lcdBright = Math.max(0, Math.min(1, bright / 100));
+  lcdContrast = Math.max(0, Math.min(1, contrast / 100));
+  try { localStorage.setItem("pv.lcd", JSON.stringify({ on: lcdOn, bright: lcdBright, contrast: lcdContrast })); } catch (e) {}
+  if (!lcdOn && was) { lcdOff(); needFull = true; invalidate(); }   // the composite underneath is intact
+  if (lcdOn) needFull = true;
+  diag(`lcd: ${lcdOn ? "on" : "off"} bright=${lcdBright.toFixed(2)} contrast=${lcdContrast.toFixed(2)}`);
+}
+let lcd = null, lcdAsked = false;
 
 const LCD_VERT = `attribute vec2 p; varying vec2 uv;
 void main() { uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
@@ -2691,9 +2865,13 @@ const LCD_LOOK = `precision mediump float;
 varying vec2 uv;
 uniform sampler2D lvl;
 uniform vec2 res, pitch;     // canvas pixels, and the size of one guest pixel in them
-uniform float t;
+uniform float t, bright, contrast;   // the guest's own two scroll bars, 0..1, 0.5 = as shipped
 void main() {
   float l = texture2D(lvl, uv).r;
+  /* Contrast pivots about mid grey so neither end runs away, and brightness is the backlight's
+     own knob -- these panels had a wheel on the bezel for each, and this is what those did. */
+  l = clamp(0.5 + (l - 0.5) * (0.55 + 1.9 * contrast), 0.0, 1.0);
+  l = clamp(l * (0.55 + 0.9 * bright), 0.0, 1.0);
   /* The panel is not neutral grey: it is a green-grey, warmer in the shadows than the highlights.
      These two are sampled from the photograph -- #4a4f48 at its darkest, #c8ccc0 at its lightest. */
   vec3 dark = vec3(0.075, 0.090, 0.070);
@@ -2823,8 +3001,8 @@ function lcdBind(st, prog) {
    still settling for a few frames and then this stops drawing entirely, which is what keeps the
    compositor's "most frames cost nothing" property mostly intact. */
 function lcdFrame(changed) {
-  if (!lcdWanted) return;
-  if (!lcd) { lcd = initLcd(); if (!lcd) { lcdOff(); return; } }
+  if (!lcdOn) return;
+  if (!lcd) { lcd = initLcd(); if (!lcd) { lcdOn = false; lcdOff(); return; } }
   const st = lcd, { gl } = st, src = $("pres");
   if (!src || !src.width) return;
   if (changed) st.settle = 22;              // the lag needs this many frames to land within 1/255
@@ -2861,6 +3039,8 @@ function lcdFrame(changed) {
   const pitch = Math.max(1, (view && view.scale ? view.scale : 1) * dpr);
   gl.uniform2f(gl.getUniformLocation(st.look, "pitch"), pitch, pitch);
   gl.uniform1f(gl.getUniformLocation(st.look, "t"), performance.now() / 1000);
+  gl.uniform1f(gl.getUniformLocation(st.look, "bright"), lcdBright);
+  gl.uniform1f(gl.getUniformLocation(st.look, "contrast"), lcdContrast);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
   st.cur = next;
@@ -2870,7 +3050,7 @@ function lcdOff() {
   if (cv) cv.classList.remove("on");
   lcd = null;
 }
-window.pvLcd = () => (lcd ? { on: true, w: lcd.w, h: lcd.h, settle: lcd.settle } : { on: false, wanted: lcdWanted });
+window.pvLcd = () => ({ on: lcdOn, bright: lcdBright, contrast: lcdContrast, live: !!lcd, w: lcd ? lcd.w : 0, h: lcd ? lcd.h : 0, settle: lcd ? lcd.settle : 0 });
 
 /* ------------------------------------------------------------------------- mode controller */
 /* A mode change tears down the canvas and the guest repaints from scratch, so the screen goes
@@ -3839,6 +4019,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
   c.addEventListener("touchstart", ev => {
     unlockAudio("touchstart");
     offerClipboard("touch");                            // iOS only lets us write inside a gesture
+    flushPendingShare();                                // ...and a finished print needs one too
     stopGlide();                                          // a finger down stops the glide, as it should
     // The user dismissed the keyboard with the keyboard's own key: the input is still focused but
     // nothing shows, and iOS ignores focus() on an already-focused element. Blur now so the focus
