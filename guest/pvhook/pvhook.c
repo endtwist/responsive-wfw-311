@@ -494,6 +494,20 @@ static void place_owned(HWND dlg, HWND owner, int w, int h, int FAR *px, int FAR
     RECT orc;
     int colX, colR, frameH, x, y;
     GetWindowRect(owner, &orc);
+    /* Desktop mode has no columns: the screen is the viewport and Windows' own placement is
+       right. Running the column arithmetic below there put a dialog at its owner's right edge --
+       correct for a 640-wide column, off the side of the viewport for a desktop -- which is the
+       MS-DOS Prompt's exit box appearing half off the screen. Centre it on its owner and clamp
+       to the real screen instead. */
+    if (g_desktop) {
+        int sw = (int)GetSystemMetrics(SM_CXSCREEN), sh = (int)GetSystemMetrics(SM_CYSCREEN);
+        int cx = (orc.left + orc.right - w) / 2, cy = (orc.top + orc.bottom - h) / 2;
+        if (cx + w > sw) cx = sw - w;
+        if (cy + h > sh) cy = sh - h;
+        *px = cx < 0 ? 0 : cx;
+        *py = cy < 0 ? 0 : cy;
+        return;
+    }
     if (IsIconic(owner)) { orc.left = 0; orc.top = 0; orc.right = shell_w(); orc.bottom = shell_h(); }
     if (orc.left < SLOT_W) {                          /* the shell's, or something in the desktop column */
         colX = 0; colR = shell_w(); frameH = shell_h();

@@ -2477,7 +2477,7 @@ function presentOnce() {
     comp.planMs += performance.now() - tPlan;
     comp.frames++;
     comp.viewPx += vw * vh;
-    if (!dmg) { comp.empty++; return; }                  // nothing changed: the canvas is already right
+    if (!dmg) { comp.empty++; lcdFrame(false); return; }   // nothing changed: the canvas is already right
     for (const r of dmg.rects) comp.dmgPx += r.w * r.h;
     /* Safe areas and letterbox. On the desktop the leftovers are the few columns the mode
        rounding leaves and whatever a half-finished resize has uncovered, and next to a Windows
@@ -2530,6 +2530,7 @@ function presentOnce() {
     lastBgGen = dirtyGen;
     needFull = false;
     composeForGuest(vw, vh);
+    lcdFrame(true);
     for (const k of layerGen.keys()) if (!placed.some(w => w.key === k)) layerGen.delete(k);
     /* "Has the guest painted?" used to be a per-frame getImageData of two dozen source rows.
        The worker now says exactly which rows changed, so the signature is its running count of
@@ -2598,6 +2599,221 @@ window.addEventListener("paste", ev => {
   const t = ev.clipboardData && ev.clipboardData.getData("text");
   if (t) { pasteToGuest(t); ev.preventDefault(); }
 });
+
+/* --------------------------------------------------------------------------- LCD filter ---
+   A 1992 passive-matrix panel, as a post-process over the finished composite (?lcd=1). Josh's
+   photograph of ProSell Professional on a laptop of that era is the reference: no colour at all,
+   blacks lifted to a warm grey, a cyan-white bloom along the edge the backlight tube runs down, a
+   visible pixel grid, and the smear a slow panel leaves behind anything that moves.
+
+   It is purely a display. `#pres` stays the input surface underneath, so the composite geometry,
+   the hit testing and the pointer are untouched, and nothing about the guest changes.
+
+   Two passes. The first computes the panel's *drive level* -- luminance through a lifted-black
+   curve -- and lags it towards the previous frame's level asymmetrically: a pixel going dark
+   lags more than one going light, which is what a passive matrix does and what makes this read
+   as an LCD rather than a grey CRT. That level is kept in a texture and ping-ponged. The second
+   pass turns the level into what you see: the panel's green-grey tint, the grid, the backlight,
+   the vignette. Keeping them apart matters -- run the cosmetics through the trail and the grid
+   smears too, which looks like a broken compositor rather than a screen. */
+const lcdWanted = params.get("lcd") === "1";
+let lcd = null;
+
+const LCD_VERT = `attribute vec2 p; varying vec2 uv;
+void main() { uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
+
+/* Pass 1: drive level, with the panel's lag. */
+const LCD_LAG = `precision mediump float;
+varying vec2 uv;
+uniform sampler2D src, prev;
+uniform vec2 res;
+uniform float seed;          // 1.0 on the first frame: no history to lag towards
+void main() {
+  /* A mild horizontal bleed first: the column drivers are analogue and neighbouring pixels pull
+     on each other, which is why text on these panels looks softer across than down. */
+  float dx = 1.0 / res.x;
+  vec3 c0 = texture2D(src, uv).rgb;
+  vec3 cl = texture2D(src, uv - vec2(dx, 0.0)).rgb;
+  vec3 cr = texture2D(src, uv + vec2(dx, 0.0)).rgb;
+  vec3 c = c0 * 0.7 + (cl + cr) * 0.15;
+  float l = dot(c, vec3(0.299, 0.587, 0.114));
+  /* Lifted black, compressed white: nothing in the photograph is near black or near white. */
+  float target = mix(0.10, 0.92, pow(l, 0.85));
+  float was = texture2D(prev, uv).r;
+  /* Asymmetric response: rising (going lighter) settles faster than falling. */
+  float k = target > was ? 0.55 : 0.28;
+  float now = mix(was, target, k);
+  gl_FragColor = vec4(mix(now, target, seed), 0.0, 0.0, 1.0);
+}`;
+
+/* Pass 2: what the eye gets. */
+const LCD_LOOK = `precision mediump float;
+varying vec2 uv;
+uniform sampler2D lvl;
+uniform vec2 res, pitch;     // canvas pixels, and the size of one guest pixel in them
+uniform float t;
+void main() {
+  float l = texture2D(lvl, uv).r;
+  /* The panel is not neutral grey: it is a green-grey, warmer in the shadows than the highlights.
+     These two are sampled from the photograph -- #4a4f48 at its darkest, #c8ccc0 at its lightest. */
+  vec3 dark = vec3(0.285, 0.305, 0.278);
+  vec3 light = vec3(0.855, 0.875, 0.815);
+  vec3 c = mix(dark, light, l);
+
+  /* The grid, at the real guest-pixel pitch so it lands on pixel boundaries rather than beating
+     against them, and only when a guest pixel is big enough on this display to have a visible
+     gap: at two device pixels a one-pixel gap is half the cell, which reads as a dark screen
+     rather than a grid. */
+  vec2 px = uv * res;
+  vec2 f = fract(px / max(pitch, vec2(1.0)));
+  float on = step(2.5, pitch.x);
+  float gx = mix(1.0, f.x > 1.0 - 1.0 / max(pitch.x, 2.0) ? 0.965 : 1.0, on);
+  float gy = mix(1.0, f.y > 1.0 - 1.0 / max(pitch.y, 2.0) ? 0.975 : 1.0, on);
+  c *= gx * gy;
+
+  /* The backlight. A cold tube runs down the left edge and along the bottom, and its glow carries
+     right across the panel -- in the photograph the whole screen is lit and the near corner is
+     nearly white. Then the vignette every one of these had. */
+  float edge = exp(-uv.x * 4.5) + exp(-(1.0 - uv.y) * 5.0) * 0.9;
+  c += vec3(0.13, 0.17, 0.17) * edge;
+  c += vec3(0.05, 0.06, 0.05);                  // the panel is lit, not merely reflective
+  vec2 v = uv - 0.5;
+  c *= 1.0 - 0.28 * dot(v, v);
+
+  /* And the tube's own flicker: half a percent, at a rate that is not a multiple of any frame
+     rate, so it never sits still and never strobes. */
+  c *= 1.0 + 0.005 * sin(t * 43.7);
+
+  gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}`;
+
+function lcdCompile(gl, type, src, what) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    report("lcd", `${what} failed to compile: ${gl.getShaderInfoLog(sh)}`);
+    return null;
+  }
+  return sh;
+}
+function lcdProgram(gl, frag, what) {
+  const v = lcdCompile(gl, gl.VERTEX_SHADER, LCD_VERT, "vertex shader");
+  const f = lcdCompile(gl, gl.FRAGMENT_SHADER, frag, what);
+  if (!v || !f) return null;
+  const p = gl.createProgram();
+  gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    report("lcd", `${what} failed to link: ${gl.getProgramInfoLog(p)}`);
+    return null;
+  }
+  return p;
+}
+function lcdTexture(gl, w, h) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (w) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  return t;
+}
+function initLcd() {
+  const cv = $("lcd"), src = $("pres");
+  if (!cv || !src) return null;
+  const gl = cv.getContext("webgl", { alpha: false, antialias: false, depth: false, preserveDrawingBuffer: false });
+  if (!gl) { report("lcd", "no webgl: the filter stays off"); return null; }
+  const lag = lcdProgram(gl, LCD_LAG, "lag pass"), look = lcdProgram(gl, LCD_LOOK, "look pass");
+  if (!lag || !look) return null;
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const st = {
+    gl, cv, lag, look, quad, tex: lcdTexture(gl, 0, 0),
+    fbo: [gl.createFramebuffer(), gl.createFramebuffer()],
+    lvl: [null, null], cur: 0, w: 0, h: 0, seed: 1, settle: 0, gen: -1,
+  };
+  cv.classList.add("on");
+  report("lcd", "filter on");
+  return st;
+}
+/* Sized to the composite, in its device pixels: one texel per composite pixel, so the grid can
+   sit on guest-pixel boundaries instead of interfering with them. */
+function lcdResize(st, w, h) {
+  if (st.w === w && st.h === h) return;
+  const { gl } = st;
+  st.w = w; st.h = h;
+  st.cv.width = w; st.cv.height = h;
+  for (let i = 0; i < 2; i++) {
+    if (st.lvl[i]) gl.deleteTexture(st.lvl[i]);
+    st.lvl[i] = lcdTexture(gl, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, st.fbo[i]);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, st.lvl[i], 0);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  st.seed = 1;                              // no history at this size
+}
+function lcdBind(st, prog) {
+  const { gl } = st;
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, st.quad);
+  const p = gl.getAttribLocation(prog, "p");
+  gl.enableVertexAttribArray(p);
+  gl.vertexAttribPointer(p, 2, gl.FLOAT, false, 0, 0);
+}
+/* One filtered frame. `changed` says whether the composite moved; when it has not, the trail is
+   still settling for a few frames and then this stops drawing entirely, which is what keeps the
+   compositor's "most frames cost nothing" property mostly intact. */
+function lcdFrame(changed) {
+  if (!lcdWanted) return;
+  if (!lcd) { lcd = initLcd(); if (!lcd) { lcdOff(); return; } }
+  const st = lcd, { gl } = st, src = $("pres");
+  if (!src || !src.width) return;
+  if (changed) st.settle = 22;              // the lag needs this many frames to land within 1/255
+  else if (st.settle > 0) st.settle--;
+  else return;
+  lcdResize(st, src.width, src.height);
+  const prev = st.cur, next = 1 - st.cur;
+
+  gl.bindTexture(gl.TEXTURE_2D, st.tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+
+  // pass 1: the panel's drive level, lagged
+  gl.bindFramebuffer(gl.FRAMEBUFFER, st.fbo[next]);
+  gl.viewport(0, 0, st.w, st.h);
+  lcdBind(st, st.lag);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, st.tex);
+  gl.uniform1i(gl.getUniformLocation(st.lag, "src"), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, st.lvl[prev]);
+  gl.uniform1i(gl.getUniformLocation(st.lag, "prev"), 1);
+  gl.uniform2f(gl.getUniformLocation(st.lag, "res"), st.w, st.h);
+  gl.uniform1f(gl.getUniformLocation(st.lag, "seed"), st.seed);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  st.seed = 0;
+
+  // pass 2: the look
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, st.w, st.h);
+  lcdBind(st, st.look);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, st.lvl[next]);
+  gl.uniform1i(gl.getUniformLocation(st.look, "lvl"), 0);
+  gl.uniform2f(gl.getUniformLocation(st.look, "res"), st.w, st.h);
+  const dpr = window.devicePixelRatio || 1;
+  const pitch = Math.max(1, (view && view.scale ? view.scale : 1) * dpr);
+  gl.uniform2f(gl.getUniformLocation(st.look, "pitch"), pitch, pitch);
+  gl.uniform1f(gl.getUniformLocation(st.look, "t"), performance.now() / 1000);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  st.cur = next;
+}
+function lcdOff() {
+  const cv = $("lcd");
+  if (cv) cv.classList.remove("on");
+  lcd = null;
+}
+window.pvLcd = () => (lcd ? { on: true, w: lcd.w, h: lcd.h, settle: lcd.settle } : { on: false, wanted: lcdWanted });
 
 /* ------------------------------------------------------------------------- mode controller */
 /* A mode change tears down the canvas and the guest repaints from scratch, so the screen goes

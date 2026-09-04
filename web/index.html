@@ -29,6 +29,11 @@
      replaces this with the CSS shape the guest reports (PVC), and the guest's drawn pointer is the
      one that goes away -- the browser's is the real mouse, so it never lags. */
   #pres { position:fixed; inset:0; z-index:1; touch-action:none; display:block; image-rendering: pixelated; cursor:none; }
+  /* The LCD filter (?lcd=1) draws the finished composite through a shader on top of it. It never
+     takes a touch: #pres stays the input surface underneath, so the geometry, the hit testing and
+     the pointer are exactly as they are without it. */
+  #lcd { position:fixed; inset:0; z-index:2; display:none; pointer-events:none; }
+  #lcd.on { display:block; }
   #screen_container canvas { display:block; touch-action:none;
                              transition: width .18s ease-out, height .18s ease-out; }
   /* The page draws nothing of its own on any display: the desktop is the whole viewport (the old
@@ -67,6 +72,7 @@
 #keybar .gap { flex:0 0 6px; }
 </style>
 <canvas id="pres"></canvas>
+<canvas id="lcd"></canvas>
 <div id="keybar"></div>
 <!-- The bar is folded away by default: this small tab on top of the keyboard opens it. -->
 <button id="keybartab" aria-label="extra keys">⌨ keys</button>
