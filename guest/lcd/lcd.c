@@ -137,6 +137,11 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         SendMessage(hOn, BM_SETCHECK, g_on ? 1 : 0, 0L);
         return 0;
     }
+    case WM_SETFOCUS:
+        /* Without this the focus sits on the frame, no child ever has it, and IsDialogMessage has
+           nothing to work with: Tab, Space and Alt+L all did nothing. */
+        SetFocus(hOn);
+        return 0;
     case WM_COMMAND:
         if (wParam == ID_ON) {
             g_on = (int)SendMessage(hOn, BM_GETCHECK, 0, 0L);
@@ -177,11 +182,23 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     int h;
 
     load();
-    /* "/report" is how the host asks for the settings at startup: one line on the debug channel
-       and no window at all, so a page reload comes up with the screen the user left. */
-    if (cmd && (cmd[0] == '/' || cmd[0] == '-') && (cmd[1] == 'r' || cmd[1] == 'R')) {
-        report();
-        return 0;
+    /* Three things the host can ask for without a window, all of them one line on the debug channel
+       and an immediate exit:
+         /report   what the settings are, so a page reload comes up with the screen the user left
+         /on /off  set the screen, because the host was told to by ?lcd=1 or ?lcd=0 in the URL.
+       The last two matter for more than the filter itself: without them the page could have the
+       LCD on while this program's own checkbox said it was off, which is not a control panel, it
+       is a decoration. */
+    if (cmd && (cmd[0] == '/' || cmd[0] == '-')) {
+        char c1 = cmd[1] >= 'A' && cmd[1] <= 'Z' ? (char)(cmd[1] + 32) : cmd[1];
+        char c2 = cmd[2] >= 'A' && cmd[2] <= 'Z' ? (char)(cmd[2] + 32) : cmd[2];
+        if (c1 == 'r') { report(); return 0; }
+        if (c1 == 'o' && (c2 == 'n' || c2 == 'f')) {
+            g_on = (c2 == 'n');
+            save();
+            report();
+            return 0;
+        }
     }
 
     if (!prev) {

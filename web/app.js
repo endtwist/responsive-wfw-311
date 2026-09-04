@@ -628,7 +628,13 @@ function guestIsReady() {
      and exits without a window; WIN.INI's run= cannot carry an argument (Windows reads the argument
      as a second program to launch and puts up "cannot find file"), so the host asks once the
      desktop is up instead. */
-  if (!lcdAsked) { lcdAsked = true; setTimeout(() => sendCommandString(CMD_RUN, "LCD.EXE /report"), 1200); }
+  /* Ask the guest what the screen controls were left set to -- or tell it, when the URL has already
+     decided. ?lcd=1 with the Screen app's own box unticked is not a control panel. */
+  if (!lcdAsked) {
+    lcdAsked = true;
+    const arg = lcdForced === null ? "/report" : lcdForced ? "/on" : "/off";
+    setTimeout(() => sendCommandString(CMD_RUN, `LCD.EXE ${arg}`), 1200);
+  }
   if (!slipNet) slipNet = initNet();                 // COM2 becomes a dial-up line
   if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
   /* The browser's pointer takes over from here (see applyCursorShape). PVMON resends PVC with
@@ -2973,10 +2979,11 @@ window.addEventListener("paste", ev => {
    <contrast>" on the debug channel whenever the user moves anything. The URL's ?lcd=1 is only the
    initial state for a page that has never been told otherwise; what the guest last said is kept
    here so a reload comes up the way it was left, and the guest keeps its own copy in WIN.INI. */
-/* ?lcd=1 forces the filter on and ?lcd=0 forces it off, and both outrank everything else: what was
-   left in localStorage, and what the guest's own Screen app reports at startup. A switch in the URL
-   that the guest could then turn off behind you is not a switch. With no parameter at all the guest
-   decides, which is the normal case. */
+/* ?lcd=1 turns the filter on and ?lcd=0 turns it off, ahead of anything left in localStorage, and
+   the setting is pushed into the guest at startup (LCD.EXE /on or /off) so the Screen app's own
+   checkbox agrees with it. From there the Screen app is in charge: unticking the box turns the
+   effect off, whatever the URL said. With no parameter the guest decides from the start, which is
+   the normal case. */
 const lcdForced = params.get("lcd") === "1" ? true : params.get("lcd") === "0" ? false : null;
 let lcdOn = lcdForced === true;
 let lcdBright = 0.5, lcdContrast = 0.5;
@@ -2986,7 +2993,7 @@ try {
 } catch (e) {}
 function lcdSettings(on, bright, contrast) {
   const was = lcdOn;
-  lcdOn = lcdForced === null ? !!on : lcdForced;
+  lcdOn = !!on;                     // the Screen app has the last word, including over ?lcd=
   lcdBright = Math.max(0, Math.min(1, bright / 100));
   lcdContrast = Math.max(0, Math.min(1, contrast / 100));
   try { localStorage.setItem("pv.lcd", JSON.stringify({ on: lcdOn, bright: lcdBright, contrast: lcdContrast })); } catch (e) {}

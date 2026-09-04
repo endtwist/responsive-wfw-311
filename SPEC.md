@@ -3756,3 +3756,11 @@ is the normal case.
 it read as a stain (Josh, on a screenshot of the MS-DOS Prompt over Program Manager). The tube edge
 stays -- that is the part the photograph is emphatic about -- and the broad diffuser patches lost
 about half their strength, in both the lift they give the darks and the multiply across everything.
+
+**The Screen app and ?lcd= agree, and the app wins.** `?lcd=1` with the Screen app's own box
+unticked is not a control panel, it is a decoration -- so the URL setting is now pushed into the
+guest at startup (`LCD.EXE /on` or `/off`, which write WIN.INI and exit without a window, next to
+the existing `/report`), and the box comes up ticked. From there the app is in charge: unticking it
+reports `PVLCD 0` and the host turns the filter off, whatever the URL said. LCD.EXE also sets the
+focus to its checkbox on WM_SETFOCUS -- without that the focus sat on the frame, no child ever had
+it, and Tab, Space and Alt+L all did nothing.
