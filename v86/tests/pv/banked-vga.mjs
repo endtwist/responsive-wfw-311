@@ -23,7 +23,10 @@ const cpu = {
     write8(a, v) { new Uint8Array(wasm_memory.buffer)[(a >>> 0) - LFB] = v; },
     device_raise_irq() {}, device_lower_irq() {},
 };
-const bus = { register() {}, send() {} };
+/* The device registers its bus handlers at construction; the tests below drive a few of them
+   (the composite) directly, so the stub keeps them rather than dropping them on the floor. */
+const busHandlers = new Map();
+const bus = { register(name, fn, ctx) { busHandlers.set(name, fn.bind(ctx)); }, send(name, data) { const f = busHandlers.get(name); if(f) f(data); } };
 const screen = new Proxy({}, { get: (t, k) => (k in t ? t[k] : () => {}) });
 const vga = new VGAScreen(cpu, bus, screen, VGA_MEM);
 const svga = vga.svga_memory;
@@ -317,6 +320,60 @@ vga.pv_planar_disabled = true; eq(mode_now(), 0, "--nofast sends every write to 
 vga.pv_planar_disabled = false;
 seq(4, 0x04); eq(mode_now(), 1, "chain-4 off again");
 delete cpu.pv_planar_set;
+
+// --- 13. the scaled blit and the composite (design B stage 3): a picture of what the user sees,
+//     kept past the frame buffer where Windows never paints and the guest can read it back
+eq(vga.svga_register_read(0x26) & 2, 2, "CTRL reports the scaled-blit capability too");
+const bltScaled = (sx, sy, dx, dy, sw, sh, dw, dh) => {
+    vga.port1CE_write32(0x20 | sx << 16); vga.port1CE_write32(0x21 | sy << 16);
+    vga.port1CE_write32(0x22 | dx << 16); vga.port1CE_write32(0x23 | dy << 16);
+    vga.port1CE_write32(0x24 | sw << 16); vga.port1CE_write32(0x25 | sh << 16);
+    vga.port1CE_write32(0x27 | dw << 16); vga.port1CE_write32(0x28 | dh << 16);
+    vga.port1CE_write32(0x26 | 2 << 16);
+};
+{
+    const mem = vga.svga_mem();
+    mem.fill(0, 0, 40 * pitch);
+    for(let y = 0; y < 8; y++) for(let x = 0; x < 8; x++) mem[y * pitch + x] = x < 4 ? 0x11 : 0x22;
+    bltScaled(0, 0, 100, 0, 8, 8, 4, 4);              // half size: every other source pixel
+    eq(px(100, 0), 0x11, "scaled blit halves: left half keeps the left colour");
+    eq(px(103, 0), 0x22, "scaled blit halves: right half keeps the right colour");
+    eq(px(100, 3), 0x11, "scaled blit halves rows too");
+    bltScaled(0, 0, 200, 0, 8, 8, 16, 16);            // double size: each source pixel twice
+    eq(px(207, 0), 0x11, "scaled blit doubles: the left half is twice as wide");
+    eq(px(208, 0), 0x22, "scaled blit doubles: the right half starts where it should");
+    eq(px(200, 15), 0x11, "scaled blit doubles rows too");
+    bltScaled(0, 0, 300, 0, 8, 8, 0, 4);              // nonsense sizes are refused, not fatal
+    eq(px(300, 0), 0, "a zero destination is refused");
+}
+{
+    // the composite is only accepted when there is video memory past the visible screen for it
+    const tall = vga.svga_height;
+    bus.send("pv-composite-size", [64, 32]);
+    eq(vga.svga_register_read(0x29), tall, "the composite starts on the row after the screen");
+    eq(vga.svga_register_read(0x2A), 64, "the composite reports its width");
+    eq(vga.svga_register_read(0x2B), 32, "the composite reports its height");
+    bus.send("pv-composite-size", [pitch, 0x7000]);
+    eq(vga.svga_register_read(0x29), 0, "a composite that does not fit video memory is refused");
+    bus.send("pv-composite-size", [64, 32]);
+    const mem = vga.svga_mem();
+    mem.fill(0, 0, 40 * pitch);
+    mem.fill(0, tall * pitch, (tall + 32) * pitch);
+    for(let y = 0; y < 8; y++) for(let x = 0; x < 8; x++) mem[y * pitch + x] = 0x33;
+    for(let y = 0; y < 4; y++) for(let x = 0; x < 4; x++) mem[y * pitch + 500 + x] = 0x44;
+    bus.send("pv-compose", [
+        { sx: 0, sy: 0, sw: 8, sh: 8, dx: 0, dy: 0 },                          // 1:1
+        { sx: 500, sy: 0, sw: 4, sh: 4, dx: 16, dy: 0, dw: 8, dh: 8 },         // scaled
+    ]);
+    eq(px(0, tall), 0x33, "the composite holds the first layer");
+    eq(px(7, tall + 7), 0x33, "...all of it");
+    eq(px(16, tall), 0x44, "the composite holds the second, scaled");
+    eq(px(23, tall + 7), 0x44, "...at its destination size");
+    eq(px(24, tall), 0, "and nothing beyond it");
+    bus.send("pv-composite-size", [0, 0]);
+    bus.send("pv-compose", [{ sx: 0, sy: 0, sw: 8, sh: 8, dx: 32, dy: 0 }]);
+    eq(px(32, tall), 0, "with no composite reserved, composing does nothing");
+}
 
 console.log(`${checks - failures}/${checks} checks passed`);
 process.exit(failures ? 1 : 0);

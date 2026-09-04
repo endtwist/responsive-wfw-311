@@ -375,7 +375,17 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
      * the adapter do the copy with the pitch it already knows, so the same scroll is seven
      * port writes. See guest/driver/port/SRC/PVBLT.ASM.
      */
-    this.pv_blt = new Int32Array(6);  // src_x, src_y, dst_x, dst_y, width, height
+    this.pv_blt = new Int32Array(8);  // src_x, src_y, dst_x, dst_y, width, height, dst_w, dst_h
+    /* The composite: a copy of what the user is actually looking at, kept in video memory past
+       the visible screen. Windows 3.1 draws each window where the window is, and this machine
+       puts windows in tiles the user never sees directly, so the frame buffer is no longer a
+       picture of the screen -- which is what anything reading the screen back (a capture, an XOR
+       rubber band, a program that composes thumbnails of its own) expects to find. The host
+       composes into it; the guest may read it. Rows past the frame buffer, so Windows never
+       paints over it. */
+    this.pv_comp_row = 0;             // first row of the composite, 0 = none
+    this.pv_comp_w = 0;
+    this.pv_comp_h = 0;
     this.pv_blt_count = 0;            // blits executed (tools/redraw-bench.mjs reports it)
     this.pv_blt_disabled = false;     // set to refuse the capability, for A/B testing
     /**
@@ -415,6 +425,18 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.pv_cursor_y = 0;
     this.pv_debug_line = "";
     bus.register("pv-request-mode", function(data) { this.pv_request_mode(data[0], data[1]); }, this);
+    /* [w, h]: reserve the composite past the frame buffer, or [0, 0] to keep none. It fits only
+       if there is video memory left after the visible screen. */
+    bus.register("pv-composite-size", function(data) {
+        const w = data[0] | 0, h = data[1] | 0, pitch = this.svga_pitch_px();
+        const row = this.svga_height;
+        if(w <= 0 || h <= 0 || !pitch || (row + h) * pitch > this.vga_memory_size) {
+            this.pv_comp_row = this.pv_comp_w = this.pv_comp_h = 0;
+            return;
+        }
+        this.pv_comp_row = row; this.pv_comp_w = w; this.pv_comp_h = h;
+    }, this);
+    bus.register("pv-compose", function(data) { this.pv_compose(data); }, this);
     bus.register("pv-command", function(data) { this.pv_cmd_arg = data[1] & 0xFFFF; this.pv_cmd = data[0] & 0xFFFF; }, this);
     bus.register("pv-mouse-abs", function(data) {
         // [x, y] normalised to 0..65535, or null to return the mouse driver to relative motion
@@ -972,6 +994,58 @@ VGAScreen.prototype.pv_blt_screen_copy = function()
     if(lo < this.js_dirty_min) this.js_dirty_min = lo;
     if(hi > this.js_dirty_max) this.js_dirty_max = hi;
     this.pv_blt_count++;
+};
+
+/**
+ * PV 2D blit, scaled (DISPI 0x26 bit 1): the same rectangle copy, but the destination has a size
+ * of its own and the source is walked with a fixed-point step -- nearest neighbour, which is what
+ * GDI's COLORONCOLOR stretch does anyway, so a guest StretchBlt lands on the same pixels it would
+ * have chosen for itself. Source and destination must not overlap; that is a caller error and is
+ * left to the caller, as the unscaled path leaves overlap to its own row ordering.
+ */
+VGAScreen.prototype.pv_blt_scaled = function()
+{
+    const p = this.pv_blt;
+    const sx = p[0], sy = p[1], dx = p[2], dy = p[3], sw = p[4], sh = p[5], dw = p[6], dh = p[7];
+    if(sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    const pitch = this.svga_pitch_px();
+    const mem = this.svga_mem();
+    const rows = Math.min(dh, ((this.vga_memory_size - dx) / pitch | 0) - dy);
+    const cols = Math.min(dw, pitch - dx);
+    if(rows <= 0 || cols <= 0) return;
+    // 16.16 fixed point: the source step per destination pixel
+    const stepX = Math.floor(sw * 65536 / dw), stepY = Math.floor(sh * 65536 / dh);
+    for(let j = 0; j < rows; j++)
+    {
+        const srcRow = sy + ((j * stepY) >> 16);
+        if(srcRow < 0 || (srcRow + 1) * pitch > this.vga_memory_size) break;
+        const s = srcRow * pitch + sx, d = (dy + j) * pitch + dx;
+        let u = 0;
+        for(let i = 0; i < cols; i++, u += stepX) mem[d + i] = mem[s + (u >> 16)];
+    }
+    const lo = dy * pitch + dx, hi = (dy + rows - 1) * pitch + dx + cols - 1;
+    if(lo < this.js_dirty_min) this.js_dirty_min = lo;
+    if(hi > this.js_dirty_max) this.js_dirty_max = hi;
+    this.pv_blt_count++;
+};
+
+/**
+ * Compose the visible picture into the composite rows. `layers` is what the host is drawing, back
+ * to front: {sx, sy, sw, sh, dx, dy, dw, dh} in guest pixels, destination relative to the
+ * composite's own origin. Each entry is one blit, scaled when the sizes differ, so the result is
+ * the same picture the host puts on the canvas, in video memory where the guest can read it.
+ */
+VGAScreen.prototype.pv_compose = function(layers)
+{
+    if(!this.pv_comp_row || !layers || !layers.length) return;
+    const p = this.pv_blt, base = this.pv_comp_row;
+    for(const L of layers)
+    {
+        p[0] = L.sx | 0; p[1] = L.sy | 0; p[2] = L.dx | 0; p[3] = base + (L.dy | 0);
+        p[4] = L.sw | 0; p[5] = L.sh | 0; p[6] = (L.dw || L.sw) | 0; p[7] = (L.dh || L.sh) | 0;
+        if(p[4] === p[6] && p[5] === p[7]) this.pv_blt_screen_copy();
+        else this.pv_blt_scaled();
+    }
 };
 
 /** Planar (chain-4 off) write of one CPU byte through the write-mode pipeline to the four plane bytes at `base` of `mem`. */
@@ -2608,11 +2682,20 @@ VGAScreen.prototype.port1CF_write = function(value)
             // PV BLT src_x, src_y, dst_x, dst_y, width, height (pixels)
             this.pv_blt[this.dispi_index - 0x20] = value & 0xFFFF;
             break;
+        case 0x27: case 0x28:
+            // PV BLT dst_w, dst_h: the destination size for a scaled blit
+            this.pv_blt[this.dispi_index - 0x27 + 6] = value & 0xFFFF;
+            break;
         case 0x26:
-            // PV BLT CTRL: bit 0 executes a screen-to-screen copy of the programmed rectangle
+            // PV BLT CTRL: bit 0 executes a screen-to-screen copy of the programmed rectangle,
+            // bit 1 the same copy scaled into dst_w x dst_h
             if(value & 1)
             {
                 this.pv_blt_screen_copy();
+            }
+            else if(value & 2)
+            {
+                this.pv_blt_scaled();
             }
             break;
         case 8:
@@ -2831,9 +2914,18 @@ VGAScreen.prototype.svga_register_read = function(n)
             return this.pv_mouse_flags;
         case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25:
             return this.pv_blt[n - 0x20];
+        case 0x27: case 0x28:
+            return this.pv_blt[n - 0x27 + 6];
+        case 0x29:
+            return this.pv_comp_row;      // first row of the composite (0: the host keeps none)
+        case 0x2A:
+            return this.pv_comp_w;
+        case 0x2B:
+            return this.pv_comp_h;
         case 0x26:
-            // PV BLT capability: bit 0 = screen-to-screen copy. 0 when disabled for A/B.
-            return (this.svga_enabled && this.svga_bpp === 8 && !this.pv_blt_disabled) ? 1 : 0;
+            // PV BLT capability: bit 0 = screen-to-screen copy, bit 1 = the same scaled.
+            // 0 when disabled for A/B.
+            return (this.svga_enabled && this.svga_bpp === 8 && !this.pv_blt_disabled) ? 3 : 0;
 
         case 8:
             // x offset

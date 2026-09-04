@@ -2488,6 +2488,7 @@ function presentOnce() {
        of the damage, so nothing of it was left behind the clip. */
     lastBgGen = dirtyGen;
     needFull = false;
+    composeForGuest(vw, vh);
     for (const k of layerGen.keys()) if (!placed.some(w => w.key === k)) layerGen.delete(k);
     /* "Has the guest painted?" used to be a per-frame getImageData of two dozen source rows.
        The worker now says exactly which rows changed, so the signature is its running count of
@@ -2497,6 +2498,33 @@ function presentOnce() {
 requestAnimationFrame(present);
 window.pvPresent = present;
 window.pvGuestCursor = () => guestCursor;
+
+/* The composite for the guest (?compose=1). The frame buffer stopped being a picture of the
+   screen when windows moved into tiles: what the user sees is this arrangement of them, and it
+   exists only on the canvas, where nothing inside the guest can reach it. So the same arrangement
+   is sent to the adapter, which blits it into video memory past the visible screen -- somewhere
+   Windows never paints -- for anything in the guest that wants to read the screen back: a capture,
+   a thumbnail, a program composing its own view. Each layer is one blit of its whole window
+   rectangle, so the composite is very slightly coarser than the canvas, where chrome and client
+   are drawn at their own scales.
+
+   Off by default: nothing in the guest reads it yet, and it costs a message and a few blits per
+   changed frame. */
+const composeWanted = params.get("compose") === "1";
+let composeSized = 0;
+function composeForGuest(vw, vh) {
+  if (!composeWanted || !placed.length) return;
+  const key = vw * 65536 + vh;
+  if (composeSized !== key) { emulator.bus.send("pv-composite-size", [Math.round(vw), Math.round(vh)]); composeSized = key; }
+  const list = [{ sx: view.x, sy: view.y, sw: view.w, sh: view.h,
+                  dx: Math.round(view.ox), dy: 0,
+                  dw: Math.round(view.w * view.scale), dh: Math.round(view.h * view.scale) }];
+  for (const w of placed) {
+    if (w.shellCopy) continue;                      // the column is already the background above
+    list.push({ sx: w.wx, sy: w.wy, sw: w.ww, sh: w.wh, dx: w.x, dy: w.y, dw: w.hw, dh: w.hh });
+  }
+  emulator.bus.send("pv-compose", list);
+}
 
 /* ------------------------------------------------------------------------- mode controller */
 /* A mode change tears down the canvas and the guest repaints from scratch, so the screen goes

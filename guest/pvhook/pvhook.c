@@ -831,8 +831,14 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
     if ((wp->flags & SWP_NOSIZE) && (wp->flags & SWP_NOMOVE)) return;
     if (GetWindowLong(hwnd, GWL_STYLE) & WS_CHILD) return;
     if (IsIconic(hwnd) || (wp->cx <= 64 && wp->cy <= 64 && !(wp->flags & SWP_NOSIZE))) return;  /* icons */
-    { int tax, tay;                     /* already parked in a tile: the clamps are the column's, not its */
-      if (popup_anchor(hwnd, &tax, &tay)) return; }
+    /* A dialog already parked in a tile is left alone: the clamps below are the column's, not
+       its. A popup is NOT skipped here -- Windows keeps one menu window and shows it again and
+       again at a new place each time, so it has to be re-tiled (and its anchor updated) on every
+       show. Skipping it left the menu painting where USER put it, over the window it belongs to,
+       while the host drew it a second time at the anchor of the menu before it. */
+    { int tax, tay;
+      for (tax = 0; tax < DLG_TILES; tax++) if (g_dlg[tax].hwnd == hwnd) return;
+      (void)tay; }
     if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return;
     if (transient_class(cls)) {
         /* Menus and drop-downs are relocated, not clamped: each gets a tile in the off-screen
