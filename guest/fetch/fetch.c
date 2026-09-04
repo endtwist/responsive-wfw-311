@@ -10,6 +10,12 @@
  * for what came back, and an asynchronous socket driven by WSAAsyncSelect so the 16-bit scheduler
  * is never blocked. Every control is stock and the font is the system font.
  *
+ * The reply goes to a file as it arrives (C:\TEMP\FETCH.HTM) and only the first 30 KB is kept in
+ * memory to show. That is the difference between a viewer with a 64 KB address space and one that
+ * can fetch a whole 2026 page: nothing about the transfer is bounded by the segment any more, the
+ * window shows as much as a stock edit control can hold, and Open hands the file to Write, which
+ * pages from disk. It also makes a fetched page an ordinary file the rest of Windows can open.
+ *
  * WINSOCK.DLL is loaded and its entry points taken by ordinal rather than linked against an import
  * library, because there is no Winsock import library in this toolchain and the ordinals are the
  * ones the 1.1 specification fixes (socket = 23, connect = 4, ...). It also means the program still
@@ -23,7 +29,8 @@
 #define ID_URL    1
 #define ID_GET    2
 #define ID_STOP   3
-#define ID_CLOSE  4
+#define ID_OPEN   4
+#define ID_CLOSE  7
 #define ID_STATUS 5
 #define ID_BODY   6
 #define WM_SOCKET (WM_USER + 100)
@@ -117,19 +124,27 @@ static BOOL winsock_load(void)
 }
 
 /* ------------------------------------------------------------------ state */
-#define RAW_MAX  60000u              /* what one fetch may bring back */
-#define SHOW_MAX 30000u              /* what an edit control will hold and still scroll */
+#define RAW_MAX  30000u              /* body bytes kept in memory, to show */
+#define SHOW_MAX 34000u              /* those plus the line breaks this adds for readability */
+#define HDR_MAX    600               /* enough for any reply header worth reading */
 
 static char szClass[] = "PVFetch";
 static char szTitle[] = "Fetch";
 static HWND hUrl, hGet, hStop, hClose, hStatus, hBody;
 static SOCKET sock = INVALID_SOCKET;
 static HGLOBAL rawh;
-static char FAR *raw;                /* the response exactly as it arrived */
+static char FAR *raw;                /* the first RAW_MAX bytes of the body, for the window */
 static unsigned rawn;
 static char host[128], path[512];
 static int  port;
-static BOOL trunc;                   /* the reply was longer than RAW_MAX and was cut off */
+static HWND hOpen;
+static HFILE hFile = HFILE_ERROR;    /* the whole body, as it arrives */
+static char  savePath[96];
+static DWORD bodyBytes;              /* how much of it there has been */
+static char  hdr[HDR_MAX + 4];       /* the reply header, until the blank line */
+static unsigned hdrN;
+static BOOL  inBody;
+static char  statusLine[64];         /* the first line of the reply, for the status text */
 
 static void status(const char *s) { SetWindowText(hStatus, s); }
 
@@ -140,6 +155,7 @@ static void drop(void)
         p_closesocket(sock);
         sock = INVALID_SOCKET;
     }
+    if (hFile != HFILE_ERROR) { _lclose(hFile); hFile = HFILE_ERROR; }
     EnableWindow(hStop, FALSE);
     EnableWindow(hGet, TRUE);
 }
@@ -168,32 +184,28 @@ static BOOL split_url(const char *url)
     return TRUE;
 }
 
-/* What the response looks like once it is in an edit control: the body only, with every bare line
-   feed turned into the carriage-return pair Windows needs, and the status line reported above. */
+/* What the reply looks like in the window: the body's first RAW_MAX bytes, with bare line feeds
+   turned into the carriage-return pair Windows needs, and the status line reported above. The
+   headers never get here -- they are stripped as they arrive (read_some) so the file on disk is the
+   body and nothing else. */
 static void present(void)
 {
     HGLOBAL sh;
     char FAR *out;
-    unsigned i = 0, n = 0, start = 0, col = 0;
-    char line[80];
-    int k;
+    unsigned i, n = 0, col = 0;
+    char line[80], size[40];
 
-    raw[rawn < RAW_MAX ? rawn : RAW_MAX - 1] = 0;
-    for (k = 0; k < (int)sizeof(line) - 40 && i < rawn && raw[i] != '\r' && raw[i] != '\n'; i++, k++)
-        line[k] = raw[i];
-    line[k] = 0;
-    if (trunc) lstrcat(line, " - first 60K only");
-    status(line[0] ? line : "no reply");
-
-    for (i = 0; i + 3 < rawn; i++)
-        if (raw[i] == '\r' && raw[i + 1] == '\n' && raw[i + 2] == '\r' && raw[i + 3] == '\n') { start = i + 4; break; }
-    if (!start) for (i = 0; i + 1 < rawn; i++)
-        if (raw[i] == '\n' && raw[i + 1] == '\n') { start = i + 2; break; }
+    raw[rawn] = 0;
+    lstrcpy(line, statusLine[0] ? statusLine : "no reply");
+    if (bodyBytes >= 1024L) wsprintf(size, " - %luK saved", (DWORD)(bodyBytes / 1024L));
+    else wsprintf(size, " - %lu bytes saved", bodyBytes);
+    if (lstrlen(line) + lstrlen(size) < (int)sizeof(line)) lstrcat(line, size);
+    status(line);
 
     sh = GlobalAlloc(GMEM_MOVEABLE, (DWORD)SHOW_MAX + 2);
     if (!sh) return;
     out = (char FAR *)GlobalLock(sh);
-    for (i = start; i < rawn && n < SHOW_MAX - 4; i++) {
+    for (i = 0; i < rawn && n < SHOW_MAX - 4; i++) {
         if (raw[i] == '\n' && (i == 0 || raw[i - 1] != '\r')) { out[n++] = '\r'; col = 0; }
         else if (raw[i] == '\r') col = 0;
         if (raw[i] == '\t') { out[n++] = ' '; col++; continue; }
@@ -210,6 +222,7 @@ static void present(void)
     SendMessage(hBody, WM_VSCROLL, SB_TOP, 0L);
     GlobalUnlock(sh);
     GlobalFree(sh);
+    EnableWindow(hOpen, bodyBytes != 0);
 }
 
 static void fetch_start(HWND hwnd)
@@ -228,7 +241,15 @@ static void fetch_start(HWND hwnd)
     if (!split_url(url)) { status("Type an address."); return; }
     SetWindowText(hBody, "");
     rawn = 0;
-    trunc = FALSE;
+    hdrN = 0;
+    inBody = FALSE;
+    bodyBytes = 0;
+    statusLine[0] = 0;
+    EnableWindow(hOpen, FALSE);
+    /* The reply goes here as it arrives. One name, overwritten each time: a viewer that littered
+       C:\TEMP with a file per page would be a worse citizen than one that keeps the last. */
+    hFile = _lcreat(savePath, 0);
+    if (hFile == HFILE_ERROR) { status("Cannot write C:\\TEMP\\FETCH.HTM."); return; }
 
     addr = p_inet_addr(host);
     if (addr == (unsigned long)-1) {
@@ -269,40 +290,61 @@ static void send_request(void)
     status("Waiting for the reply...");
 }
 
+/* Everything that arrives: the header is collected until the blank line, the body goes straight to
+   the file, and its first RAW_MAX bytes are also kept to show. Read until the socket says there is
+   nothing left -- WSAAsyncSelect's FD_READ is edge triggered, re-armed by a recv that comes back
+   WSAEWOULDBLOCK, so a reader that stops on a short read is never told about the rest. */
+static void take_body(const char *p, unsigned len)
+{
+    if (!len) return;
+    if (hFile != HFILE_ERROR) _lwrite(hFile, (LPCSTR)p, len);
+    bodyBytes += len;
+    if (rawn < RAW_MAX) {
+        unsigned room = RAW_MAX - rawn;                 /* unsigned: an int here holds 32767 */
+        unsigned take = len < room ? len : room;
+        _fmemcpy(raw + rawn, p, take);
+        rawn += take;
+    }
+}
+/* The header, which may be split across any number of packets. Returns the offset in `buf` where
+   the body starts, or `len` when the blank line has not been seen yet. */
+static unsigned take_header(const char *buf, unsigned len)
+{
+    unsigned i, k;
+    for (i = 0; i < len; i++) {
+        if (hdrN < HDR_MAX) hdr[hdrN++] = buf[i];
+        else { inBody = TRUE; return i; }               /* no blank line in 600 bytes: give up on it */
+        if (hdrN >= 4 && hdr[hdrN - 4] == '\r' && hdr[hdrN - 3] == '\n'
+                      && hdr[hdrN - 2] == '\r' && hdr[hdrN - 1] == '\n') { inBody = TRUE; }
+        else if (hdrN >= 2 && hdr[hdrN - 2] == '\n' && hdr[hdrN - 1] == '\n') { inBody = TRUE; }
+        if (inBody) {
+            hdr[hdrN] = 0;
+            for (k = 0; k < sizeof(statusLine) - 1 && hdr[k] && hdr[k] != '\r' && hdr[k] != '\n'; k++)
+                statusLine[k] = hdr[k];
+            statusLine[k] = 0;
+            status(statusLine);
+            return i + 1;
+        }
+    }
+    return len;
+}
 static void read_some(void)
 {
     char buf[1024];
-    int n, took = 0;
+    int n;
+    unsigned at;
     char msg[80];
-    /* Read until the socket says it has nothing left. WSAAsyncSelect's FD_READ is edge triggered:
-       it is re-armed by a recv that comes back WSAEWOULDBLOCK, so a reader that stops early because
-       it got a short read is never told about the rest. That, with the peer honouring the guest's
-       2 KB window, is a deadlock -- the transfer stopped dead at exactly 2048 bytes. */
+    long took = 0;
     for (;;) {
         n = p_recv(sock, buf, sizeof(buf), 0);
         if (n <= 0) break;                        /* 0 = the peer closed, SOCKET_ERROR = would block */
         took += n;
-        if (rawn < RAW_MAX - 1) {
-            /* Unsigned all the way. An int here holds 32767, and RAW_MAX - 1 is 59999: the cast
-               made `room` negative, _fmemcpy copied 59999 bytes out of a 1 KB stack buffer, rawn
-               wrapped straight past the cap, and every reply came back "first 60K only" on the
-               first packet. That, not the line, is what looked like a stall at 59999 bytes. */
-            unsigned room = RAW_MAX - 1 - rawn;
-            unsigned take = (unsigned)n < room ? (unsigned)n : room;
-            _fmemcpy(raw + rawn, buf, take);
-            rawn += take;
-        }
-        /* Full: hang up and show what arrived rather than draining a 400 KB page nobody can be
-           shown. A client with a 64 KB address space would always have had to do exactly that. */
-        if (rawn >= RAW_MAX - 1) {
-            trunc = TRUE;
-            drop();
-            present();
-            return;
-        }
+        at = 0;
+        if (!inBody) at = take_header(buf, (unsigned)n);
+        if (inBody && at < (unsigned)n) take_body(buf + at, (unsigned)n - at);
     }
-    if (took) {
-        wsprintf(msg, "%u bytes...", rawn);
+    if (took && inBody) {
+        wsprintf(msg, "%lu bytes...", bodyBytes);
         status(msg);
     }
 }
@@ -316,9 +358,10 @@ static void layout(HWND hwnd)
     w = r.right - 2 * MARGIN;
     y = MARGIN;
     MoveWindow(hUrl, MARGIN, y, w, ROW, TRUE);            y += ROW + GAP;
-    MoveWindow(hGet, MARGIN, y, 72, ROW, TRUE);
-    MoveWindow(hStop, MARGIN + 72 + GAP, y, 72, ROW, TRUE);
-    MoveWindow(hClose, r.right - MARGIN - 72, y, 72, ROW, TRUE);
+    MoveWindow(hGet, MARGIN, y, 64, ROW, TRUE);
+    MoveWindow(hStop, MARGIN + 64 + GAP, y, 64, ROW, TRUE);
+    MoveWindow(hOpen, MARGIN + 2 * (64 + GAP), y, 64, ROW, TRUE);
+    MoveWindow(hClose, r.right - MARGIN - 64, y, 64, ROW, TRUE);
     y += ROW + GAP;
     MoveWindow(hStatus, MARGIN, y, w, 18, TRUE);          y += 18 + GAP;
     MoveWindow(hBody, MARGIN, y, w, r.bottom - y - MARGIN, TRUE);
@@ -338,6 +381,8 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                             0, 0, 10, 10, hwnd, (HMENU)ID_GET, inst, NULL);
         hStop = CreateWindow("button", "&Stop", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                              0, 0, 10, 10, hwnd, (HMENU)ID_STOP, inst, NULL);
+        hOpen = CreateWindow("button", "&Open", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                             0, 0, 10, 10, hwnd, (HMENU)ID_OPEN, inst, NULL);
         hClose = CreateWindow("button", "&Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                               0, 0, 10, 10, hwnd, (HMENU)ID_CLOSE, inst, NULL);
         hStatus = CreateWindow("static", "Ready.", WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -350,7 +395,9 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             SendMessage(c, WM_SETFONT, (WPARAM)f, 0L);
         SendMessage(hBody, EM_LIMITTEXT, 0, 0L);           /* 0 = as much as an edit will take */
         EnableWindow(hStop, FALSE);
-        rawh = GlobalAlloc(GMEM_MOVEABLE, (DWORD)RAW_MAX);
+        EnableWindow(hOpen, FALSE);
+        lstrcpy(savePath, "C:\\TEMP\\FETCH.HTM");
+        rawh = GlobalAlloc(GMEM_MOVEABLE, (DWORD)RAW_MAX + 2);
         raw = rawh ? (char FAR *)GlobalLock(rawh) : NULL;
         if (!raw) { MessageBox(hwnd, "Out of memory.", szTitle, MB_OK | MB_ICONSTOP); return -1; }
         return 0;
@@ -363,7 +410,14 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         return 0;
     case WM_COMMAND:
         if (wParam == ID_GET) fetch_start(hwnd);
-        else if (wParam == ID_STOP) { drop(); status("Stopped."); }
+        else if (wParam == ID_STOP) { drop(); present(); status("Stopped."); }
+        else if (wParam == ID_OPEN) {
+            /* Write, not Notepad: Notepad gives up somewhere around 50 KB and a page is bigger
+               than that. Write pages from disk and will read the file as text. */
+            char cmd[128];
+            wsprintf(cmd, "WRITE.EXE %s", (LPSTR)savePath);
+            if (WinExec(cmd, SW_SHOW) < 32) status("Could not start Write.");
+        }
         else if (wParam == ID_CLOSE) DestroyWindow(hwnd);
         return 0;
     case WM_SOCKET: {

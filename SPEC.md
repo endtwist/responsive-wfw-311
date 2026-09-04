@@ -3702,11 +3702,13 @@ thousands of characters long, and a stock edit control shows a window into the m
 rather than its start, which looked like the head of the page had been lost. The display now breaks
 after a tag once a line passes 200 characters.
 
-**A 2026 front page does not fit.** FETCH.EXE keeps 60 KB (a 16-bit program, one segment for the
-reply), and draining the rest of a 400 KB page to be polite left the window on "59999 bytes..." for
-minutes with nothing to show -- which is what Josh saw on `https://planetary.co`. It now hangs up as
-soon as its buffer is full and shows what arrived, with the status line saying so: `HTTP/1.0 200 OK -
-first 60K only`. That is what a client with a 64 KB address space would always have had to do.
+**The reply goes to a file.** A 2026 front page does not fit in a 16-bit segment, so FETCH.EXE no
+longer tries: the header is stripped as it arrives, the body is written straight to
+`C:\TEMP\FETCH.HTM`, and only its first 30 KB is kept to show. Nothing about the transfer is bounded
+by the address space any more -- the Wikipedia article comes down whole, **492K saved in 11.8 s
+(56.6 KB/s)** -- the window shows as much as a stock edit control can hold, and an **Open** button
+hands the file to Write, which pages from disk (Notepad gives up around 50 KB). It also makes a
+fetched page an ordinary file the rest of Windows can open.
 
 **Rebuild in main:** `guest/fetch/build.sh` and `guest/pvmon/build.sh` (v40), staged as
 `image/changes/windows/FETCH.EXE` and `PVMON.EXE`, then
