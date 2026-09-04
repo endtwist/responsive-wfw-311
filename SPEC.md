@@ -3751,3 +3751,8 @@ in one phone column that means every group stacked on top of the one that matter
 previous visit, and LCD.EXE's `/report` at desktop-ready, both overwrote it. The parameter now
 outranks both (and `?lcd=0` forces it off); with no parameter the guest's Screen app decides, which
 is the normal case.
+
+**Backlight, toned down.** On a phone column the unevenness read as character; over a whole desktop
+it read as a stain (Josh, on a screenshot of the MS-DOS Prompt over Program Manager). The tube edge
+stays -- that is the part the photograph is emphatic about -- and the broad diffuser patches lost
+about half their strength, in both the lift they give the darks and the multiply across everything.

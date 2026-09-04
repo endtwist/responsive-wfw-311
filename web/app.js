@@ -3108,11 +3108,14 @@ void main() {
      nothing at all to white -- white is already the panel wide open. So the unevenness is applied
      as a lift weighted by how dark the pixel is, which keeps the whites bright (Josh: "lights need
      to be brighter") while making the gradient and the blotches plainly visible. */
-  float glow = 0.10 + 0.95 * edge + 0.55 * blotch;
-  c += vec3(0.30, 0.35, 0.32) * glow * (1.0 - l);
+  float glow = 0.10 + 0.80 * edge + 0.30 * blotch;
+  c += vec3(0.26, 0.30, 0.28) * glow * (1.0 - l);
   /* And across everything, hard enough to see: the far side of one of these panels is dim, the
      tube side is hot, and the diffuser puts broad patches between them. */
-  c *= 0.82 + 0.34 * edge + 0.16 * blotch;
+  /* Toned down from where it was: on a phone column the unevenness reads as character, on a whole
+     desktop it reads as a stain (Josh, on the MS-DOS Prompt over Program Manager). The tube edge
+     stays; the broad patches lost about half their strength. */
+  c *= 0.88 + 0.24 * edge + 0.09 * blotch;
   vec2 v = uv - 0.5;
   c *= 1.0 - 0.30 * dot(v, v);
 
