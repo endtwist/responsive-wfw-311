@@ -51,6 +51,7 @@
  *   mips:1000               instructions per second over that window (the idle check)
  *   dismiss                 Enter/Esc until only the shell is left
  *   getclip[:file]          what the guest has on its clipboard (PVCB off the debug channel)
+ *   netcard                 the NE2000's io base, the ISA line its PCI interrupt was routed to, its MAC
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -327,6 +328,24 @@ for (const s of steps) {
     for (const b of arg.split(",")) emulator.bus.send("keyboard-code", Number(b));
     await sleep(200);
     console.log(`${ts()} raw ${arg}`);
+  }
+  else if (op === "netcard") {
+    /* The NE2000 as the guest can see it: where its registers are, and which ISA line the BIOS
+       routed its PCI interrupt to -- that number is what PROTOCOL.INI has to say, and it is
+       assigned at boot rather than fixed. */
+    const n = emulator.v86.cpu.devices.net;
+    if (!n) { console.log(`${ts()} netcard: no ne2k device`); }
+    else {
+      const mac = [...n.mac].map(b => b.toString(16).padStart(2, "0")).join(":");
+      /* The line it actually asserts is not its own config byte: PCI.raise_irq routes the pin
+         through the ISA bridge's PIRQ registers, so work it out the same way the bus does. */
+      const pci = emulator.v86.cpu.devices.pci;
+      const space = pci.device_spaces[n.pci_id];
+      const pin = (space[0x3C >>> 2] >> 8 & 0xFF) - 1;
+      const dev = (n.pci_id >> 3) - 1 & 0xFF;
+      const irq = pci.isa_bridge_space8[0x60 + (pin + dev & 3)];
+      console.log(`${ts()} netcard: io 0x${n.port.toString(16)} isa irq ${irq} (pin ${pin + 1}, line byte ${n.pci_space[0x3C]}) mac ${mac} cr=0x${n.cr.toString(16)} imr=0x${n.imr.toString(16)}`);
+    }
   }
   else if (op === "net") {
     const secs = (netBytes.last - netBytes.first) / 1000;
