@@ -3675,6 +3675,12 @@ ask for the 3200x970 screen the image ships) now passes every check both ways: `
 rects of 3200x970 to 1280x800`, and the MS-DOS Prompt's exit warning still lands inside its slot at
 640,360 rather than centred half off the edge.
 
+**A 2026 front page does not fit.** FETCH.EXE keeps 60 KB (a 16-bit program, one segment for the
+reply), and draining the rest of a 400 KB page to be polite left the window on "59999 bytes..." for
+minutes with nothing to show -- which is what Josh saw on `https://planetary.co`. It now hangs up as
+soon as its buffer is full and shows what arrived, with the status line saying so: `HTTP/1.0 200 OK -
+first 60K only`. That is what a client with a 64 KB address space would always have had to do.
+
 **Rebuild in main:** `guest/fetch/build.sh` and `guest/pvmon/build.sh` (v40), staged as
 `image/changes/windows/FETCH.EXE` and `PVMON.EXE`, then
 `image/build-image.sh display=pvdisp dpi=120 sysfont=PVSYS.FON mouse=PVMOUSE.DRV sound=1

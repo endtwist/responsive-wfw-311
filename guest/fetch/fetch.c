@@ -129,6 +129,7 @@ static char FAR *raw;                /* the response exactly as it arrived */
 static unsigned rawn;
 static char host[128], path[512];
 static int  port;
+static BOOL trunc;                   /* the reply was longer than RAW_MAX and was cut off */
 
 static void status(const char *s) { SetWindowText(hStatus, s); }
 
@@ -178,9 +179,10 @@ static void present(void)
     int k;
 
     raw[rawn < RAW_MAX ? rawn : RAW_MAX - 1] = 0;
-    for (k = 0; k < (int)sizeof(line) - 1 && i < rawn && raw[i] != '\r' && raw[i] != '\n'; i++, k++)
+    for (k = 0; k < (int)sizeof(line) - 40 && i < rawn && raw[i] != '\r' && raw[i] != '\n'; i++, k++)
         line[k] = raw[i];
     line[k] = 0;
+    if (trunc) lstrcat(line, " - first 60K only");
     status(line[0] ? line : "no reply");
 
     for (i = 0; i + 3 < rawn; i++)
@@ -218,6 +220,7 @@ static void fetch_start(HWND hwnd)
     if (!split_url(url)) { status("Type an address."); return; }
     SetWindowText(hBody, "");
     rawn = 0;
+    trunc = FALSE;
 
     addr = p_inet_addr(host);
     if (addr == (unsigned long)-1) {
@@ -276,8 +279,17 @@ static void read_some(void)
             int take = n < room ? n : room;
             _fmemcpy(raw + rawn, buf, take);
             rawn += take;
-        }                                          /* past the cap the bytes are still read, so the
-                                                      connection finishes instead of stalling */
+        }
+        /* Full. A 2026 front page is several hundred kilobytes and this machine reads a couple of
+           kilobytes a second, so draining the rest to be polite would leave the window sitting on
+           "59999 bytes..." for minutes with nothing to show. Hang up and show what arrived, which
+           is what a client with a 64 KB address space would always have had to do. */
+        if (rawn >= RAW_MAX - 1) {
+            trunc = TRUE;
+            drop();
+            present();
+            return;
+        }
     }
     if (took) {
         wsprintf(msg, "%u bytes...", rawn);
