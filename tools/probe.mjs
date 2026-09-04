@@ -81,7 +81,7 @@ if (!IMAGE) {
 if (STATE === "none") STATE = null;
 if (STATE && !fs.existsSync(STATE)) { console.error("no state " + STATE + ", cold boot"); STATE = null; }
 
-const SCREEN_W = 640 * 4, SCREEN_H = 970;
+const SCREEN_W = 4096, SCREEN_H = 970;   // the guest screen: visible columns + the hook's popup tiles
 /* Scancode set 1. The whole alphabet and the digit row are here so a step can drive any menu
    mnemonic (Program Manager's Window menu, a group by number) without editing this table again. */
 const SC = { esc: 0x01, tab: 0x0F, enter: 0x1C, ctrl: 0x1D, alt: 0x38, space: 0x39, shift: 0x2A,

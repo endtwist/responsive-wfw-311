@@ -405,7 +405,7 @@ enable_read_profile	PROC	NEAR
 	mov	dpi_size,ax
 	cmp	VScreen_Width,320
 	jb	erp_defaults
-	cmp	VScreen_Width,2560
+	cmp	VScreen_Width,4096
 	ja	erp_defaults
 	cmp	VScreen_Height,200
 	jb	erp_defaults

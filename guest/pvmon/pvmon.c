@@ -100,8 +100,10 @@ typedef void (FAR PASCAL *HOOKREMOVE)(void);
 typedef void (FAR PASCAL *HOOKSETSHELL)(int, int);
 typedef BOOL (FAR PASCAL *HOOKISDEAD)(HWND);
 typedef BOOL (FAR PASCAL *HOOKTAKEDIRTY)(void);
+typedef BOOL (FAR PASCAL *HOOKPOPUPANCHOR)(HWND, int FAR *, int FAR *);
 static HOOKISDEAD g_isDead;
 static HOOKTAKEDIRTY g_takeDirty;
+static HOOKPOPUPANCHOR g_popupAnchor;   /* where a popup parked in an off-screen tile belongs */
 /* A window the hook has seen HCBT_DESTROYWND for: its task may be gone, and a cross-task
    SendMessage to it (GetWindowText, SetWindowPos) can block PVMON until something else wakes
    the scheduler. Such windows are left alone even while IsWindow still says yes. */
@@ -160,6 +162,7 @@ static void install_hook(void)
     inst = (HOOKINSTALL)GetProcAddress(g_hookDll, "PvHookInstall");
     g_isDead = (HOOKISDEAD)GetProcAddress(g_hookDll, "PvHookIsDead");
     g_takeDirty = (HOOKTAKEDIRTY)GetProcAddress(g_hookDll, "PvHookTakeDirty");
+    g_popupAnchor = (HOOKPOPUPANCHOR)GetProcAddress(g_hookDll, "PvHookPopupAnchor");
     dbg(inst && inst() ? "pvmon: hooks installed (windows are born in their slots and clamped to the frame)" : "pvmon: CBT hook failed");
     hook_set_shell();
 }
@@ -1618,12 +1621,16 @@ static void publish_layout(void)
             describe(g_wnds[i].hwnd, line, "PVO", owner_slot(g_wnds[i].owner));
             break;
         case 'T': {
-            char cls[24]; int n;
+            char cls[24]; int n, ax, ay;
             describe(g_wnds[i].hwnd, line, "PVT", -1);
             /* transients have no title worth showing; report the class instead */
             GetClassName(g_wnds[i].hwnd, cls, sizeof(cls));
             n = lstrlen(line);
-            if (n + lstrlen(cls) + 2 < 128) { line[n] = ' '; lstrcpy(line + n + 1, cls); }
+            if (n + lstrlen(cls) + 2 < 128) { line[n] = ' '; lstrcpy(line + n + 1, cls); n = lstrlen(line); }
+            /* a popup parked in an off-screen tile: say where it belongs, or the host would draw
+               it at the tile and the menu would be nowhere near the item that opened it */
+            if (g_popupAnchor && g_popupAnchor(g_wnds[i].hwnd, &ax, &ay) && n + 24 < 128)
+                wsprintf(line + n, " @%d,%d", ax, ay);
             break;
         }
         case 'S':

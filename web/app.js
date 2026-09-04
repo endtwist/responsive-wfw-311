@@ -116,6 +116,11 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
 const pageStart = performance.now();
 const SHELL_W = 352;             // width of the shell column on a narrow display (must match build-image shellw=)
 const SLOT_W = 640;              // width of each application column (must match pvmon.c)
+/* The guest screen is wider than the part composited here: the columns the user sees, plus an
+   off-screen margin the hook parks popups in, a tile each (VIS_W/TILE_W in pvhook.c). The margin
+   is free -- the adapter's pitch has always been 4096 pixels -- so the screen is exactly the
+   pitch and the visible part is unchanged. */
+const SCREEN_W = 4096;
 const MAX_SLOTS = 3;             // application columns (must match pvmon.c)
 const WIN_MARGIN = 8;
 
@@ -149,7 +154,7 @@ function syncDesktopMode() {
 function computeMode() {
   const [vw, vh] = viewport();
   // The phone layout, and a wide viewport until the guest has switched to desktop mode.
-  if (!wantDesktop() || guestDesktop !== true) return { w: SLOT_W * (1 + MAX_SLOTS), h: SHELL_H, zoom: 1, shellH: SHELL_H };
+  if (!wantDesktop() || guestDesktop !== true) return { w: SCREEN_W, h: SHELL_H, zoom: 1, shellH: SHELL_H };
   // Desktop: one guest pixel per CSS pixel (the canvas is painted nearest-neighbour at the device
   // pixel ratio, so it is crisp on HiDPI too), the size a multiple of 8 x 2 within the adapter's
   // limits. Windows 3.x wants at least 640 columns; a smaller window scales the screen down.
@@ -548,6 +553,12 @@ emulator.bus.register("pv-debug", line => {
       kind: m[1], slot: +m[2], wx: +m[3], wy: +m[4], ww: +m[5], wh: +m[6],
       gx: +m[7], gy: +m[8], gw: +m[9], gh: +m[10], title: m[11] || "",
     });
+    /* A popup painted in an off-screen tile carries the place it would have popped up as
+       "@x,y" after its class (PVHOOK's popup tiles). The layer is drawn from the tile and
+       placed at the anchor, so the pixels are wherever they are and the menu is where the
+       user pointed. */
+    { const a = /@(-?\d+),(-?\d+)\s*$/.exec(m[11] || "");
+      if (a) { const L = pendingLayers[pendingLayers.length - 1]; L.ax = +a[1]; L.ay = +a[2]; L.title = L.title.slice(0, a.index).trim(); } }
     return;
   }
   m = /^PVI (-?\d+) ?(.*)$/.exec(line);
@@ -1400,8 +1411,12 @@ function placeLayers(src) {
       if (transientHeld(key)) return;                  // published this frame and may still move
       const hw = Math.round(L.ww * c), hh = Math.round(L.wh * c);
       let x, y;
-      const centred = Math.abs(L.wx + L.ww / 2 - screenW / 2) < 8;      // the Alt+Tab switcher
-      const col = Math.floor(L.wx / SLOT_W);
+      /* Where the popup belongs on screen. A popup in an off-screen tile publishes that place as
+         its anchor; one still painted where it popped up is its own anchor. The rectangle it is
+         drawn FROM stays L.wx/L.wy either way. */
+      const ax = L.ax != null ? L.ax : L.wx, ay = L.ay != null ? L.ay : L.wy;
+      const centred = Math.abs(ax + L.ww / 2 - screenW / 2) < 8;        // the Alt+Tab switcher
+      const col = Math.floor(ax / SLOT_W);
       /* The window the popup belongs to. Usually the slot's application (bySlot), but an owned
          window can own menus of its own — Rodent's Revenge's whole game window is an owned
          window — and anchoring those to the slot's application put the menu somewhere else
@@ -1411,19 +1426,19 @@ function placeLayers(src) {
       for (let i = out.length - 1; i >= 0; i--) {
         const q = out[i];
         if (q.transient || q.shellCopy || q.src == null) continue;
-        if (L.wx >= q.wx - 2 && L.wx <= q.wx + q.ww + 2 && L.wy >= q.wy - 2 && L.wy <= q.wy + q.wh + 2) { owner = q; break; }
+        if (ax >= q.wx - 2 && ax <= q.wx + q.ww + 2 && ay >= q.wy - 2 && ay <= q.wy + q.wh + 2) { owner = q; break; }
       }
       if (centred) { x = Math.round((vw - hw) / 2); y = Math.round((vh - hh) / 2); }
       else if (owner) {
-        if (L.wy < owner.gy) {                                            // hangs off the chrome (a menu)
+        if (ay < owner.gy) {                                              // hangs off the chrome (a menu)
           // chrome scale, through the menu strip's pan, so it hangs off the item that opened it
-          x = Math.round(owner.x + owner.hl + (L.wx - owner.wx - owner.inset.l - (owner.mpan || 0)) * c);
-          y = Math.round(owner.y + (L.wy - owner.wy) * c);
+          x = Math.round(owner.x + owner.hl + (ax - owner.wx - owner.inset.l - (owner.mpan || 0)) * c);
+          y = Math.round(owner.y + (ay - owner.wy) * c);
         } else {
-          x = Math.round(owner.x + owner.hl + (L.wx - owner.gx) * owner.s);
-          y = Math.round(owner.y + owner.ht + (L.wy - owner.gy) * owner.s);
+          x = Math.round(owner.x + owner.hl + (ax - owner.gx) * owner.s);
+          y = Math.round(owner.y + owner.ht + (ay - owner.gy) * owner.s);
         }
-      } else { x = Math.round(view.ox + L.wx * c); y = Math.round((L.wy - view.y) * c); }
+      } else { x = Math.round(view.ox + ax * c); y = Math.round((ay - view.y) * c); }
       /* Shown as far as possible: anchored where it popped up, shifted up/left so the whole of it
          fits when it can. A popup taller or wider than the viewport (a long View menu, a combo
          drop-down) cannot scroll in the guest, so the user pans it instead: layerPos holds the pan,
@@ -2648,9 +2663,9 @@ let absPointer = params.get("relmouse") ? false : true, absMisses = 0;
    phone layout here (the host requests that mode until the guest reports the switch), so in
    desktop mode the base is the phone screen; in the phone layout the canvas is that screen. */
 function screenSize() {
-  if (guestDesktop === true) return [SLOT_W * (1 + MAX_SLOTS), SHELL_H];
+  if (guestDesktop === true) return [SCREEN_W, SHELL_H];
   const src = document.querySelector("#screen_container canvas");
-  return src && src.width ? [src.width, src.height] : [SLOT_W * (1 + MAX_SLOTS), SHELL_H];
+  return src && src.width ? [src.width, src.height] : [SCREEN_W, SHELL_H];
 }
 /* The driver reports (-1,-1) when USER has no cursor to show (an application drawing with a NULL
    cursor: Paintbrush painting) or has clamped the pointer away: it is not a position. */

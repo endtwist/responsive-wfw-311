@@ -337,6 +337,42 @@ static char hook_kind(HWND h, HWND skip, char FAR *cls, HWND FAR *owner)
     if (*owner && IsWindow(*owner) && IsWindowVisible(*owner)) return 'O';
     return 'A';
 }
+
+/* ---------------------------------------------------------------------------- popup tiles ---
+   A menu or drop-down is placed by USER directly over the window it belongs to, and Windows 3.1
+   keeps no backing store: the pixels underneath are gone until their owner repaints, which is
+   what the masking and hold hacks in the host compositor exist to hide. The screen is wider than
+   the part the host shows -- the adapter's pitch has always been 4096 pixels while the visible
+   part is 2560 -- so a popup is moved into that off-screen margin and given a tile of its own.
+   It paints there, destroys nobody's pixels, and the host draws it over the item it belongs to
+   from the anchor published with it. */
+#define VIS_W  2560            /* the part of the screen the host composites */
+#define TILE_W 512
+#define TILES  3               /* a menu, its submenu, and one to spare */
+typedef struct { HWND hwnd; int ax, ay; } Popup;
+static Popup g_popup[TILES];
+static int popup_tile(HWND h, int ax, int ay)
+{
+    int i, free = -1;
+    for (i = 0; i < TILES; i++) {
+        if (g_popup[i].hwnd == h) { g_popup[i].ax = ax; g_popup[i].ay = ay; return i; }
+        if (free < 0 && (!g_popup[i].hwnd || !IsWindow(g_popup[i].hwnd) || !IsWindowVisible(g_popup[i].hwnd)))
+            free = i;
+    }
+    if (free < 0) return -1;                       /* all busy: leave this one where USER put it */
+    g_popup[free].hwnd = h; g_popup[free].ax = ax; g_popup[free].ay = ay;
+    return free;
+}
+static BOOL popup_anchor(HWND h, int FAR *ax, int FAR *ay)
+{
+    int i;
+    for (i = 0; i < TILES; i++)
+        if (g_popup[i].hwnd == h) { *ax = g_popup[i].ax; *ay = g_popup[i].ay; return TRUE; }
+    return FALSE;
+}
+/* PVMON publishes the same window list from its own poll, so it needs the anchors too. */
+BOOL FAR PASCAL __export PvHookPopupAnchor(HWND h, int FAR *ax, int FAR *ay) { return popup_anchor(h, ax, ay); }
+
 static void hook_publish(HWND skip)
 {
     HWND h, first, owner = NULL; int n = 0; char line[128], cls[24], k;
@@ -351,7 +387,13 @@ static void hook_publish(HWND skip)
         GetWindowRect(h, &rc);
         switch (k) {
         case 'S': describe(h, line, "PVS", -1); break;
-        case 'T': describe(h, line, "PVT", -1); { int m = lstrlen(line); if (m + lstrlen(cls) + 2 < 128) { line[m] = ' '; lstrcpy(line + m + 1, cls); } } break;
+        case 'T': describe(h, line, "PVT", -1);
+                  { int m = lstrlen(line), ax, ay;
+                    if (m + lstrlen(cls) + 2 < 128) { line[m] = ' '; lstrcpy(line + m + 1, cls); m = lstrlen(line); }
+                    /* where it would have popped up: the host draws it over the item it belongs
+                       to, not at the tile it actually paints in */
+                    if (popup_anchor(h, &ax, &ay) && m + 24 < 128) wsprintf(line + m, " @%d,%d", ax, ay); }
+                  break;
         case 'O': { RECT orc; int hops; HWND o = owner;
                     for (hops = 0; o && hops < 8 && GetWindow(o, GW_OWNER); hops++) o = GetWindow(o, GW_OWNER);
                     GetWindowRect(o, &orc); describe(h, line, "PVO", col_slot(orc.left)); break; }
@@ -747,7 +789,21 @@ static void clamp_windowpos(HWND hwnd, WINDOWPOS FAR *wp)
     if ((wp->flags & SWP_NOSIZE) && (wp->flags & SWP_NOMOVE)) return;
     if (GetWindowLong(hwnd, GWL_STYLE) & WS_CHILD) return;
     if (IsIconic(hwnd) || (wp->cx <= 64 && wp->cy <= 64 && !(wp->flags & SWP_NOSIZE))) return;  /* icons */
-    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0 || transient_class(cls)) return;
+    if (GetClassName(hwnd, cls, sizeof(cls)) <= 0) return;
+    if (transient_class(cls)) {
+        /* Menus and drop-downs are relocated, not clamped: each gets a tile in the off-screen
+           margin (popup_tile above). PVMON's own window shares the class test but is never a
+           popup, and a menu wider than a tile stays where USER put it. */
+        if (!(wp->flags & SWP_NOMOVE) && wp->x >= 0 && wp->x < VIS_W && lstrcmp(cls, "PVMonitor") != 0) {
+            int w = (wp->flags & SWP_NOSIZE) ? 0 : wp->cx, t;
+            if (!w) { RECT rc; GetWindowRect(hwnd, &rc); w = rc.right - rc.left; }
+            if (w > 0 && w <= TILE_W && (t = popup_tile(hwnd, wp->x, wp->y)) >= 0) {
+                wp->x = VIS_W + t * TILE_W;
+                wp->y = 0;
+            }
+        }
+        return;
+    }
     owner = GetWindow(hwnd, GW_OWNER);
     if (!owner && lstrcmp(cls, "#32770") == 0 && !shell_task(hwnd)) owner = task_main_window(hwnd);
     if (owner && IsWindow(owner)) {
