@@ -533,7 +533,9 @@ emulator.bus.register("pv-debug", line => {
         guestClip = bytes;                        // latin-1 bytes: CF_TEXT is ANSI
         clipPending = true;
         diag(`clipboard from the guest: ${bytes.length} bytes`);
-        offerClipboard("guest copy");
+        /* If this report is the answer to a copy the user just asked for with the keyboard, the
+           gesture that asked is still recent enough for the browser to let us write it out. */
+        offerClipboard(performance.now() < clipCopyWait ? "copy keys" : "guest copy");
       } catch (e) { diag(`clipboard from the guest: undecodable (${e.message})`); }
     }
     clipIn = null;
@@ -2573,7 +2575,7 @@ function composeForGuest(vw, vh) {
    the system clipboard -- which iOS only permits inside a user gesture, so the text waits for the
    next touch. In: a paste anywhere on the page goes to the guest as CMD_CLIP, and PVMON puts it
    on the clipboard where Notepad's Edit > Paste will find it. No visible UI either way. */
-let clipIn = null, guestClip = "", clipPending = false, clipLast = "";
+let clipIn = null, guestClip = "", clipPending = false, clipLast = "", clipCopyWait = 0;
 async function offerClipboard(why) {
   if (!clipPending || !guestClip || guestClip === clipLast) return;
   if (!navigator.clipboard || !navigator.clipboard.writeText) return;
@@ -2595,9 +2597,44 @@ function pasteToGuest(text) {
   sendCommandString(CMD_CLIP, ansi);
   diag(`clipboard -> guest (${ansi.length} bytes)`);
 }
+/* A physical keyboard's own clipboard keys. v86's keyboard adapter takes every keydown on the
+   window and calls preventDefault, so Cmd/Ctrl+C never produced a `copy` and Cmd/Ctrl+V never
+   produced a `paste` -- which is why nothing crossed in either direction from a Mac. These run in
+   the capture phase, before the adapter sees them.
+
+   Windows 3.1's own clipboard keys are Ctrl+Insert, Shift+Insert and Shift+Delete: Ctrl+C/V/X did
+   not become standard until later, and Notepad and Write here only listen for the old ones. So the
+   host translates. */
+const CLIP_KEYS = { c: [[0x1D], [0x52]], x: [[0x2A], [0x53]], v: [[0x2A], [0x52]] };
+function sendChord(mod, key) {
+  sendScancodes(mod, true); sendScancodes(key, true);
+  sendScancodes(key, false); sendScancodes(mod, false);
+}
+window.addEventListener("keydown", ev => {
+  if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return;
+  const k = (ev.key || "").toLowerCase();
+  if (k !== "c" && k !== "x" && k !== "v") return;
+  const [mod, key] = CLIP_KEYS[k];
+  ev.stopImmediatePropagation();                  // the emulator's adapter must not swallow it
+  if (k === "v") {
+    /* Left to the browser on purpose: not calling preventDefault is what makes the `paste` event
+       fire, and the handler below has the text. */
+    return;
+  }
+  ev.preventDefault();
+  sendChord(mod, key);                            // Ctrl+Insert / Shift+Delete, inside the guest
+  clipCopyWait = performance.now() + 1200;        // PVMON's report is a moment behind the keys
+  diag(`clipboard: ${k === "c" ? "copy" : "cut"} keys sent to the guest`);
+}, true);
+
 window.addEventListener("paste", ev => {
   const t = ev.clipboardData && ev.clipboardData.getData("text");
-  if (t) { pasteToGuest(t); ev.preventDefault(); }
+  if (!t) return;
+  ev.preventDefault();
+  pasteToGuest(t);
+  /* ...and then tell the guest to paste it where the focus is, with the keys Windows 3.1 listens
+     for. The clipboard has to be set first, so this waits for the command to be acknowledged. */
+  queue(async () => { await sleep(120); sendChord([0x2A], [0x52]); diag("clipboard: paste keys sent to the guest"); });
 });
 
 /* --------------------------------------------------------------------------- LCD filter ---
@@ -2671,10 +2708,10 @@ void main() {
   float gy = mix(1.0, f.y > 1.0 - 1.0 / max(pitch.y, 2.0) ? 0.975 : 1.0, on);
   c *= gx * gy;
 
-  /* The backlight. A cold tube runs down the left edge and along the bottom, and its glow carries
-     right across the panel -- in the photograph the whole screen is lit and the near corner is
-     nearly white. Then the vignette every one of these had. */
-  float edge = exp(-uv.x * 4.5) + exp(-(1.0 - uv.y) * 5.0) * 0.9;
+  /* The backlight. The tube runs down the RIGHT edge (Josh's machine), and its glow carries across
+     the panel, falling off with distance -- the whole screen is lit, brightest along that edge.
+     Then the vignette every one of these had. */
+  float edge = exp(-(1.0 - uv.x) * 4.5);
   c += vec3(0.13, 0.17, 0.17) * edge;
   c += vec3(0.05, 0.06, 0.05);                  // the panel is lit, not merely reflective
   vec2 v = uv - 0.5;
@@ -2745,6 +2782,10 @@ function lcdResize(st, w, h) {
   const { gl } = st;
   st.w = w; st.h = h;
   st.cv.width = w; st.cv.height = h;
+  /* ...and the CSS size follows the composite's, not the backing store's: the compositor sizes
+     #pres in CSS pixels every frame and this has to sit exactly on top of it. */
+  const src2 = $("pres");
+  if (src2 && src2.style.width) { st.cv.style.width = src2.style.width; st.cv.style.height = src2.style.height; }
   for (let i = 0; i < 2; i++) {
     if (st.lvl[i]) gl.deleteTexture(st.lvl[i]);
     st.lvl[i] = lcdTexture(gl, w, h);

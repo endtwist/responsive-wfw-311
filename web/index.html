@@ -32,7 +32,10 @@
   /* The LCD filter (?lcd=1) draws the finished composite through a shader on top of it. It never
      takes a touch: #pres stays the input surface underneath, so the geometry, the hit testing and
      the pointer are exactly as they are without it. */
-  #lcd { position:fixed; inset:0; z-index:2; display:none; pointer-events:none; }
+  /* width/height explicitly: a canvas is a replaced element, so `width:auto` between insets
+     resolves to its INTRINSIC size (the backing store, device pixels) rather than the space
+     between them, and the page shows the top-left corner of it magnified by the pixel ratio. */
+  #lcd { position:fixed; inset:0; width:100%; height:100%; z-index:2; display:none; pointer-events:none; }
   #lcd.on { display:block; }
   #screen_container canvas { display:block; touch-action:none;
                              transition: width .18s ease-out, height .18s ease-out; }
