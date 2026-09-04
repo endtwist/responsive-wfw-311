@@ -123,7 +123,7 @@ const MAX_SLOTS = 3;             // application columns (must match pvmon.c)
    need: every row is a row of the browser's pixel buffer (width x height x 4 bytes), and a phone
    kills a tab that asks for too much. */
 const SCREEN_W = SLOT_W * (1 + MAX_SLOTS);   // 2560, unchanged: the visible columns
-const SCREEN_H = 1792;                       // 970 visible, popup tiles to 1250, dialogs below
+const SCREEN_H = 970;                        // the visible rows only: tiles are off (PopupTiles in pvhook.c)
 const WIN_MARGIN = 8;
 
 /* A phone in either orientation. The guest layout is fixed (the boot snapshot bakes it in), so

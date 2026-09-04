@@ -377,10 +377,17 @@ static Popup g_dlg[DLG_TILES];
    are off-screen, which is what makes them a place to paint unseen. In desktop mode the whole
    screen is the viewport, so a tiled window would simply be a window sitting in the middle of the
    desktop -- which is exactly what it looked like. No tiles there. */
+/* Popup tiling is off by default (2026-09-03). Growing the screen to hold the tiles moved the
+   base USER scales an absolute mouse position by, and the host's is now wrong: pointer placements
+   stopped confirming, so every drag fell back to correcting itself -- a card in Solitaire lagging
+   the finger, a dialog caption that would not drag at all. The tiles come back with a host that
+   measures that base instead of assuming it. [PVMon] PopupTiles=1 turns them on. */
+static int g_popupTiles = -1;
 static int popup_tile(HWND h, int ax, int ay)
 {
     int i, free = -1;
-    if (g_desktop) return -1;
+    if (g_popupTiles < 0) g_popupTiles = GetProfileInt("PVMon", "PopupTiles", 0);
+    if (!g_popupTiles || g_desktop) return -1;
     for (i = 0; i < TILES; i++) {
         if (g_popup[i].hwnd == h) { g_popup[i].ax = ax; g_popup[i].ay = ay; return i; }
         if (free < 0 && (!g_popup[i].hwnd || !IsWindow(g_popup[i].hwnd) || !IsWindowVisible(g_popup[i].hwnd)))
