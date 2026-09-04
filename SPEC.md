@@ -3780,3 +3780,39 @@ before sending `WM_HSCROLL` and drops it when the range is empty, which is the h
 cannot move that way". The vertical axis is deliberately left alone: a focused list scrolls whether
 or not it has a bar. WIN.INI `[windows] Beep=no` covers whatever is left (over-scrolling a real list
 at its end, say); Control Panel's Sound dialog turns it back on for anyone who wants it.
+
+### 2026-09-04 — the line does 250 KB/s, and the ceiling after that is the guest's own stack
+Josh: "How do we get SLIP from 50 KB/s to 1 MB/s+". Measured, not guessed.
+
+**Where 50 KB/s came from.** Not the wire and not the emulator: `rwin / probe interval`. Trumpet
+advertises a 2048-byte receive window and never volunteers a window update, so the host sends one
+window and waits for its own retransmission timer -- 2048 bytes every 40 ms is 51.2 KB/s, which is
+what was measured. Halving the timer to 20 ms took it to 98.9 KB/s, which confirms the mechanism
+exactly.
+
+**The fix is the window, not a faster poll.** `TRUMPWSK.INI`: `rwin` 2048 -> 16384, `mtu` 576 ->
+1500 (so `mss` 512 -> 1460, and the host reads that off the SYN already), `slip-rcvbuf` and
+`slip-sndbuf` 8192 -> 16384. **55.9 KB/s -> 245.9 KB/s**, a 4.4x from five lines of INI, and the
+whole English Wikipedia article for Windows for Workgroups (1 MB) arrives in four seconds.
+
+**The new ceiling is the guest.** At 250 KB/s the guest runs at 29.9-31.8 MIPS -- essentially all of
+it, where at 50 KB/s it was idle at 0.6. That is about **122 instructions per byte**: the UART
+interrupt, Trumpet's SLIP unescaping, and its TCP path. Raising the interrupt only on the transition
+from an empty receive queue (so one interrupt drains a burst) changed nothing at all -- 248.6 KB/s
+against 254.3 -- so the cost is the stack itself, not interrupt entry. Reverted.
+
+**1 MB/s is not reachable over a serial port.** It would need ~30 instructions a byte and the
+transport moves one byte at a time by construction. The two routes that do reach it both move
+frames:
+- **NE2000 + Microsoft TCP/IP-32 over NDIS.** v86 already emulates the card and WFW 3.11 already has
+  NDIS; a frame lands in the card's buffer in one copy. Needs the TCP/IP-32 redistributable as an
+  asset, and `web/net.js` grows ARP and ethernet framing, which is small.
+- **A paravirtual net device in our own adapter**, the same shape as the PV blit engine: a
+  descriptor ring in guest memory, one port write per packet, the host doing the copy. Throughput
+  becomes memory-bandwidth-bound. It needs a guest NDIS MAC of our own -- a project on the scale of
+  the display driver.
+
+**Consequence for the page reader:** at 250 KB/s a 190 KB Cinepak clip downloads in under a second,
+so the download argument for MS Video 1 is gone. What is left is decoder size -- ~150 lines against
+600-900 -- and Cinepak is 4.2 dB better *after* the guest's palette has had its say (31.4 dB against
+27.2 on Josh's own clip at 172x228).
