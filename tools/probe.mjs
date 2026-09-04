@@ -236,6 +236,13 @@ for (const s of steps) {
     fs.writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]));
     console.log(`${ts()} png ${X},${Y} ${W}x${H} -> ${file}`);
   }
+  else if (op === "raw") {
+    /* scancode bytes verbatim, prefixes and breaks included: `raw:0x2a,0xe0,0x52,0xe0,0xd2,0xaa`
+       is Shift + the extended Insert, which is how Windows 3.1 hears a paste. */
+    for (const b of arg.split(",")) emulator.bus.send("keyboard-code", Number(b));
+    await sleep(200);
+    console.log(`${ts()} raw ${arg}`);
+  }
   else if (op === "clip") {
     /* CMD_CLIP: put text on the guest clipboard, the way the host does when the page is pasted
        into. `clip:hello` then Alt+E,P in Notepad pastes it. */

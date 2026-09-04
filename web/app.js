@@ -2605,7 +2605,10 @@ function pasteToGuest(text) {
    Windows 3.1's own clipboard keys are Ctrl+Insert, Shift+Insert and Shift+Delete: Ctrl+C/V/X did
    not become standard until later, and Notepad and Write here only listen for the old ones. So the
    host translates. */
-const CLIP_KEYS = { c: [[0x1D], [0x52]], x: [[0x2A], [0x53]], v: [[0x2A], [0x52]] };
+/* Insert twice over: the keypad's 0x52 is Insert only while Shift is up -- held down it is the
+   digit 0, which is why Shift+Insert pasted nothing while Ctrl+Insert copied fine. The paste
+   chord uses the extended Insert (E0 52), the grey key, which keeps its meaning under Shift. */
+const CLIP_KEYS = { c: [[0x1D], [0x52]], x: [[0x2A], [0xE0, 0x53]], v: [[0x2A], [0xE0, 0x52]] };
 function sendChord(mod, key) {
   sendScancodes(mod, true); sendScancodes(key, true);
   sendScancodes(key, false); sendScancodes(mod, false);
@@ -2634,7 +2637,7 @@ window.addEventListener("paste", ev => {
   pasteToGuest(t);
   /* ...and then tell the guest to paste it where the focus is, with the keys Windows 3.1 listens
      for. The clipboard has to be set first, so this waits for the command to be acknowledged. */
-  queue(async () => { await sleep(120); sendChord([0x2A], [0x52]); diag("clipboard: paste keys sent to the guest"); });
+  queue(async () => { await sleep(120); sendChord(CLIP_KEYS.v[0], CLIP_KEYS.v[1]); diag("clipboard: paste keys sent to the guest"); });
 });
 
 /* --------------------------------------------------------------------------- LCD filter ---
@@ -2675,7 +2678,7 @@ void main() {
   vec3 c = c0 * 0.7 + (cl + cr) * 0.15;
   float l = dot(c, vec3(0.299, 0.587, 0.114));
   /* Lifted black, compressed white: nothing in the photograph is near black or near white. */
-  float target = mix(0.10, 0.92, pow(l, 0.85));
+  float target = mix(0.02, 1.0, pow(l, 1.15));
   float was = texture2D(prev, uv).r;
   /* Asymmetric response: rising (going lighter) settles faster than falling. */
   float k = target > was ? 0.55 : 0.28;
@@ -2693,8 +2696,8 @@ void main() {
   float l = texture2D(lvl, uv).r;
   /* The panel is not neutral grey: it is a green-grey, warmer in the shadows than the highlights.
      These two are sampled from the photograph -- #4a4f48 at its darkest, #c8ccc0 at its lightest. */
-  vec3 dark = vec3(0.285, 0.305, 0.278);
-  vec3 light = vec3(0.855, 0.875, 0.815);
+  vec3 dark = vec3(0.075, 0.090, 0.070);
+  vec3 light = vec3(0.945, 0.965, 0.900);
   vec3 c = mix(dark, light, l);
 
   /* The grid, at the real guest-pixel pitch so it lands on pixel boundaries rather than beating
@@ -2708,14 +2711,24 @@ void main() {
   float gy = mix(1.0, f.y > 1.0 - 1.0 / max(pitch.y, 2.0) ? 0.975 : 1.0, on);
   c *= gx * gy;
 
-  /* The backlight. The tube runs down the RIGHT edge (Josh's machine), and its glow carries across
-     the panel, falling off with distance -- the whole screen is lit, brightest along that edge.
-     Then the vignette every one of these had. */
-  float edge = exp(-(1.0 - uv.x) * 4.5);
-  c += vec3(0.13, 0.17, 0.17) * edge;
-  c += vec3(0.05, 0.06, 0.05);                  // the panel is lit, not merely reflective
+  /* The backlight, and it is not even. One thin tube down the RIGHT edge (Josh's machine) lights
+     the whole panel through a diffuser that never worked properly: brightest along that edge,
+     falling off across, and blotchy everywhere -- a few broad lobes of light and shade that are a
+     property of the panel, so they do not move. Then the corner falloff every one of these had. */
+  float edge = exp(-(1.0 - uv.x) * 4.0);
+  float blotch = sin(uv.x * 3.1 + 1.7) * sin(uv.y * 2.3 + 0.4)
+               + 0.60 * sin(uv.x * 6.7 + 2.9) * sin(uv.y * 5.1 + 1.2)
+               + 0.35 * sin(uv.x * 11.3 + 0.8) * sin(uv.y * 9.7 + 2.4);
+  blotch /= 1.95;
+  /* Broad and unapologetic: the far side of one of these panels really is noticeably dimmer than
+     the tube side, and the diffuser really is patchy. */
+  float lit = 0.78 + 0.38 * edge + 0.17 * blotch;
+  /* Unevenness in the light multiplies what the panel transmits, so the shadows stay dark: a
+     backlight cannot make black text grey, it can only make the paper behind it patchy. */
+  c *= lit;
+  c += vec3(0.055, 0.070, 0.070) * edge * l;      // and the tube's own bloom, only where it is lit
   vec2 v = uv - 0.5;
-  c *= 1.0 - 0.28 * dot(v, v);
+  c *= 1.0 - 0.30 * dot(v, v);
 
   /* And the tube's own flicker: half a percent, at a rate that is not a multiple of any frame
      rate, so it never sits still and never strobes. */
