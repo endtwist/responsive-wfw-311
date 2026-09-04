@@ -36,9 +36,6 @@ being struck through in place. Slugs in brackets are the safer way to refer to o
    on the page appears in File Manager, and anything saved there comes back to the phone. The
    guest just sees a disk; no chrome.
 
-6. [clipboard] **Clipboard bridge.** Copy in Notepad or Write and paste into iOS, and the reverse. The
-   guest clipboard plus the hidden input, no visible UI.
-
 7. [share-sheet] **Share sheet for printed PDFs.** A print currently downloads. Hand it to the iOS share
    sheet instead so printing feels finished.
 
@@ -79,17 +76,6 @@ being struck through in place. Slugs in brackets are the safer way to refer to o
     accessibility tree from the window, menu and control information the guest already
     reports. Not visible chrome, so it stays inside the rule.
 
-15. [pointer-base] **Measure the size USER scales an absolute mouse position by.** The host
-    normalises a pointer placement against its own idea of the screen; USER keeps a copy of that
-    size which neither the live re-mode nor FakeScreen reaches, so any change of screen size
-    silently misplaces every tap and drag. That is what 2026-09-04's bad afternoon was: taps
-    hundreds of pixels from the finger, drags that never confirmed and retried instead, a card in
-    Solitaire lagging behind. The fix is to measure rather than assume -- place the pointer at a
-    known fraction, read back where the guest says it went, divide -- and to re-measure on every
-    mode change. A first attempt is written and WRONG (a tap landed at 200,200 where it should
-    have been 175,175, off by exactly the view scale, so something is mapped twice); the patch is
-    parked, not shipped, because this is the path that broke everything. **Prerequisite for items
-    16 and 17.**
 16. [dynamic-slots] **Grow and shrink the application columns on demand.** Four fixed columns
     (2026-09-04) are enough for the note plus a double-width program plus one more, but each costs
     640 x 970 x 4 bytes of pixel buffer and widens every dirty-row conversion whether it is in use
@@ -108,6 +94,38 @@ being struck through in place. Slugs in brackets are the safer way to refer to o
     seen working by Josh or measured on the phone: the scroll-bar touch-drag (a finger on the
     client's right or bottom strip is a pointer drag, not a scroll), and where the MS-DOS/QBASIC
     exit dialog lands (reported bottom-right, from a tab several rebuilds old).
+
+26. [lcd-filter] **A passive-matrix LCD look, in WebGL.** Josh's photo of ProSell Professional on
+    a 1992 laptop panel is the target: backlit greyscale, no colour at all, blacks lifted to a
+    warm grey, a cyan-white bloom along one edge where the tube is, visible pixel grid, and the
+    smear that a passive matrix leaves behind moving text. A post-process over the finished
+    composite, `?lcd=1`, purely visual -- the composite geometry, hit testing and input are
+    untouched, and nothing about the guest changes.
+    - **Pass structure.** Upload the 2D composite (402x684 on the phone, ~275k pixels: nothing)
+      to a texture each frame it changes, render one fragment shader to a canvas over the top.
+      One extra texture holds the previous filtered frame for the smear.
+    - **Tone.** Luminance first (Rec.601), then a lifted-black curve: `mix(0.10, 0.92, pow(l,
+      0.85))` is close to the photo, which has no true black anywhere. Then the tint -- the panel
+      is not neutral, it is a green-grey around #c8ccc0 at white and #4a4f48 at black, so the
+      grey is multiplied by that ramp rather than left neutral.
+    - **The smear (the giveaway).** Passive matrix is slow and asymmetric: a pixel going dark
+      lags more than one going light. `out = mix(prev, now, now > prev ? 0.55 : 0.28)` per frame,
+      which leaves a two-to-three-frame trail behind a dragged window and a visible ghost behind
+      scrolling text. This is what makes it read as an LCD of that era rather than a grey CRT.
+    - **Structure.** A 1px grid at the guest pixel pitch (multiply by 0.93 on the last row and
+      column of each pixel), and because the panel is 640x480 stretched, the horizontal pitch is
+      wider than the vertical -- worth keeping, it is half the look.
+    - **Backlight.** A broad radial gradient brightening toward one edge plus a narrow cyan-white
+      band along it (the photo has it left and bottom), a mild vignette, and a slow ~0.5% flicker
+      at a frequency that is not a multiple of the frame rate so it never beats.
+    - **Costs and risks.** Trivial GPU work; the real costs are a second canvas in the compositing
+      path and losing the "composite nothing on 95% of frames" saving, because the smear has to
+      keep running for a few frames after the last change (bounded: stop when the trail is within
+      one 8-bit step of the source). Screenshots for Josh should be taken pre-filter, or the
+      grid and the smear will be read as bugs in the compositor.
+    - **Rule note.** This draws pixels Windows never painted -- it is a display, not chrome, and
+      Josh asked for it, but it is the first thing in the system that is neither guest pixels nor
+      the keyboard bar. Off by default.
 
 ## Completed
 
@@ -144,6 +162,13 @@ Finished, newest work last within its number. Numbers are for life.
    the snapshot; and running a program (F5) panicked v86 on `INT EFh`, a vector past the DOS VM's
    IDT limit, which is a `#GP` on a real 386. A windowed PIF plus a one-line CPU fix; EDIT and the
    other DOS programs run under the already-windowed `_DEFAULT.PIF`.
+
+6. [clipboard] ~~**Clipboard bridge.**~~ Done 2026-09-04: PVMON joins the clipboard viewer
+   chain and ships CF_TEXT out as base64 on the debug channel; the host holds it and writes it to
+   the system clipboard on the next touch, since iOS only permits that inside a gesture. A paste
+   anywhere on the page comes back as CMD_CLIP and PVMON puts it on the clipboard as CF_TEXT.
+   ANSI and CRLF, 4 KB either way, no visible UI. Verified headlessly in both directions and
+   round trip (new probe step `clip:<text>`).
 
 11. [about-exe] ~~**First-run note as ABOUT.EXE.**~~ Done 2026-09-03 (SPEC): `guest/about/` builds ABOUT.EXE with
     the Watcom toolchain, staged as `image/changes/windows/ABOUT.EXE`, opened once by WIN.INI
@@ -187,6 +212,21 @@ Finished, newest work last within its number. Numbers are for life.
       rejected: a launch's reads are too scattered to predict — 16 speculative fetches to remove 4
       of 10 stalls.)
 
+15. [pointer-base] ~~**Measure the size USER scales an absolute mouse position by.**~~ The host
+    normalises a pointer placement against its own idea of the screen; USER keeps a copy of that
+    size which neither the live re-mode nor FakeScreen reaches, so any change of screen size
+    silently misplaces every tap and drag. That is what 2026-09-04's bad afternoon was: taps
+    hundreds of pixels from the finger, drags that never confirmed and retried instead, a card in
+    Solitaire lagging behind. The fix is to measure rather than assume -- place the pointer at a
+    known fraction, read back where the guest says it went, divide -- and to re-measure on every
+    mode change. Done 2026-09-04: two probes an eighth and three eighths across, base from the
+    difference (which cancels any offset of USER's own and catches a stale report), then verified
+    before it is adopted -- place the pointer at a known point with it and require the guest to
+    land within two pixels, or keep the old behaviour and say so in the trace. Measured in the
+    pane: 3200x968 against a host screen of 3200x970, USER's own rounding. The first attempt was
+    thought wrong on evidence that turned out to be an artifact of the Browser pane freezing
+    requestAnimationFrame while hidden, so `view` was stale and a tap that looked misplaced was
+    correct for it. Unblocks 16 and 17.
 19. [popup-publish] ~~**A popup is reported the moment it is shown.**~~ Done 2026-09-04: nothing
     activates when a menu pops up, so the CBT hook never fired and the host learned of it only at
     PVMON's next poll -- 287 ms during which the popup was already painted and composited at
