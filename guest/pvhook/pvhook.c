@@ -373,9 +373,14 @@ static char hook_kind(HWND h, HWND skip, char FAR *cls, HWND FAR *owner)
 typedef struct { HWND hwnd; int ax, ay; } Popup;
 static Popup g_popup[TILES];
 static Popup g_dlg[DLG_TILES];
+/* Tiles only exist because the phone shows one column of a much wider screen: the rows below it
+   are off-screen, which is what makes them a place to paint unseen. In desktop mode the whole
+   screen is the viewport, so a tiled window would simply be a window sitting in the middle of the
+   desktop -- which is exactly what it looked like. No tiles there. */
 static int popup_tile(HWND h, int ax, int ay)
 {
     int i, free = -1;
+    if (g_desktop) return -1;
     for (i = 0; i < TILES; i++) {
         if (g_popup[i].hwnd == h) { g_popup[i].ax = ax; g_popup[i].ay = ay; return i; }
         if (free < 0 && (!g_popup[i].hwnd || !IsWindow(g_popup[i].hwnd) || !IsWindowVisible(g_popup[i].hwnd)))
@@ -411,6 +416,7 @@ static BOOL popup_anchor(HWND h, int FAR *ax, int FAR *ay)
 static int dialog_tile(HWND h, int ax, int ay)
 {
     int i, free = -1;
+    if (g_desktop) return -1;
     for (i = 0; i < DLG_TILES; i++) {
         if (g_dlg[i].hwnd == h) { g_dlg[i].ax = ax; g_dlg[i].ay = ay; return i; }
         if (free < 0 && (!g_dlg[i].hwnd || !IsWindow(g_dlg[i].hwnd) || !IsWindowVisible(g_dlg[i].hwnd)))

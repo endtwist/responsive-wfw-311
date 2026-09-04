@@ -944,6 +944,13 @@ let guestFocus = { want: false, cls: "", flags: "" };
 const LEARNED_KEY = "pv.textclasses";
 let learnedText = new Set();
 try { learnedText = new Set(JSON.parse(localStorage.getItem(LEARNED_KEY) || "[]")); } catch (e) {}
+/* ?forget=1 empties the learned set, ?forget=Solitaire drops one class: a stray hold teaches a
+   class that then raises the keyboard on every tap, and the page has to be able to take it back. */
+if (params.get("forget")) {
+  const f = params.get("forget");
+  if (f === "1") learnedText.clear(); else learnedText.delete(f);
+  try { localStorage.setItem(LEARNED_KEY, JSON.stringify([...learnedText])); } catch (e) {}
+}
 function learnTextClass(cls, flags) {
   /* Never learn a class Windows itself says takes no text (Button, ListBox, a #NNNNN system class,
      Progman ...): a hold over one of those is the user asking for the keyboard once, not forever. */
@@ -952,6 +959,18 @@ function learnTextClass(cls, flags) {
   try { localStorage.setItem(LEARNED_KEY, JSON.stringify([...learnedText])); } catch (e) {}
   kbdLog(`learned "${cls}" takes text (flags=${flags || "-"}); known: ${[...learnedText].join(",")}`);
   report("kbd", `learned class ${cls}`);
+  return true;
+}
+/* ...and unlearn it when the user dismisses the keyboard over that same class. A hold is easy to
+   fire by accident on a caption, and the class it taught stayed taught: after one stray hold on
+   Solitaire's title bar, every tap on the cards raised the keyboard. Dismissing the keyboard is
+   the plainest statement that this class does not want one. */
+function unlearnTextClass(cls) {
+  if (!cls || !learnedText.has(cls)) return false;
+  learnedText.delete(cls);
+  try { localStorage.setItem(LEARNED_KEY, JSON.stringify([...learnedText])); } catch (e) {}
+  kbdLog(`unlearned "${cls}": the keyboard was dismissed over it; known: ${[...learnedText].join(",") || "none"}`);
+  report("kbd", `unlearned class ${cls}`);
   return true;
 }
 /* Is the focus, as the guest last described it, text-capable? */
@@ -3443,7 +3462,11 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
        its own key does not go through us, so the latch stayed on and every following tap brought
        it back -- "dismissing it is transient". A keyboard that is not showing when a new gesture
        starts has been dismissed, and the latch goes with it. */
-    if (keyboardHeld && !softKeyboardShowing()) { keyboardHeld = false; kbdLog("touchstart: hold cleared, the keyboard was dismissed"); }
+    if (keyboardHeld && !softKeyboardShowing()) {
+      keyboardHeld = false;
+      unlearnTextClass(guestFocus.cls);
+      kbdLog("touchstart: hold cleared, the keyboard was dismissed");
+    }
     setGuestCursor(false);
     if (switcher && ev.touches.length !== 1) { ev.preventDefault(); return; }   // modal: no pinch/scroll behind it
     if (ev.touches.length === 2) {
