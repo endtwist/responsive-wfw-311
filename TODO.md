@@ -190,3 +190,31 @@ refer to one.
   resume, so a drawing is still there tomorrow.
 - **Nightly tour against production** (raised, not yet agreed).
 - **Landscape**: deliberately not a priority. Portrait is the target.
+
+## Maybe
+
+- **Full colour in the guest** (2026-09-04, Josh: the plan is to put modern content — photos,
+  gradients, browser-sourced images — into the guest). Windows 3.1 is not the obstacle: vendor
+  drivers shipped 15/16/24 bpp and GDI handles direct-colour DIBs with no palette. The obstacles
+  are ours, and there are three ways round them.
+  - **Prerequisite: done.** The PV blit engine addresses the frame buffer in bytes rather than
+    assuming a pixel is one, so it works at 8/15/16/24/32 bpp (`pv_px_bytes`, 136/136 adapter
+    checks, eleven at 16 bpp). Above 8 bpp the host pixel path already converts in rust and
+    derives its dirty rows by pixel size, so the host needs nothing.
+  - **(1) Palette-optimised 8 bpp** — days, no driver work, fully native. The host quantises an
+    image to a per-image 236-colour palette with Floyd-Steinberg dithering and hands the guest an
+    ordinary BMP; the palette manager gives an application 236 of the 256 entries, which is what
+    1993 software did with photographs and it looks it. Limits: two photos on screen share one
+    palette, and gradients band.
+  - **(2) A 16 bpp driver** — the real project, and the largest piece of work discussed here.
+    `PVDISP` is the full DDK VGA-family driver: `BLT88/18/81/11/216`, `BS216`, `BLTPAT`,
+    `BLTSTOS`, `STRBLT`, the bitmap-conversion family (`BMC_MAIN/ITE/ETI/NEW/WSEG`) and the ROP
+    tables, all depth-specific, with text, pattern fills, the cursor's XOR and the DIB entry
+    points going through them. Staging: format tables and `Enable`, then 16->16 and 1->16 blits
+    (the mono paths are masks and mostly depth-agnostic), then text, then patterns -- 8 bpp kept
+    as a switch so the frame rate can be A/B'd rather than discovered on the phone. Cost at run
+    time: two bytes a pixel is 2x the bandwidth for every blit the guest performs, on a machine
+    whose constraint is guest CPU (~35 MIPS while busy).
+  - **(3) Host-composited images** — cheap, looks perfect, and it breaks the standing rule: the
+    host would be drawing pixels Windows never painted, over a rectangle the guest reserves.
+    Recorded for completeness; not to be built without Josh saying so.
