@@ -1348,8 +1348,9 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         hUrl = 0; hGet = 0;
         if (g_wideHost)
             hNote = CreateWindow("static",
-                "You are on a desktop, so this is plain Windows 3.11 and the mouse works as it "
-                "always did. Open it on a phone to see what it was built for.",
+                "On a desktop this is Windows 3.11 with a few modern affordances. The real magic "
+                "is on a phone. Open \"Phone\" in Program Manager to see that here, or open this "
+                "site on your own phone.",
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10, hwnd, (HMENU)-1, inst, NULL);
         hHide = CreateWindow("button", "&Don't show this again",
                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -1359,7 +1360,7 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             RECT rc;
             HDC hdc = GetDC(hwnd);
             HFONT old = (HFONT)SelectObject(hdc, f);
-            char note[200];
+            char note[400];      /* the note is measured by reading it back: room to grow */
             GetClientRect(hwnd, &rc);
             rc.left = 0; rc.top = 0; rc.right = rc.right - 2 * MARGIN; rc.bottom = 1;
             GetWindowText(hNote, note, sizeof(note));
