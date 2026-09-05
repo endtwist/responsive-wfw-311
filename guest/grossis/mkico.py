@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Write grossis.ico: one 32x32 16-colour icon (a globe) for GROSSIS.EXE.
+"""Write grossis.ico for GROSSIS.EXE: the favicon from gross.is, as a Windows 3.1 icon.
 
 The standard Windows 16-colour palette, so tools/grpadd.py's nearest-colour mapping into the
 Program Manager group file is the identity. Layout: ICONDIR + ICONDIRENTRY + a DIB whose
 BITMAPINFOHEADER has height 2*32 (XOR bits then the AND mask), rows bottom-up.
 """
+import os
 import struct
 import sys
+
+from PIL import Image
 
 STD16 = [(0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0), (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
          (128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0), (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255)]
@@ -23,24 +26,28 @@ def rect(x0, y0, x1, y1, c):
                 px[y][x] = c
 
 
-# A globe: the world, which is where this program goes. A blue disc with two green landmasses,
-# a black outline, and a white glint at the top left, all inside 32 pixels.
-CY = CX = 16
+# The site's own favicon (guest/grossis/favicon.png, the 32x32 frame of https://gross.is/
+# favicon.ico), mapped onto the sixteen colours Windows 3.1 has. It is a red glyph on nothing, so
+# the mapping is two decisions per pixel: transparent below half alpha, and otherwise the nearest
+# of the sixteen -- which for this vermilion is the palette's bright red.
+def nearest(rgb):
+    r, g, b = rgb
+    best, bi = None, 0
+    for i, (pr, pg, pb) in enumerate(STD16):
+        d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2
+        if best is None or d < best:
+            best, bi = d, i
+    return bi
+
+
+src = Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.png")).convert("RGBA")
+if src.size != (W, H):
+    src = src.resize((W, H), Image.LANCZOS)
+sp = src.load()
 for y in range(H):
     for x in range(W):
-        dx, dy = x - CX + 0.5, y - CY + 0.5
-        d = (dx * dx + dy * dy) ** 0.5
-        if d <= 14.5:
-            px[y][x] = BLUE
-        if 13.0 < d <= 14.5:
-            px[y][x] = BLACK
-rect(11, 7, 17, 9, GREEN := 2)               # a landmass across the top
-rect(9, 10, 13, 12, GREEN)
-rect(16, 12, 21, 15, GREEN)                  # and one to the right
-rect(10, 17, 15, 20, GREEN)                  # and one below
-rect(18, 19, 21, 21, GREEN)
-rect(9, 8, 10, 8, WHITE)                     # the glint
-rect(9, 9, 9, 9, WHITE)
+        r, g, b, a = sp[x, y]
+        px[y][x] = None if a < 128 else nearest((r, g, b))
 
 pal = b"".join(struct.pack("<4B", b, g, r, 0) for (r, g, b) in STD16)
 xor = bytearray()

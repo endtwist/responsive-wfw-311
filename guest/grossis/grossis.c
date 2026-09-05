@@ -31,7 +31,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 {
     /* No icon and no beep: Program Manager's Exit Windows box has neither. MB_TASKMODAL because
        this program has no window of its own to own the box. */
-    if (MessageBox(NULL, "You will now exit Windows.", "Exit Windows",
+    if (MessageBox(NULL, "You will now be redirected to gross.is.", "Exit Windows",
                    MB_OKCANCEL | MB_TASKMODAL) == IDOK)
         dbg("PVEXIT");
     return 0;
