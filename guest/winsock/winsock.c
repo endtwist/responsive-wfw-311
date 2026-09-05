@@ -130,7 +130,11 @@ static void dbg(const char *s)
    that no function between the two may pump messages -- interrupts do not reach this code, and the
    rd/wr above already survive the one interrupt handler that shares the index register. Every
    sequence in this file is written that way, and sel() is called again at the head of each. */
-static void sel(int h) { wr(R_PV_SEL, (unsigned)h); }
+static void sel(int h)
+{
+    int tries = 4;
+    do { wr(R_PV_SEL, (unsigned)h); } while ((int)(rd(R_PV_SEL) & 7) != (h & 7) && --tries);
+}
 
 /* Out of the data register in bursts, `rep insw` in all but name: the index is set once and the
    data register read in a loop, one instruction per two bytes, which is what makes a megabyte cost
@@ -677,17 +681,24 @@ int PASCAL FAR send(SOCKET sock, const char FAR *buf, int len, int flags)
     if (len < 0) return fail(WSAEINVAL);
     if (len == 0) return 0;
 
+    /* One command per chunk, ARG naming the exact byte count, which is what the device asks for.
+       An odd count goes out as a whole number of words with a zero in the top half of the last
+       one, and the device is told to send one byte fewer than it was given: the pad has to be
+       dropped on that side, since nothing the guest can write will take it back off the queue. */
     while (sent < (unsigned)len) {
         n = (unsigned)len - sent;
         if (n > PV_BLOCK) n = PV_BLOCK;
+        if (n > 1 && (n & 1) && sent + n < (unsigned)len) n--;   /* keep every chunk but the last even */
         sel(i);
         stuff(buf + sent, n);
         wr(R_PV_ARG, n);
         wr(R_PV_CMD, PVCMD_SEND);
         sent += n;
     }
-    s->posted &= ~FD_WRITE;                              /* re-arm: there is room for more */
-    post(i, FD_WRITE, 0);
+    /* No FD_WRITE here on purpose. It is posted once, when the connection comes up, and again only
+       after a send that had to be refused for want of room -- and this one never refuses, because
+       the device takes the whole buffer. A DLL that posted FD_WRITE after every send would put a
+       program that sends on every FD_WRITE into a loop with itself. */
     return (int)sent;
 }
 
@@ -786,30 +797,33 @@ static BOOL sel_writable(int i)
 }
 static BOOL sel_except(int i) { pump(i); return sk[i].failed; }
 
-/* One pass over the three sets, writing back only what is ready. */
+/* One pass over the three sets, writing back only what is ready. The working sets are the DLL's
+   own rather than locals: an fd_set is 130 bytes, this runs on whichever program's stack called
+   in, and some of them have very little of it. */
+static fd_set sel_r, sel_w, sel_e;
+
 static int select_scan(fd_set FAR *rd_, fd_set FAR *wr_, fd_set FAR *ex_)
 {
-    fd_set r, w, e;
     u_int k;
     int i, n = 0;
 
-    FD_ZERO(&r); FD_ZERO(&w); FD_ZERO(&e);
+    FD_ZERO(&sel_r); FD_ZERO(&sel_w); FD_ZERO(&sel_e);
     if (rd_) for (k = 0; k < rd_->fd_count; k++) {
         i = idx_of(rd_->fd_array[k]);
-        if (i >= 0 && sel_readable(i)) { FD_SET(rd_->fd_array[k], &r); n++; }
+        if (i >= 0 && sel_readable(i)) { FD_SET(rd_->fd_array[k], &sel_r); n++; }
     }
     if (wr_) for (k = 0; k < wr_->fd_count; k++) {
         i = idx_of(wr_->fd_array[k]);
-        if (i >= 0 && sel_writable(i)) { FD_SET(wr_->fd_array[k], &w); n++; }
+        if (i >= 0 && sel_writable(i)) { FD_SET(wr_->fd_array[k], &sel_w); n++; }
     }
     if (ex_) for (k = 0; k < ex_->fd_count; k++) {
         i = idx_of(ex_->fd_array[k]);
-        if (i >= 0 && sel_except(i)) { FD_SET(ex_->fd_array[k], &e); n++; }
+        if (i >= 0 && sel_except(i)) { FD_SET(ex_->fd_array[k], &sel_e); n++; }
     }
     if (n) {
-        if (rd_) *rd_ = r;
-        if (wr_) *wr_ = w;
-        if (ex_) *ex_ = e;
+        if (rd_) *rd_ = sel_r;
+        if (wr_) *wr_ = sel_w;
+        if (ex_) *ex_ = sel_e;
     }
     return n;
 }

@@ -3944,3 +3944,34 @@ images survived. And nothing had ever pruned `image/parts/`: `tools/split-image.
 directory of zstd chunks per deploy and removed none of them, which is where 748 MB across 35
 directories went. The pruner now keeps the last three stamped builds whatever they are called, and
 takes each build's parts directory with it.
+
+### 2026-09-04 — WINSOCK.DLL: the fast path becomes the general one
+`guest/winsock` is a Windows Sockets 1.1 implementation over the PV socket device -- our own
+`WINSOCK.DLL`, in `C:\WINDOWS`, which beats anything on the PATH. Any period Winsock program now
+reaches the internet at PV-socket speed with no TCP stack in the guest at all.
+
+All 47 standard ordinals are exported and real entry points (`guest/winsock/ordinals.py` checks the
+built NE's export table, and `build.sh` runs it). Implemented properly: WSAStartup/WSACleanup with
+per-task instances, socket/connect/send/recv (with MSG_PEEK)/closesocket, select with real timeouts,
+ioctlsocket FIONBIO/FIONREAD, gethostbyname, inet_addr/inet_ntoa, the byte-order four,
+WSAAsyncSelect with correct one-shot and re-arm semantics, and the blocking machinery -- a default
+hook that pumps messages, so a blocking program does not freeze a cooperatively multitasked machine.
+Stubbed, because the device has no inbound path: accept, listen, sendto.
+
+**Proved by `guest/wstest`**, the smallest program that can prove it: it imports the entry points
+from `WINSOCK.DLL` by ordinal at load time and does what any Winsock program does. Against
+example.com it reports WSAStartup ok, gethostbyname ok, connect ok, send ok, and **643 bytes
+received** -- the page and its headers, byte for byte what the device delivered.
+
+**Two build mechanics for Win16 DLLs, both non-obvious.** `-zw` (not `-zW`) is what gives every far
+function the `push ds / pop ax / nop` prologue the loader patches with the DLL's own data segment;
+without it an exported function runs on the *caller's* DS and reads every static out of the calling
+program's memory. And `__export` in the source writes an export record that makes the linker refuse
+the ordinal directives and assign its own, so exports are declared only in `wlink`.
+
+**Two bugs it found in the device half.** An odd-length send left a pad byte queued -- the guest
+writes whole words, so consuming only `n` bytes left a zero at the head of the queue to become the
+first byte of the *next* send on that handle, and nothing in the register set could clear it from the
+guest. And the handles needed an owner: FETCH.EXE never wrote the select register, so once the DLL
+started handing out handles from 0 upwards they collided. Fetch now claims handle 7 and reselects
+before every burst, since the DLL's timer runs between its messages.

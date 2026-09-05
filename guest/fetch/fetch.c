@@ -65,6 +65,9 @@
 #define R_PV_STATE   0x33
 #define R_PV_DATA    0x34      /* read: the next two bytes of the staged block, advancing */
 #define R_PV_CHAR    0x35      /* write: one byte of the URL, appended */
+#define R_PV_SEL     0x36      /* which of the device's eight handles the other registers act on */
+#define PV_HANDLE    7         /* ours. WINSOCK.DLL hands out 0 upwards, so take the far end and
+                                  reselect before every burst: its timer runs between our messages. */
 
 #define PVCMD_OPEN   1
 #define PVCMD_READ   2
@@ -292,6 +295,7 @@ static void fetch_start(HWND hwnd)
     unsigned len, res, st;
 
     drop(hwnd);
+    wr(R_PV_SEL, PV_HANDLE);
     GetWindowText(hUrl, raw_url, sizeof(raw_url));
     len = clean_url(raw_url, url);
     if (!len) { status("Type an address."); return; }
@@ -346,6 +350,7 @@ static void pv_pump(HWND hwnd)
     int blocks = 0;
     char msg[80];
 
+    wr(R_PV_SEL, PV_HANDLE);
     for (;;) {
         st = rd(R_PV_STATE);
         if (st == PVST_FETCHING) return;                  /* nothing yet; ask again next tick */

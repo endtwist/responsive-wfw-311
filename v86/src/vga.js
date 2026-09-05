@@ -2920,7 +2920,11 @@ VGAScreen.prototype.pv_sock_send = function(len)
     const k = this.pv_sock_cur();
     const n = Math.min(len > 0 ? len : 0, k.out.length);
     const bytes = Uint8Array.from(k.out.slice(0, n));
-    k.out = k.out.slice(n);
+    /* Drop the pad byte with the data. The guest writes whole words, so an odd count leaves one
+       zero byte behind, and consuming only `n` of them left it at the head of the queue to become
+       the first byte of the next send on this handle. Nothing in the register set can clear it from
+       the guest side, so it has to be dropped here. */
+    k.out = k.out.slice(n + (n & 1));
     k.result = n;
     this.bus.send("pv-sock-send", { handle: this.pv_sel & 7, bytes });
 };
