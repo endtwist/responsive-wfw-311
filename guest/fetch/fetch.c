@@ -1,30 +1,46 @@
-/* FETCH.EXE - the guest's own web client, in native Win16 against Winsock.
+/* FETCH.EXE - the guest's own web client, in native Win16 against the paravirtual socket.
  *
- * COM2 is a SLIP line to the host (web/net.js), Trumpet Winsock is the stack on top of it, and the
- * host turns each HTTP request the guest makes into a real one (api/fetch.js) -- which is how a
- * machine with no ciphers and about 35 MIPS reads a 2026 web site: it speaks plain HTTP/1.0 to a
- * terminal server that does not exist, and the TLS happens off the device.
+ * There is no TCP stack under this program any more. There used to be: COM2 was a SLIP line to the
+ * host and Trumpet Winsock sat on top of it, and that worked, but it cost about 122 guest
+ * instructions per byte received (238 with Microsoft's TCP/IP-32 over an emulated NE2000). At the
+ * 31 MIPS this machine runs at, that is a ceiling of a couple of hundred KB/s, and all of it spent
+ * on checksums and window bookkeeping for a link that is not lossy and is not even a link.
  *
- * Windows for Workgroups shipped no HTTP client, so this is one, written the way one would have
- * been written then: an overlapped window with an edit control for the address, a multi-line edit
- * for what came back, and an asynchronous socket driven by WSAAsyncSelect so the 16-bit scheduler
- * is never blocked. Every control is stock and the font is the system font.
+ * So the stack moved to the other side of the emulator. The host fetches the URL, and the guest
+ * reads the reply out of a 64 KB window of adapter memory: one `rep movsw` per byte, and the
+ * per-byte cost stops being a protocol and becomes a memory copy. The device is four registers on
+ * the same index/data pair the display adapter already uses (0x1CE/0x1CF):
  *
- * The reply goes to a file as it arrives (C:\TEMP\FETCH.HTM) and only the first 30 KB is kept in
- * memory to show. That is the difference between a viewer with a 64 KB address space and one that
- * can fetch a whole 2026 page: nothing about the transfer is bounded by the segment any more, the
- * window shows as much as a stock edit control can hold, and Open hands the file to Write, which
- * pages from disk. It also makes a fetched page an ordinary file the rest of Windows can open.
+ *     0x30 CMD     1 = OPEN, 2 = READ, 3 = CLOSE      (written to execute)
+ *     0x31 ARG     OPEN: length of the URL in the window; READ: how many bytes we want
+ *     0x32 RESULT  OPEN: 0 accepted; READ: bytes actually placed in the window
+ *     0x33 STATE   0 idle, 1 fetching, 2 data ready, 3 complete, 0xFF failed
  *
- * WINSOCK.DLL is loaded and its entry points taken by ordinal rather than linked against an import
- * library, because there is no Winsock import library in this toolchain and the ordinals are the
- * ones the 1.1 specification fixes (socket = 23, connect = 4, ...). It also means the program still
- * starts when no stack is installed, and says so, instead of failing to load at all.
+ * and the window itself is bank 0x70 of adapter memory, seen through the A0000 aperture. The
+ * aperture's bank is the display driver's own register, so it is saved and put back around every
+ * access, and every access is kept short.
+ *
+ * The rest of the program is unchanged, because none of it was ever about sockets: an overlapped
+ * window with an edit control for the address, a multi-line read-only edit for what came back, the
+ * whole reply streamed to C:\TEMP\FETCH.HTM as it arrives, and only the first 30 KB kept in memory
+ * to show. That is the difference between a viewer with a 64 KB address space and one that can
+ * fetch a whole 2026 page: nothing about the transfer is bounded by the segment, the window shows
+ * as much as a stock edit control can hold, and Open hands the file to Write, which pages from
+ * disk. It also makes a fetched page an ordinary file the rest of Windows can open.
+ *
+ * The reply is still a whole HTTP response -- status line, headers, blank line, body -- so it is
+ * parsed exactly as it was when a socket delivered it.
+ *
+ * Draining happens on a Windows timer rather than in a loop. Windows 3.11 is cooperatively
+ * multitasked: a program that spins waiting for the host stops the machine, including the host's
+ * chance to answer. Each WM_TIMER takes everything the host has ready and then returns.
  *
  * Build: guest/fetch/build.sh  (Open Watcom via tools/watcom.sh)
  */
 #include <windows.h>
-#include <string.h>            /* _fmemcpy, _fmemset */
+#include <string.h>            /* _fmemcpy */
+#include <conio.h>             /* inpw, outpw */
+#include <i86.h>              /* _disable, _enable: the index register is shared with the mouse */
 
 #define ID_URL    1
 #define ID_GET    2
@@ -33,110 +49,73 @@
 #define ID_CLOSE  7
 #define ID_STATUS 5
 #define ID_BODY   6
-#define WM_SOCKET (WM_USER + 100)
+#define IDT_PUMP  1
+#define PUMP_MS   10           /* Windows rounds this up to the 18.2 Hz tick; that is fast enough */
 
 #define MARGIN 10
 #define ROW    26
 #define GAP     8
 
-/* ------------------------------------------------------------------ Winsock, by ordinal */
-typedef unsigned int SOCKET;
-#define INVALID_SOCKET ((SOCKET)~0)
-#define SOCKET_ERROR   (-1)
-#define AF_INET         2
-#define SOCK_STREAM     1
-#define FD_READ         0x01
-#define FD_WRITE        0x02
-#define FD_CONNECT      0x10
-#define FD_CLOSE        0x20
-#define WSAEWOULDBLOCK  10035
+/* ------------------------------------------------------------------ the adapter */
+#define DISPI_INDEX  0x1CE
+#define DISPI_DATA   0x1CF
+#define R_DEBUG      0x16      /* the host's log, one byte per write, flushed by a newline */
+#define R_PV_CMD     0x30
+#define R_PV_ARG     0x31
+#define R_PV_RESULT  0x32
+#define R_PV_STATE   0x33
+#define R_PV_DATA    0x34      /* read: the next two bytes of the staged block, advancing */
+#define R_PV_CHAR    0x35      /* write: one byte of the URL, appended */
 
-struct sockaddr_in {
-    short          sin_family;
-    unsigned short sin_port;
-    unsigned long  sin_addr;
-    char           sin_zero[8];
-};
-struct hostent {
-    char FAR *h_name;
-    char FAR * FAR *h_aliases;
-    short h_addrtype;
-    short h_length;
-    char FAR * FAR *h_addr_list;
-};
+#define PVCMD_OPEN   1
+#define PVCMD_READ   2
+#define PVCMD_CLOSE  3
 
-typedef int         (PASCAL FAR *FN_startup)(WORD, char FAR *);
-typedef int         (PASCAL FAR *FN_cleanup)(void);
-typedef SOCKET      (PASCAL FAR *FN_socket)(int, int, int);
-typedef int         (PASCAL FAR *FN_connect)(SOCKET, struct sockaddr_in FAR *, int);
-typedef int         (PASCAL FAR *FN_send)(SOCKET, const char FAR *, int, int);
-typedef int         (PASCAL FAR *FN_recv)(SOCKET, char FAR *, int, int);
-typedef int         (PASCAL FAR *FN_close)(SOCKET);
-typedef struct hostent FAR * (PASCAL FAR *FN_byname)(const char FAR *);
-typedef unsigned long (PASCAL FAR *FN_inetaddr)(const char FAR *);
-typedef unsigned short (PASCAL FAR *FN_htons)(unsigned short);
-typedef int         (PASCAL FAR *FN_asyncsel)(SOCKET, HWND, unsigned int, long);
-typedef int         (PASCAL FAR *FN_lasterr)(void);
+#define PVST_IDLE     0
+#define PVST_FETCHING 1
+#define PVST_DATA     2
+#define PVST_DONE     3
+#define PVST_ERROR    0xFF
 
-static HINSTANCE    ws;                    /* WINSOCK.DLL */
-static FN_startup   p_startup;
-static FN_cleanup   p_cleanup;
-static FN_socket    p_socket;
-static FN_connect   p_connect;
-static FN_send      p_send;
-static FN_recv      p_recv;
-static FN_close     p_closesocket;
-static FN_byname    p_gethostbyname;
-static FN_inetaddr  p_inet_addr;
-static FN_htons     p_htons;
-static FN_asyncsel  p_asyncselect;
-static FN_lasterr   p_lasterror;
+#define PV_BLOCK   0xF000u     /* the most one READ may hand back: the device's own limit */
+#define PV_CHUNK   0x2000u     /* copied out of the aperture this much at a time */
 
-/* MAKELP(0, ordinal): a selector of zero and the ordinal as the offset is how Win16 asks for an
-   entry point by number rather than by name. */
-static FARPROC by_ord(HINSTANCE h, unsigned ord)
+/* The adapter is programmed as an index write then a data access. PVMOUSE.DRV's interrupt handler
+   writes the same index register (the cursor position, 1Dh..1Fh), so an interrupt landing between
+   the two halves would read or write the wrong register. cli/popf around the pair hangs the system
+   VM (a ring-3 popf does not restore IF the way the VMM's trapped cli expects), so the pair is
+   checked instead: the index reads back, and if the handler moved it the access is repeated. This
+   is the same rd/wr PVMON.EXE uses, and for the same reason. */
+static unsigned rd(unsigned idx)
 {
-    return GetProcAddress(h, (LPCSTR)(unsigned long)ord);
+    unsigned v; int tries = 4;
+    do { outpw(DISPI_INDEX, idx); v = inpw(DISPI_DATA); } while (inpw(DISPI_INDEX) != idx && --tries);
+    return v;
 }
-static BOOL winsock_load(void)
+static void wr(unsigned idx, unsigned v)
 {
-    char buf[512];                          /* WSADATA: bigger than the struct, never read here */
-    if (ws) return TRUE;
-    ws = LoadLibrary("WINSOCK.DLL");
-    if ((UINT)ws < 32) { ws = 0; return FALSE; }
-    p_startup       = (FN_startup)  by_ord(ws, 115);
-    p_cleanup       = (FN_cleanup)  by_ord(ws, 116);
-    p_socket        = (FN_socket)   by_ord(ws, 23);
-    p_connect       = (FN_connect)  by_ord(ws, 4);
-    p_send          = (FN_send)     by_ord(ws, 19);
-    p_recv          = (FN_recv)     by_ord(ws, 16);
-    p_closesocket   = (FN_close)    by_ord(ws, 3);
-    p_gethostbyname = (FN_byname)   by_ord(ws, 52);
-    p_inet_addr     = (FN_inetaddr) by_ord(ws, 10);
-    p_htons         = (FN_htons)    by_ord(ws, 9);
-    p_asyncselect   = (FN_asyncsel) by_ord(ws, 101);
-    p_lasterror     = (FN_lasterr)  by_ord(ws, 111);
-    if (!p_startup || !p_socket || !p_connect || !p_send || !p_recv || !p_asyncselect) {
-        FreeLibrary(ws); ws = 0; return FALSE;
-    }
-    if (p_startup(0x0101, buf) != 0) { FreeLibrary(ws); ws = 0; return FALSE; }
-    return TRUE;
+    int tries = 4;
+    do { outpw(DISPI_INDEX, idx); outpw(DISPI_DATA, v); } while (inpw(DISPI_INDEX) != idx && --tries);
 }
+static void dbg(const char *s) { while (*s) wr(R_DEBUG, (unsigned char)*s++); wr(R_DEBUG, 10); }
 
 /* ------------------------------------------------------------------ state */
 #define RAW_MAX  30000u              /* body bytes kept in memory, to show */
 #define SHOW_MAX 34000u              /* those plus the line breaks this adds for readability */
 #define HDR_MAX    600               /* enough for any reply header worth reading */
+#define URL_MAX    600
 
 static char szClass[] = "PVFetch";
 static char szTitle[] = "Fetch";
 static HWND hUrl, hGet, hStop, hClose, hStatus, hBody;
-static SOCKET sock = INVALID_SOCKET;
 static HGLOBAL rawh;
 static char FAR *raw;                /* the first RAW_MAX bytes of the body, for the window */
 static unsigned rawn;
-static char host[128], path[512];
-static int  port;
+static HGLOBAL blkh;
+static char FAR *blk;                /* PV_CHUNK bytes, copied out of the aperture and parsed */
+static BOOL  pvOpen;                 /* a request is outstanding and must be closed */
+static BOOL  pvTimer;
+static BOOL  pumping;                /* WM_TIMER is not re-entered */
 static HWND hOpen;
 static HFILE hFile = HFILE_ERROR;    /* the whole body, as it arrives */
 static char  savePath[96];
@@ -148,45 +127,84 @@ static char  statusLine[64];         /* the first line of the reply, for the sta
 
 static void status(const char *s) { SetWindowText(hStatus, s); }
 
-static void drop(void)
+/* ------------------------------------------------------------------ the transfer
+   Through ports, not memory. The adapter has a 64 KB aperture at A0000 and that would have been the
+   obvious way to move a page, but a Windows application cannot reach it under the paravirtual
+   display: a selector based there faults on the first write, which killed this program silently
+   before a single register write got out. Ports are the one path a program is certain to have.
+
+   The index register is set once per burst and the data register read in a loop -- `rep insw` in
+   all but name, one instruction per two bytes, which is what makes this cost the guest nothing.
+   Interrupts are off for the length of a burst because PVMOUSE's interrupt handler writes the same
+   index register, and a mouse movement in the middle of one would leave the loop reading whatever
+   register the mouse had selected. A burst is a few hundred microseconds; the mouse can wait. */
+#define PV_BURST 512
+
+static void drain(char FAR *dst, unsigned len)
 {
-    if (sock != INVALID_SOCKET) {
-        p_asyncselect(sock, NULL, 0, 0);
-        p_closesocket(sock);
-        sock = INVALID_SOCKET;
+    unsigned done = 0;
+    while (done < len) {
+        unsigned n = len - done, i;
+        if (n > PV_BURST) n = PV_BURST;
+        _disable();
+        outpw(DISPI_INDEX, R_PV_DATA);
+        for (i = 0; i + 1 < n; i += 2) {
+            unsigned w = inpw(DISPI_DATA);
+            dst[done + i] = (char)(w & 0xFF);
+            dst[done + i + 1] = (char)((w >> 8) & 0xFF);
+        }
+        if (i < n) { unsigned w = inpw(DISPI_DATA); dst[done + i] = (char)(w & 0xFF); }
+        _enable();
+        done += n;
     }
+}
+
+static void send_url(const char *url, unsigned len)
+{
+    unsigned i;
+    for (i = 0; i < len; i++) wr(R_PV_CHAR, (unsigned)(unsigned char)url[i]);
+}
+
+static void pv_close(void)
+{
+    if (!pvOpen) return;
+    pvOpen = FALSE;
+    wr(R_PV_CMD, PVCMD_CLOSE);
+}
+
+static void drop(HWND hwnd)
+{
+    if (pvTimer) { KillTimer(hwnd, IDT_PUMP); pvTimer = FALSE; }
+    pv_close();
     if (hFile != HFILE_ERROR) { _lclose(hFile); hFile = HFILE_ERROR; }
     EnableWindow(hStop, FALSE);
     EnableWindow(hGet, TRUE);
 }
 
-/* http://host[:port]/path, or host/path -- everything else is a name with no path. */
-static BOOL split_url(const char *url)
+/* The host wants a whole URL, and it parses it: no host, no port and no path are needed here any
+   more. All this does is trim the leading space and supply the scheme the user did not type, so
+   that "example.com" still works the way it did when this program dialled it itself. Either scheme
+   is accepted and both mean the same thing: the guest asks for a document and the TLS, if any,
+   happens off the device. */
+static unsigned clean_url(const char *in, char *out)
 {
-    const char *p = url;
-    int i;
-    while (*p == ' ') p++;
-    /* Either scheme is accepted and both mean the same thing here: the guest speaks HTTP and the
-       host does the TLS, so https:// is not a lie, it just happens somewhere else. */
-    if (!_fstrnicmp((const char FAR *)p, (const char FAR *)"http://", 7)) p += 7;
-    else if (!_fstrnicmp((const char FAR *)p, (const char FAR *)"https://", 8)) p += 8;
-    port = 80;
-    for (i = 0; *p && *p != '/' && *p != ':' && i < (int)sizeof(host) - 1; p++) host[i++] = *p;
-    host[i] = 0;
-    if (!host[0]) return FALSE;
-    if (*p == ':') {
-        long n = 0;
-        for (p++; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0');
-        port = (n > 0 && n <= 65535) ? (int)n : 80;
+    const char FAR *p = (const char FAR *)in;
+    unsigned n = 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) return 0;
+    if (_fstrnicmp(p, (const char FAR *)"http://", 7) && _fstrnicmp(p, (const char FAR *)"https://", 8)) {
+        lstrcpy(out, "http://");
+        n = 7;
     }
-    if (*p != '/') lstrcpy(path, "/");
-    else { for (i = 0; *p && i < (int)sizeof(path) - 1; p++) path[i++] = *p; path[i] = 0; }
-    return TRUE;
+    while (*p && n < URL_MAX - 1) out[n++] = *p++;
+    while (n && (out[n - 1] == ' ' || out[n - 1] == '\t')) n--;
+    out[n] = 0;
+    return n;
 }
 
 /* What the reply looks like in the window: the body's first RAW_MAX bytes, with bare line feeds
    turned into the carriage-return pair Windows needs, and the status line reported above. The
-   headers never get here -- they are stripped as they arrive (read_some) so the file on disk is the
+   headers never get here -- they are stripped as they arrive (consume) so the file on disk is the
    body and nothing else. */
 static void present(void)
 {
@@ -225,75 +243,8 @@ static void present(void)
     EnableWindow(hOpen, bodyBytes != 0);
 }
 
-static void fetch_start(HWND hwnd)
-{
-    char url[600], msg[200];
-    struct sockaddr_in sa;
-    struct hostent FAR *he;
-    unsigned long addr;
-
-    drop();
-    if (!winsock_load()) {
-        status("No Winsock: start Trumpet Winsock first.");
-        return;
-    }
-    GetWindowText(hUrl, url, sizeof(url));
-    if (!split_url(url)) { status("Type an address."); return; }
-    SetWindowText(hBody, "");
-    rawn = 0;
-    hdrN = 0;
-    inBody = FALSE;
-    bodyBytes = 0;
-    statusLine[0] = 0;
-    EnableWindow(hOpen, FALSE);
-    /* The reply goes here as it arrives. One name, overwritten each time: a viewer that littered
-       C:\TEMP with a file per page would be a worse citizen than one that keeps the last. */
-    hFile = _lcreat(savePath, 0);
-    if (hFile == HFILE_ERROR) { status("Cannot write C:\\TEMP\\FETCH.HTM."); return; }
-
-    addr = p_inet_addr(host);
-    if (addr == (unsigned long)-1) {
-        wsprintf(msg, "Looking up %s...", (LPSTR)host);
-        status(msg);
-        he = p_gethostbyname(host);           /* Trumpet's resolver; the host answers in one packet */
-        if (!he) { wsprintf(msg, "No such host: %s", (LPSTR)host); status(msg); return; }
-        addr = *(unsigned long FAR *)he->h_addr_list[0];
-    }
-    sock = p_socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == INVALID_SOCKET) { status("No socket."); return; }
-    if (p_asyncselect(sock, hwnd, WM_SOCKET, FD_CONNECT | FD_READ | FD_CLOSE) == SOCKET_ERROR) {
-        status("WSAAsyncSelect failed."); drop(); return;
-    }
-    sa.sin_family = AF_INET;
-    sa.sin_port = p_htons((unsigned short)port);
-    sa.sin_addr = addr;
-    _fmemset(sa.sin_zero, 0, sizeof(sa.sin_zero));
-    wsprintf(msg, "Connecting to %s:%d...", (LPSTR)host, port);
-    status(msg);
-    EnableWindow(hGet, FALSE);
-    EnableWindow(hStop, TRUE);
-    if (p_connect(sock, &sa, sizeof(sa)) == SOCKET_ERROR && p_lasterror && p_lasterror() != WSAEWOULDBLOCK) {
-        wsprintf(msg, "Cannot connect (error %d).", p_lasterror());
-        status(msg); drop();
-    }
-}
-
-static void send_request(void)
-{
-    char req[800];
-    int n;
-    /* HTTP/1.0 with an explicit close: the terminal server on the other end reads one request and
-       answers it, and 1.0 is what a 1994 client would have sent anyway. */
-    n = wsprintf(req, "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: WfWg 3.11 Fetch\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-                 (LPSTR)path, (LPSTR)host);
-    if (p_send(sock, req, n, 0) == SOCKET_ERROR) { status("Could not send the request."); drop(); return; }
-    status("Waiting for the reply...");
-}
-
 /* Everything that arrives: the header is collected until the blank line, the body goes straight to
-   the file, and its first RAW_MAX bytes are also kept to show. Read until the socket says there is
-   nothing left -- WSAAsyncSelect's FD_READ is edge triggered, re-armed by a recv that comes back
-   WSAEWOULDBLOCK, so a reader that stops on a short read is never told about the rest. */
+   the file, and its first RAW_MAX bytes are also kept to show. */
 static void take_body(const char *p, unsigned len)
 {
     if (!len) return;
@@ -306,7 +257,7 @@ static void take_body(const char *p, unsigned len)
         rawn += take;
     }
 }
-/* The header, which may be split across any number of packets. Returns the offset in `buf` where
+/* The header, which may be split across any number of blocks. Returns the offset in `buf` where
    the body starts, or `len` when the blank line has not been seen yet. */
 static unsigned take_header(const char *buf, unsigned len)
 {
@@ -328,25 +279,97 @@ static unsigned take_header(const char *buf, unsigned len)
     }
     return len;
 }
-static void read_some(void)
+static void consume(const char *buf, unsigned len)
 {
-    char buf[1024];
-    int n;
-    unsigned at;
-    char msg[80];
-    long took = 0;
-    for (;;) {
-        n = p_recv(sock, buf, sizeof(buf), 0);
-        if (n <= 0) break;                        /* 0 = the peer closed, SOCKET_ERROR = would block */
-        took += n;
-        at = 0;
-        if (!inBody) at = take_header(buf, (unsigned)n);
-        if (inBody && at < (unsigned)n) take_body(buf + at, (unsigned)n - at);
+    unsigned at = 0;
+    if (!inBody) at = take_header(buf, len);
+    if (inBody && at < len) take_body(buf + at, len - at);
+}
+
+/* ------------------------------------------------------------------ the fetch */
+static void fetch_start(HWND hwnd)
+{
+    char raw_url[URL_MAX + 8], url[URL_MAX + 8], msg[200];
+    unsigned len, res, st;
+
+    drop(hwnd);
+    GetWindowText(hUrl, raw_url, sizeof(raw_url));
+    len = clean_url(raw_url, url);
+    if (!len) { status("Type an address."); return; }
+    SetWindowText(hBody, "");
+    rawn = 0;
+    hdrN = 0;
+    inBody = FALSE;
+    bodyBytes = 0;
+    statusLine[0] = 0;
+    EnableWindow(hOpen, FALSE);
+    /* The reply goes here as it arrives. One name, overwritten each time: a viewer that littered
+       C:\TEMP with a file per page would be a worse citizen than one that keeps the last. */
+    hFile = _lcreat(savePath, 0);
+    if (hFile == HFILE_ERROR) { status("Cannot write C:\\TEMP\\FETCH.HTM."); return; }
+
+    dbg("fetch: open");
+    dbg(url);
+    send_url(url, len);                        /* the URL, a byte at a time, no terminator */
+    wr(R_PV_ARG, len);
+    wr(R_PV_CMD, PVCMD_OPEN);
+    res = rd(R_PV_RESULT);
+    if (res != 0) {
+        wsprintf(msg, "The host refused that address (%u).", res);
+        status(msg);
+        _lclose(hFile); hFile = HFILE_ERROR;
+        return;
     }
-    if (took && inBody) {
+    pvOpen = TRUE;
+    /* The host answers the OPEN write synchronously, so by now the state has already left idle.
+       Still reading idle means nothing is listening on those registers at all. */
+    st = rd(R_PV_STATE);
+    if (st == PVST_IDLE) {
+        status("No paravirtual socket on this host.");
+        drop(hwnd);
+        return;
+    }
+    wsprintf(msg, "Fetching %s...", (LPSTR)url);
+    status(msg);
+    EnableWindow(hGet, FALSE);
+    EnableWindow(hStop, TRUE);
+    if (SetTimer(hwnd, IDT_PUMP, PUMP_MS, NULL)) pvTimer = TRUE;
+    else { status("No timer available."); drop(hwnd); }
+}
+
+/* One WM_TIMER: take everything the host has ready, then return to the message loop. The cap is
+   only there so that a host stuck in "data ready" cannot keep this function from returning; at
+   PV_BLOCK a block it is well over a megabyte, which is more than one tick's worth anyway. */
+#define PV_MAX_BLOCKS 32
+static void pv_pump(HWND hwnd)
+{
+    unsigned st, got, off, chunk;
+    int blocks = 0;
+    char msg[80];
+
+    for (;;) {
+        st = rd(R_PV_STATE);
+        if (st == PVST_FETCHING) return;                  /* nothing yet; ask again next tick */
+        if (st != PVST_DATA) break;
+        if (++blocks > PV_MAX_BLOCKS) return;
+        wr(R_PV_ARG, PV_BLOCK);
+        wr(R_PV_CMD, PVCMD_READ);
+        got = rd(R_PV_RESULT);
+        if (got == 0 || got > PV_BLOCK) return;           /* nothing this time, or a bad count */
+        for (off = 0; off < got; off += chunk) {
+            chunk = got - off;
+            if (chunk > PV_CHUNK) chunk = PV_CHUNK;
+            drain(blk, chunk);
+            consume(blk, chunk);
+        }
         wsprintf(msg, "%lu bytes...", bodyBytes);
         status(msg);
     }
+    /* complete, failed, or idle -- either way there is no more to come */
+    drop(hwnd);
+    present();
+    if (st == PVST_ERROR) status("The host could not fetch that.");
+    else if (st == PVST_IDLE && bodyBytes == 0) status("The host closed the request.");
 }
 
 /* ------------------------------------------------------------------ window */
@@ -399,7 +422,12 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         lstrcpy(savePath, "C:\\TEMP\\FETCH.HTM");
         rawh = GlobalAlloc(GMEM_MOVEABLE, (DWORD)RAW_MAX + 2);
         raw = rawh ? (char FAR *)GlobalLock(rawh) : NULL;
-        if (!raw) { MessageBox(hwnd, "Out of memory.", szTitle, MB_OK | MB_ICONSTOP); return -1; }
+        blkh = GlobalAlloc(GMEM_MOVEABLE, (DWORD)PV_CHUNK);
+        blk = blkh ? (char FAR *)GlobalLock(blkh) : NULL;
+        if (!raw || !blk) { MessageBox(hwnd, "Out of memory.", szTitle, MB_OK | MB_ICONSTOP); return -1; }
+        /* A selector over the A0000 aperture. An app cannot name segment A000 in protected mode,
+           so it asks KERNEL for a descriptor and points it there, exactly as PVDISP.DRV does for
+           its own screen selector. */
         return 0;
     }
     case WM_SIZE:
@@ -408,9 +436,16 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     case WM_SETFOCUS:
         SetFocus(hUrl);
         return 0;
+    case WM_TIMER:
+        if (wParam == IDT_PUMP && !pumping) {
+            pumping = TRUE;
+            pv_pump(hwnd);
+            pumping = FALSE;
+        }
+        return 0;
     case WM_COMMAND:
         if (wParam == ID_GET) fetch_start(hwnd);
-        else if (wParam == ID_STOP) { drop(); present(); status("Stopped."); }
+        else if (wParam == ID_STOP) { drop(hwnd); present(); status("Stopped."); }
         else if (wParam == ID_OPEN) {
             /* Write, not Notepad: Notepad gives up somewhere around 50 KB and a page is bigger
                than that. Write pages from disk and will read the file as text. */
@@ -420,23 +455,10 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
         else if (wParam == ID_CLOSE) DestroyWindow(hwnd);
         return 0;
-    case WM_SOCKET: {
-        int event = (int)LOWORD(lParam), err = (int)HIWORD(lParam);
-        char msg[80];
-        if ((SOCKET)wParam != sock) return 0;
-        if (err && event == FD_CONNECT) {
-            wsprintf(msg, "Cannot connect (error %d).", err);
-            status(msg); drop(); return 0;
-        }
-        if (event == FD_CONNECT) send_request();
-        else if (event == FD_READ) read_some();
-        else if (event == FD_CLOSE) { read_some(); drop(); present(); }
-        return 0;
-    }
     case WM_DESTROY:
-        drop();
+        drop(hwnd);
         if (rawh) { GlobalUnlock(rawh); GlobalFree(rawh); rawh = 0; raw = NULL; }
-        if (ws) { if (p_cleanup) p_cleanup(); FreeLibrary(ws); ws = 0; }
+        if (blkh) { GlobalUnlock(blkh); GlobalFree(blkh); blkh = 0; blk = NULL; }
         PostQuitMessage(0);
         return 0;
     }

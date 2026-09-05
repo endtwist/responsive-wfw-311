@@ -3883,3 +3883,38 @@ and Microsoft's is twice the price of Trumpet's. Going to ethernet made the gues
 
 So the ethernet path is built, tested and working, and it is not currently the fast one. What it
 would take to beat SLIP is a lighter stack over the card rather than a faster wire under the stack.
+
+### 2026-09-04 — 1 MB/s, by taking the TCP stack out of the guest
+Josh asked for a megabyte a second. Both real stacks are CPU-bound in the guest at about 31 MIPS --
+roughly 122 instructions a byte for Trumpet over SLIP (246 KB/s) and 238 for Microsoft TCP/IP-32
+over NDIS (130 KB/s) -- and a megabyte a second needs about 30 instructions a byte. No 1994 TCP
+stack goes near that: the checksums and the copies cost more than the whole budget. So the stack
+came out, the same way the display driver took drawing out of Windows' hands.
+
+**The device.** Registers on the adapter's own index/data pair: `0x35` takes the URL a byte at a
+time, `0x30` opens it (1), stages a block (2) or closes it (3), `0x32` reports how much was staged,
+`0x33` the state, and `0x34` hands the staged block back a word at a time, advancing as it is read.
+The host does the DNS, the TCP and the TLS. Nothing in the guest is framed, checksummed, or copied
+more than once.
+
+**It went through ports because it had to.** The first design moved bytes through the adapter's
+64 KB aperture at A0000, which is the obvious place for bulk data. A Windows application cannot
+reach it under the paravirtual display: a selector based at 0xA0000, allocated exactly as PVDISP.DRV
+does it, faults on the first write. FETCH.EXE died silently -- the window was created and destroyed,
+and the device never saw a single register write, which is how it was caught (an empty window and
+`state=0` after a run). Two other things were wrong on the way there: `AllocSelector(0)` returns 0
+under Windows for Workgroups rather than allocating a descriptor, and nothing checked it.
+
+Reading `0x34` in a loop is `rep insw` in all but name -- one guest instruction per two bytes. The
+loop runs with interrupts off in bursts of 512 bytes, because PVMOUSE's interrupt handler writes the
+same index register and a mouse movement in the middle of a burst would leave the loop reading
+whichever register the mouse had selected.
+
+**Measured.** Driven from the host through the same register sequence a guest uses, the device
+carries the 504 KB Wikipedia article in 0.19 s (2552 KB/s). In the guest, FETCH.EXE with no Winsock
+at all: 368 KB in the first 150 ms and the whole 492 KB body complete within 300 ms of the window
+opening -- **upwards of 1.6 MB/s, against 246 KB/s for the line it replaces**, and the wall time now
+includes the host's own fetch from the real internet.
+
+Trumpet and the NE2000 both still work and the host still answers all three, so nothing that worked
+before has been taken away.

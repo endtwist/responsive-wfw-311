@@ -469,32 +469,43 @@ for (const s of steps) {
   else if (op === "screen") { console.log(`${ts()} text screen:\n${textScreen()}`); }
   else if (op === "vgashot") { console.log(`${ts()} vgashot ${vgaShot(arg || "shots/vga.png")}`); }
   else if (op === "serial") { console.log(`${ts()} COM1 said (${serialOut.length} bytes):\n${serialOut.replace(/\r/g, "")}`); }
-  else if (op === "pvsock") {
-    /* Drive the PV socket from the host side: exactly the register sequence the guest performs,
-       so the device and the host service can be checked without waiting on a guest program. */
+  else if (op === "pvwin") {
+    /* The first bytes of the PV socket's window, as text: what the guest wrote there, or what the
+       host staged for it. */
     const v = emulator.v86.cpu.devices.vga;
-    const WIN = 0x700000;
+    let t = "";
+    for (let i = 0; i < 96; i++) { const c = v.svga_memory[0x700000 + i]; t += c >= 32 && c < 127 ? String.fromCharCode(c) : "."; }
+    console.log(`${ts()} pvwin: ${t}`);
+    console.log(`${ts()} pvsock state=${v.pv_sock.state} result=${v.pv_sock.result} arg=${v.pv_sock.arg} buffered=${v.pv_sock.buf ? v.pv_sock.buf.length - v.pv_sock.off : 0} done=${v.pv_sock.done}`);
+  }
+  else if (op === "pvsock") {
+    /* Drive the PV socket exactly as a guest does: the URL a byte at a time into the CHAR register,
+       then blocks staged with CMD 2 and drained a word at a time out of the DATA register. */
+    const v = emulator.v86.cpu.devices.vga;
     const url = arg || "http://example.com/";
-    for (let i = 0; i < url.length; i++) v.svga_memory[WIN + i] = url.charCodeAt(i) & 0xFF;
     const wr = (n, val) => { v.dispi_index = n; v.port1CF_write(val); };
-    wr(0x31, url.length);
+    const rd = n => { v.dispi_index = n; return v.port1CF_read(); };
+    for (let i = 0; i < url.length; i++) wr(0x35, url.charCodeAt(i) & 0xFF);
     wr(0x30, 1);
-    const refused = v.svga_register_read(0x32) !== 0;
+    const refused = rd(0x32) !== 0;
     if (refused) console.log(`${ts()} pvsock: refused`);
     const t0 = performance.now();
     let total = 0, head = "";
-    for (let spin = 0; spin < 20000 && !refused; spin++) {
-      const st = v.svga_register_read(0x33);
+    for (let spin = 0; spin < 40000 && !refused; spin++) {
+      const st = rd(0x33);
       if (st === 0xFF) { console.log(`${ts()} pvsock: the host reported an error`); break; }
-      if (st === 3 && total) break;
+      if (st === 3) break;
       if (st === 2) {
         wr(0x31, 0xF000);
         wr(0x30, 2);
-        const n = v.svga_register_read(0x32);
-        if (n) {
-          if (total < 200) for (let i = 0; i < Math.min(n, 200 - total); i++) head += String.fromCharCode(v.svga_memory[WIN + i]);
-          total += n;
+        const n = rd(0x32);
+        if (!n) { await sleep(2); continue; }
+        v.dispi_index = 0x34;
+        for (let i = 0; i < n; i += 2) {
+          const w = v.port1CF_read();
+          if (head.length < 200) head += String.fromCharCode(w & 0xFF) + String.fromCharCode((w >> 8) & 0xFF);
         }
+        total += n;
         continue;
       }
       await sleep(2);

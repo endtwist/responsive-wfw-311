@@ -392,7 +392,7 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
        no TCP stack of its own. Both real stacks the guest can run are CPU-bound at about 31 MIPS --
        122 instructions a byte for Trumpet over SLIP, 238 for Microsoft TCP/IP-32 over NDIS -- which
        caps them at 246 and 130 KB/s. This costs the guest one rep movsw per byte instead. */
-    this.pv_sock = { state: 0, result: 0, arg: 0, buf: null, off: 0, done: false };
+    this.pv_sock = { state: 0, result: 0, arg: 0, url: "", buf: null, off: 0, block: 0, done: false };
 
     this.pv_comp_row = 0;             // first row of the composite, 0 = none
     this.pv_comp_w = 0;
@@ -2717,12 +2717,16 @@ VGAScreen.prototype.port1CF_write = function(value)
         case 0x30:
             // PV SOCKET CMD: 1 open (ARG = URL length in the window), 2 read (ARG = bytes wanted),
             // 3 close
-            if(value === 1) this.pv_sock_open(this.pv_sock.arg);
+            if(value === 1) this.pv_sock_open();
             else if(value === 2) this.pv_sock_read(this.pv_sock.arg);
             else if(value === 3) this.pv_sock_close();
             break;
         case 0x31:
             this.pv_sock.arg = value & 0xFFFF;
+            break;
+        case 0x35:
+            // PV SOCKET CHAR: one byte of the URL, appended; CMD 1 then opens what has accumulated
+            if(this.pv_sock.url.length < 2048) this.pv_sock.url += String.fromCharCode(value & 0xFF);
             break;
         case 0x1B:
             this.pv_cmd_arg = value;
@@ -2880,37 +2884,33 @@ VGAScreen.prototype.pv_sock_window = function()
     if(base + PV_SOCK_SIZE > this.vga_memory_size) return null;   // no room in this adapter
     return this.svga_memory.subarray(base, base + PV_SOCK_SIZE);
 };
-VGAScreen.prototype.pv_sock_open = function(len)
+VGAScreen.prototype.pv_sock_open = function()
 {
-    const k = this.pv_sock, win = this.pv_sock_window();
-    if(!win || len <= 0 || len > PV_SOCK_SIZE) { k.result = 1; return; }
-    let url = "";
-    for(let i = 0; i < len; i++) url += String.fromCharCode(win[i]);
+    /* The URL arrived a byte at a time through the CHAR register. The adapter's A000 aperture would
+       have been the obvious place for it, but a Windows application cannot reach that window under
+       the paravirtual display -- a selector based at 0xA0000 faults on the first write -- so the
+       whole transfer goes through ports instead, which is the one path a program is certain to
+       have. It costs a `rep insw` per two bytes, which is one guest instruction. */
+    const k = this.pv_sock;
+    const url = k.url;
+    k.url = "";
+    if(!url) { k.result = 1; return; }
     k.state = 1; k.result = 0; k.buf = null; k.off = 0; k.done = false;
     this.bus.send("pv-sock-open", url);
 };
 VGAScreen.prototype.pv_sock_read = function(want)
 {
-    const k = this.pv_sock, win = this.pv_sock_window();
+    /* Stage a block: the guest then reads exactly this many bytes out of the DATA register. */
+    const k = this.pv_sock;
     k.result = 0;
-    if(!win || !k.buf) { if(k.done && k.state !== 0xFF) k.state = 3; return; }
+    if(!k.buf) { if(k.done && k.state !== 0xFF) k.state = 3; return; }
     const left = k.buf.length - k.off;
-    const n = Math.min(want > 0 ? want : 0, left, PV_SOCK_SIZE);
-    if(n > 0)
-    {
-        win.set(k.buf.subarray(k.off, k.off + n), 0);
-        k.off += n;
-        k.result = n;
-    }
-    if(k.off >= k.buf.length)
-    {
-        k.buf = null; k.off = 0;
-        k.state = k.done ? 3 : 1;
-    }
+    k.block = Math.min(want > 0 ? want : 0, left);
+    k.result = k.block;
 };
 VGAScreen.prototype.pv_sock_close = function()
 {
-    this.pv_sock = { state: 0, result: 0, arg: 0, buf: null, off: 0, done: false };
+    this.pv_sock = { state: 0, result: 0, arg: 0, url: "", buf: null, off: 0, block: 0, done: false };
     this.bus.send("pv-sock-close", 0);
 };
 
@@ -2973,8 +2973,24 @@ VGAScreen.prototype.svga_register_read = function(n)
             return this.dispi_enable_value & 2 ? MAX_BPP : this.svga_bpp;
         case 4:
             return this.dispi_enable_value;
+        case 0x34: {
+            /* PV SOCKET DATA: the next two bytes of the staged block, little endian, advancing.
+               A `rep insw` from 0x1CF empties a block in one guest instruction per two bytes. */
+            const k = this.pv_sock;
+            if(!k.buf || k.block <= 0) return 0;
+            const lo = k.buf[k.off++] | 0;
+            k.block--;
+            let hi = 0;
+            if(k.block > 0 && k.off < k.buf.length) { hi = k.buf[k.off++] | 0; k.block--; }
+            if(k.off >= k.buf.length)
+            {
+                k.buf = null; k.off = 0; k.block = 0;
+                k.state = k.done ? 3 : 1;
+            }
+            return (hi << 8) | lo;
+        }
         case 0x32:
-            return this.pv_sock.result & 0xFFFF;    // bytes placed in the window by the last read
+            return this.pv_sock.result & 0xFFFF;    // bytes staged by the last read
         case 0x33:
             return this.pv_sock.state & 0xFFFF;     // 0 idle 1 fetching 2 ready 3 complete 0xFF error
         case 5:
