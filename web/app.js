@@ -2395,9 +2395,11 @@ function drawChunkBar(g, x, y, w, h, p) {
   R(i, j + ih - u, iw, u, WHITE); R(i + iw - u, j, u, ih, WHITE);
   i += u; j += u; iw -= 2 * u; ih -= 2 * u;
   R(i, j, iw, ih, FACE);
-  /* Chunks, as wide as they are in the control this is copied from: a little over a third of
-     their height, with a gap of a third of their width. */
-  const cw = Math.max(2, Math.round(ih * 0.39)), gap = Math.max(1, Math.round(cw * 0.3));
+  /* Chunks. The control this is copied from makes them a little over a third of their height;
+     these are half again as wide as that, which reads better at the size the boot screen uses.
+     The gap is off the well's height rather than the chunk's, so widening the chunks packs the
+     bar rather than spreading it. */
+  const cw = Math.max(2, Math.round(ih * 0.585)), gap = Math.max(1, Math.round(ih * 0.12));
   const n = Math.max(1, Math.floor((iw + gap) / (cw + gap)));
   const filled = Math.round(p * n);
   for (let k = 0; k < filled; k++) R(i + k * (cw + gap), j, cw, ih, BLUE);

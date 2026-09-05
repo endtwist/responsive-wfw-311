@@ -4008,8 +4008,10 @@ rather than cut away at ninety-something.
 
 A real cold boot (`?fresh=1`, or a restore that fails) turns it off: that one has a genuine logo of
 its own. `?splash=1` holds it up with the bar looping, for looking at it without waiting for a load;
-`?nosplash=1` turns it off. The chunk geometry is measured off the reference sheet -- a chunk is
-0.39 of the well's height and the gap is 0.3 of a chunk -- and the frame is the period one: black
+`?nosplash=1` turns it off. The chunk geometry starts from the reference sheet -- a chunk is 0.39 of the
+well's height there -- but Josh asked for them half again as wide, so a chunk is 0.585 of the well
+and the gap is 0.12 of it (off the well, not the chunk, so widening the chunks packs the bar rather
+than spreading it). The frame is the period one: black
 rule, raised bevel, sunken well, `#0000ff` chunks, which is the same pure blue as entry 1 of the
 original boot logo's palette.
 
