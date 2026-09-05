@@ -87,6 +87,7 @@ if [ -f changes/windows/ABOUT.EXE ] || [ -f changes/windows/LCD.EXE ]; then
   # The screen controls for the host's LCD filter (guest/lcd): a Windows program, because that is
   # the only kind of interface this system has.
   [ -f changes/windows/LCD.EXE ] && python3 ../tools/grpadd.py $TMP/MAIN.GRP "Screen" "LCD.EXE" --exe changes/windows/LCD.EXE
+  [ -f changes/windows/PHONE.EXE ] && python3 ../tools/grpadd.py $TMP/MAIN.GRP "Phone" "PHONE.EXE" --exe changes/windows/PHONE.EXE
   mcopy -o $M $TMP/MAIN.GRP ::/WINDOWS/MAIN.GRP
 fi
 

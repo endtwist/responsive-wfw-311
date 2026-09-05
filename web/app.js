@@ -80,6 +80,11 @@ function readSafeInsets() {
     // The soft keyboard replaces the bottom inset while it is up.
     if (keyboardUp()) safe.b = 0;
   } catch (e) { safe = { l: 0, t: 0, r: 0, b: 0 }; }
+  /* The simulated phone crops the live area to its frame. It replaces the insets rather than
+     adding to them: a desktop browser window has none of its own, and if it did, the frame is
+     inside them anyway. */
+  const F = phoneFrame();
+  if (F) safe = { l: F.l, t: F.t, r: F.r, b: F.b };
   safeReadAt = performance.now();
 }
 /* The area the desktop and the layers are laid out in: the visual viewport less the safe areas.
@@ -145,7 +150,55 @@ const SHELL_H = 970;             // shell column height, fixed so the boot snaps
    switches; the mode request for the viewport's size waits for the guest to report the switch,
    or the re-mode would find PVMON still parking windows in columns. */
 const forcePhone = params.get("mkstate") === "1" || params.get("phone") === "1";
-function wantDesktop() { return !narrow() && !forcePhone; }
+function wantDesktop() { return !narrow() && !forcePhone && !phoneSimOn(); }
+
+/* ------------------------------------------------------------------ the phone, on a desktop
+ * PHONE.EXE (a Windows program, like everything else that steers this machine) asks the host to
+ * pretend the browser window is a phone: the live area is cropped to a phone-shaped frame in the
+ * middle of the window, and the mouse is put through the gesture pipeline the fingers use.
+ *
+ * The frame is expressed as SAFE-AREA INSETS, which is why so little else has to change. Every
+ * layout decision here already works inside the safe area -- viewport(), hit testing, the
+ * compositor's translate, narrow() -- so cropping the safe box to a 9:16 rectangle makes the whole
+ * host believe it is on a phone, without a single one of those places learning a new mode.
+ *
+ * Only on a desktop. On a real phone there is nothing to simulate, and the guard is on the true
+ * viewport rather than narrow(), which by then is answering for the frame.
+ */
+let phoneAsked = false;
+const PHONE_ASPECTS = [[9, 16], [9, 19.5]];
+const phoneSim = { on: params.get("phonesim") === "1", aspect: 0 };
+try {
+  const saved = JSON.parse(localStorage.getItem("pvPhoneSim") || "null");
+  if (saved && !params.has("phonesim")) { phoneSim.on = !!saved.on; phoneSim.aspect = saved.aspect | 0; }
+} catch (e) {}
+function narrowReal() { const [w, h] = fullViewport(); return Math.min(w, h) < 600; }
+function phoneSimOn() { return phoneSim.on && !narrowReal(); }
+/* The frame, in host pixels, or null when it is not running. */
+function phoneFrame() {
+  if (!phoneSimOn()) return null;
+  const [w, h] = fullViewport();
+  const [aw, ah] = PHONE_ASPECTS[phoneSim.aspect] || PHONE_ASPECTS[0];
+  const m = Math.round(Math.min(w, h) * 0.04);
+  let fh = h - 2 * m, fw = Math.round(fh * aw / ah);
+  if (fw > w - 2 * m) { fw = w - 2 * m; fh = Math.round(fw * ah / aw); }
+  const l = Math.floor((w - fw) / 2), t = Math.floor((h - fh) / 2);
+  return { l, t, w: fw, h: fh, r: w - fw - l, b: h - fh - t };
+}
+function setPhoneSim(on, aspect) {
+  const was = phoneSimOn();
+  phoneSim.on = !!on;
+  if (aspect !== undefined) phoneSim.aspect = aspect | 0;
+  try { localStorage.setItem("pvPhoneSim", JSON.stringify(phoneSim)); } catch (e) {}
+  readSafeInsets();
+  document.documentElement.classList.toggle("phone", narrow());
+  needFull = true;
+  invalidate();
+  requestMode(true);                       /* the guest re-modes to the frame, or back to the desktop */
+  syncDesktopMode();
+  report("phonesim", `${phoneSim.on ? "on" : "off"} aspect ${PHONE_ASPECTS[phoneSim.aspect] ? PHONE_ASPECTS[phoneSim.aspect].join(":") : "?"}${was === phoneSimOn() ? " (no change)" : ""}`);
+}
+window.pvPhoneSim = setPhoneSim;
 let guestDesktop = null;         // the guest's layout per its last PVD: true desktop, false phone, null unknown
 const CMD_DESKTOP = 11;
 let desktopCmdAt = 0;
@@ -655,6 +708,12 @@ function guestIsReady() {
     const arg = lcdForced === null ? "/report" : lcdForced ? "/on" : "/off";
     setTimeout(() => sendCommandString(CMD_RUN, `LCD.EXE ${arg}`), 1200);
   }
+  /* And what the phone frame was left set to, the same way. Only worth asking on a desktop: on a
+     real phone PHONE.EXE has nothing to say and exits without a window. */
+  if (!phoneAsked && !narrowReal()) {
+    phoneAsked = true;
+    setTimeout(() => sendCommandString(CMD_RUN, `PHONE.EXE ${params.has("phonesim") ? (phoneSim.on ? "/on" : "/off") : "/report"}`), 1500);
+  }
   if (!slipNet) slipNet = initNet();                 // the PV socket's host half
   if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
   /* The browser's pointer takes over from here (see applyCursorShape). PVMON resends PVC with
@@ -687,6 +746,9 @@ emulator.bus.register("pv-debug", line => {
   /* LCD.EXE reporting its controls: on, brightness, contrast (0..100 each). */
   { const m2 = /^PVLCD (\d+) (\d+) (\d+)/.exec(line);
     if (m2) { lcdSettings(+m2[1], +m2[2], +m2[3]); return; } }
+  /* PHONE.EXE reporting the simulated phone: on, and which aspect. */
+  { const m3 = /^PVPHONE (\d+) (\d+)/.exec(line);
+    if (m3) { setPhoneSim(+m3[1], +m3[2]); return; } }
   if (/^PVCB-BEGIN/.test(line)) { clipIn = []; return; }
   if (/^PVCB /.test(line)) { if (clipIn) clipIn.push(line.slice(5)); return; }
   if (/^PVCB-END/.test(line)) {
@@ -2795,6 +2857,17 @@ function presentOnce() {
   const g = pres.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.imageSmoothingEnabled = false;
+  /* The simulated phone's bezel: a hairline around the live area so the frame reads as a device
+     sitting on the desk rather than a window that failed to fill its space. Drawn every frame and
+     outside the safe box, so no composite can paint over it and no partial repaint can lose it. */
+  const PF = phoneFrame();
+  if (PF) {
+    g.strokeStyle = "#3a3a3c";
+    g.lineWidth = 1;
+    g.strokeRect(PF.l - 0.5, PF.t - 0.5, PF.w + 1, PF.h + 1);
+    g.strokeStyle = "#111";
+    g.strokeRect(PF.l - 4.5, PF.t - 4.5, PF.w + 9, PF.h + 9);
+  }
   /* The boot screen owns the frame until PVMON says the desktop is arranged, and then for a
      fifth of a second longer -- long enough for the last chunks to land, so the bar is seen full
      rather than cut away at ninety-something. The timeout is the escape hatch: a guest that never
@@ -4477,28 +4550,27 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     if (edgeSwipe && edgeMove(ev.touches[0])) return;
     move(ev.touches[0]);
   }, { passive: false });
+  /* The end of an edge gesture, from a finger or from the simulated phone's mouse. Armed but
+     never a swipe means it was a tap in the margin (a scroll-bar arrow, a taskbar icon, a button
+     docked against an edge): play it back as the click it would have been. */
+  const endEdgeGesture = ev => {
+    const tapOk = !!(ev && (ev.type === "touchend" || ev.type === "mouseup"));
+    for (const which of ["bottom", "edge"]) {
+      const S = which === "bottom" ? bottomSwipe : edgeSwipe;
+      if (!S) continue;
+      if (which === "bottom") bottomSwipe = null; else edgeSwipe = null;
+      if (!S.fired && tapOk && S.tap) { down(S.tap); up({ type: ev.type }); }
+      else if (!S.fired) diag(`${which} swipe cancelled`);
+      unlockAudio("touchend");
+      return true;
+    }
+    return false;
+  };
   const end = ev => {
     ev.preventDefault();
     if (ev.touches.length > 0) return;      // a finger is still down: nothing ends yet
     releaseFastPoll();                      // the gesture is over: the guest goes back to its timer
-    if (bottomSwipe) {
-      const B = bottomSwipe; bottomSwipe = null;
-      /* Armed but never a swipe: it was a tap in the bottom margin (a taskbar icon, a button
-         docked against the bottom edge). Play it back as the click it would have been. */
-      if (!B.fired && ev.type === "touchend" && B.tap) { down(B.tap); up({ type: "touchend" }); }
-      else if (!B.fired) diag("bottom swipe cancelled");
-      unlockAudio("touchend");
-      return;
-    }
-    if (edgeSwipe) {
-      const E = edgeSwipe; edgeSwipe = null;
-      /* Armed but never a swipe: it was a tap in the edge margin (a scroll bar arrow, a button
-         against the right edge). Play it back as the click it would have been. */
-      if (!E.fired && ev.type === "touchend" && E.tap) { down(E.tap); up({ type: "touchend" }); }
-      else if (!E.fired) diag("edge swipe cancelled");
-      unlockAudio("touchend");
-      return;
-    }
+    if (endEdgeGesture(ev)) return;
     const wasTwo = !!twoFinger;
     const T = twoFinger;
     if (T && T.scrolled && T.slot >= 0) { const v = flickVelocity(T); startGlide(T.slot, v.vx, v.vy); }
@@ -4533,7 +4605,23 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
   /* A real mouse brings the guest's pointer back only on the phone (where a finger hid it). On a
      desktop the browser's own pointer is the visible one and the guest's stays hidden: bringing it
      back here would be the second pointer this whole exercise removes. */
-  c.addEventListener("mousedown", ev => { if (ev.button !== 0 && ev.button !== 2) return; ev.preventDefault(); mouseDown = true; if (narrow()) setGuestCursor(true); down(ev); });
+  /* Inside the simulated phone the mouse is a finger: the same down/move/up pipeline the touches
+     use runs already (it is the same three functions), but the two gestures that begin at an edge
+     are only armed from touchstart, so they are armed here too. Everything else -- the surface
+     policy, the momentum, the keyboard bar -- follows from narrow() being true inside the frame. */
+  let simEdge = null;
+  c.addEventListener("mousedown", ev => {
+    if (ev.button !== 0 && ev.button !== 2) return;
+    ev.preventDefault();
+    mouseDown = true;
+    if (narrow()) setGuestCursor(true);
+    simEdge = null;
+    if (phoneSimOn() && ev.button === 0) {
+      if (bottomStart(ev)) { simEdge = "bottom"; return; }
+      if (edgeStart(ev)) { simEdge = "edge"; return; }
+    }
+    down(ev);
+  });
   /* Desktop mode: the guest pointer follows the mouse while no button is down (menus highlight,
      the cursor takes the shape of what it is over), through the same absolute placement a press
      uses, coalesced so a fast sweep never queues up behind the guest. Never while a press pipeline
@@ -4550,8 +4638,18 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
       finally { hovering = null; hoverTarget = null; }
     })();
   };
-  window.addEventListener("mousemove", ev => { if (mouseDown) move(ev); else if (ev.target === c) hover(ev); });
-  window.addEventListener("mouseup", ev => { if (!mouseDown) return; mouseDown = false; up(ev); });
+  window.addEventListener("mousemove", ev => {
+    if (!mouseDown) { if (ev.target === c) hover(ev); return; }
+    if (simEdge === "bottom" && bottomSwipe) { if (bottomMove(ev)) return; simEdge = null; }
+    else if (simEdge === "edge" && edgeSwipe) { if (edgeMove(ev)) return; simEdge = null; }
+    move(ev);
+  });
+  window.addEventListener("mouseup", ev => {
+    if (!mouseDown) return;
+    mouseDown = false;
+    if (simEdge) { simEdge = null; endEdgeGesture(ev); return; }
+    up(ev);
+  });
   window.addEventListener("pointermove", ev => { if (ev.pointerType === "mouse" && narrow()) setGuestCursor(true); }, { passive: true });
   c.addEventListener("contextmenu", ev => ev.preventDefault());
 
