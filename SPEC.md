@@ -3975,3 +3975,14 @@ first byte of the *next* send on that handle, and nothing in the register set co
 guest. And the handles needed an owner: FETCH.EXE never wrote the select register, so once the DLL
 started handing out handles from 0 upwards they collided. Fetch now claims handle 7 and reselects
 before every burst, since the DLL's timer runs between its messages.
+
+**A snapshot cannot cross a device-set change.** Removing Trumpet took `uart1: true` out of
+`tools/probe.mjs` but left it in `web/app.js`, so the probe saved snapshots from a machine with no
+COM2 and the page restored them into one that had it. v86 restores device state positionally, so
+the mismatch put garbage into the CPU's state and the guest fell into a page-fault loop: `do_page_walk`
+calling `call_interrupt_vector` calling `do_page_walk`, until the JS stack ran out. It presents as
+"too much recursion" (Firefox) or "Maximum call stack size exceeded" (Chrome) from inside the wasm,
+with the emulator apparently running -- `running=true`, 120 fps of composites, `mips=0.0`, `ready=false`
+forever. Headless boots were unaffected because the probe both saves and restores, so its device set
+always agreed with itself. This is the second time in one day that changing the device set has
+invalidated every existing snapshot; the first was adding COM2 for Trumpet.

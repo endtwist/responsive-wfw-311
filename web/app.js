@@ -346,9 +346,6 @@ const emulator = new V86Worker({
   wasm_path: abs("../v86/build/" + (params.get("wasm") || "v86.wasm")),   // ?wasm=v86-base.wasm for A/B
   memory_size: 32 * 1024 * 1024,
   vga_memory_size: 8 * 1024 * 1024,
-  /* COM2 exists so the guest can dial up: Trumpet Winsock opens 0x2F8 by default, and the host
-     answers on the other end of it (web/net.js). COM1 is left alone. */
-  uart1: true,
   screen_container: $("screen_container"),
   bios: { url: abs("../v86/bios/seabios.bin") },
   vga_bios: { url: abs("../v86/bios/vgabios.bin") },
