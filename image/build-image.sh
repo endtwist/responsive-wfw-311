@@ -13,7 +13,9 @@
 #                         sndPlaySound only finds in C:\WINDOWS, and ENTPACK.INI). Absent on a
 #                         fresh clone and the build is unaffected — see SPEC 2026-09-03.
 # then apply SYSTEM.INI edits via tools/inied.py.
-# Usage: image/build-image.sh [display=svga256|vga|pvdisp] [res=1|2|3] [dpi=96|120] [boot=win|pvtest|dos] [load=PVMON.EXE] [out=file.img]
+# Usage: image/build-image.sh [display=pvdisp|svga256|vga] [res=1|2|3] [dpi=120|96] [boot=win|pvtest|dos] [load=PVMON.EXE|-] [out=file.img]
+#        With no arguments it builds the image the site ships: PVDISP at 120 dpi, PVMON loaded,
+#        PVMOUSE.DRV, PVSYS.FON, sound on, the spooler off, a 352x760 shell -- work-phone.img.
 #        Desktop mode (SPEC 2026-09-02) is a runtime switch (CMD_DESKTOP): the image is always the phone layout.
 #        [fakescreen=1|0] ([PVMon] FakeScreen: USER reports the phone frame as the screen, SPEC 2026-09-02) [hookclamp=1|0] (0 = PVHOOK measuring mode, never ship)
 #        [spooler=yes|no] [printer=PSCRIPT|TTY]  -- which of the two installed printers is the default:
@@ -23,7 +25,13 @@
 #        [games=1|0]  -- install changes/games/ as C:\GAMES with Program Manager items (default 1)
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1; WARM=1
+# The defaults ARE the shipping machine. They used to be a bare 16-colour VGA image with no PVMON
+# in it, and the real one lived in a line of arguments recorded in SPEC -- so running this script
+# the obvious way built something that could not talk to the host at all, and then pointed
+# current.json at it. Every switch below is still a switch; what changed is which way they start.
+DISPLAY_DRV=pvdisp; RES=1; DPI=120; BOOT=win; IMG=work-phone.img; LOAD=PVMON.EXE; LIVE=1
+SHELLW=352; SHELLH=760; SYSFONT=PVSYS.FON; MOUSEDRV=PVMOUSE.DRV; SOUND=1
+SPOOLER=no; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1; WARM=1
 for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; games=*) GAMES=${a#*=};; warm=*) WARM=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG

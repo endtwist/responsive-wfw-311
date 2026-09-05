@@ -200,6 +200,15 @@ emulator.bus.register("opl-send-data", d => {
 emulator.bus.register("pcspeaker-enable", () => { audio.beeps++; });
 emulator.bus.register("pcspeaker-update", d => { audio.beepHz = d && d[1] ? Math.round(1193182 / d[1]) : 0; });
 
+/* Anything the guest writes to COM1. Nothing is attached to it any more, but a boot that dies
+   early often says why down the serial line, and the `serial` step and the boot-failure report
+   both want to be able to quote it. */
+let serialOut = "";
+emulator.bus.register("serial0-output-byte", d => {
+  serialOut += String.fromCharCode(d & 0xFF);
+  if (serialOut.length > 40000) serialOut = serialOut.slice(-40000);
+});
+
 const key = async (sc, down) => { emulator.bus.send("keyboard-code", down ? sc : sc | 0x80); await sleep(30); };
 const press = async sc => { await key(sc, true); await key(sc, false); };
 const code = n => /^0x/i.test(n) ? parseInt(n, 16) : SC[n] ?? (() => { throw new Error("key " + n); })();
@@ -258,16 +267,26 @@ const pvSocks = [];
 async function pvFetch(handle, url) {
   netLog.push(`pvsock ${url}`);
   if (!netBytes.first) netBytes.first = performance.now();
-  let body = `<html><body><h1>${url}</h1></body></html>`, status = 200, type = "text/html";
+  /* Bytes, not text. Decoding a reply as a string mangles anything that is not UTF-8 -- a page
+     bundle of 8-bpp pixels came out shorter than it went in, and the guest reported it truncated. */
+  let body = Uint8Array.from(`<html><body><h1>${url}</h1></body></html>`, c => c.charCodeAt(0) & 0xFF);
+  let status = 200, type = "text/html";
   if (flag("--net-live")) {
     try {
       const r = await fetch(/^https?:\/\//i.test(url) ? url : `http://${url}`);
-      body = await r.text(); status = r.status; type = r.headers.get("content-type") || type;
-    } catch (e) { body = `could not reach ${url}: ${e.message}`; status = 502; }
+      body = new Uint8Array(await r.arrayBuffer());
+      status = r.status;
+      type = r.headers.get("content-type") || "application/octet-stream";
+    } catch (e) {
+      body = Uint8Array.from(`could not reach ${url}: ${e.message}`, c => c.charCodeAt(0) & 0xFF);
+      status = 502;
+    }
   }
   const head = `HTTP/1.0 ${status} ${status === 200 ? "OK" : "Error"}\r\nContent-Type: ${type}\r\n` +
                `Content-Length: ${body.length}\r\nConnection: close\r\n\r\n`;
-  const bytes = Uint8Array.from(head + body, c => c.charCodeAt(0) & 0xFF);
+  const bytes = new Uint8Array(head.length + body.length);
+  for (let i = 0; i < head.length; i++) bytes[i] = head.charCodeAt(i) & 0xFF;
+  bytes.set(body, head.length);
   netBytes.out += bytes.length;
   netBytes.last = performance.now();
   emulator.bus.send("pv-sock-data", { handle, bytes, done: true });

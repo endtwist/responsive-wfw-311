@@ -1,0 +1,22 @@
+{
+ "blocks": [
+  {
+   "head": "Layout test"
+  },
+  {
+   "para": "First paragraph. First paragraph. First paragraph. First paragraph. First paragraph. First paragraph. First paragraph. First paragraph. "
+  },
+  {
+   "image": "https://gross.is/images/tnt/straight-on.jpg"
+  },
+  {
+   "para": "Second paragraph, which should sit clear of the picture above it and of the one below. Second paragraph, which should sit clear of the picture above it and of the one below. Second paragraph, which should sit clear of the picture above it and of the one below. "
+  },
+  {
+   "image": "https://gross.is/images/tnt/close-up.jpg"
+  },
+  {
+   "para": "Third paragraph. Third paragraph. Third paragraph. Third paragraph. Third paragraph. Third paragraph. "
+  }
+ ]
+}

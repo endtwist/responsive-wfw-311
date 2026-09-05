@@ -1388,6 +1388,7 @@ window.pvCursor = () => ({ name: guestCursorName, css: $("pres") ? $("pres").sty
    everywhere. Unknown titles get pointer drag, the behaviour every Windows program expects. */
 const SURFACE_POLICY = [
   [/^About$/, "scroll"], [/^Welcome to Windows/, "scroll"],            // the read-me's note scrolls
+  [/^Page$/, "scroll"],                                                // the page reader is all scroll
   [/\bHelp\b/, "scroll"], [/^Write\b/, "scroll"], [/^Notepad\b/, "scroll"], [/^Cardfile\b/, "scroll"],
   [/^File Manager/, "scroll"], [/^Control Panel/, "scroll"], [/^Print Manager/, "scroll"], [/^Task List/, "scroll"],
   [/^Calendar\b/, "scroll"], [/^Character Map/, "scroll"], [/^Media Player/, "scroll"], [/^Clipboard/, "scroll"],

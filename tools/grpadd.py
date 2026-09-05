@@ -46,6 +46,11 @@ def parse(g):
     offs = struct.unpack_from("<%dH" % n, g, 34)
     items = []
     for o in offs:
+        # A group's item table has one slot per item ever added, and a slot whose offset is 0 is an
+        # empty one -- which is the whole of a group that has never had anything in it. StartUp is
+        # exactly that on a stock WFW 3.11, and reading slot 0 as an item is how this used to die.
+        if not o:
+            continue
         f = struct.unpack_from(ITEM, g, o)
         pt, iicon, cbh, cba, cbx, ph, pa, px, pn, pc, pi = (f[0], f[1]), f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11]
         items.append(dict(pt=pt, iicon=iicon, hdr=g[ph:ph + cbh], andp=g[pa:pa + cba], xorp=g[px:px + cbx],
@@ -134,6 +139,13 @@ def relayout(path, iconic=False):
     open, which on a phone column means every group stacked on top of Main."""
     g = open(path, "rb").read()
     grp = parse(g)
+    # An empty group is left exactly as it is. A stock StartUp has no items and one null slot, and
+    # rewriting it -- even into a structurally valid empty group -- stops Program Manager dead at
+    # the Windows splash screen, which looks for all the world like a boot failure. There is
+    # nothing to lay out in a group with nothing in it, and its window state is already minimised.
+    if not grp["items"]:
+        print("left %s alone: no items" % grp["gname"])
+        return 0
     COLS, CELLW, CELLH = int(os.environ.get("GRP_COLS", 3)), int(os.environ.get("GRP_CELLW", 100)), int(os.environ.get("GRP_CELLH", 78))
     for i, it in enumerate(grp["items"]):
         it["pt"] = (12 + CELLW * (i % COLS), 4 + CELLH * (i // COLS))
