@@ -1,0 +1,67 @@
+{
+ "blocks": [
+  {
+   "head": "TNT"
+  },
+  {
+   "para": "An old-school 8-track player converted to a bluetooth speaker."
+  },
+  {
+   "rule": ""
+  },
+  {
+   "image": "https://gross.is/images/tnt/straight-on.jpg"
+  },
+  {
+   "para": "Joshua GrossTNTAn old-school 8-track player converted to a bluetooth speaker."
+  },
+  {
+   "image": "https://gross.is/images/tnt/close-up.jpg"
+  },
+  {
+   "para": "I repurposed a \u201cPanasonic Dynamite 8\u201d 8-track player by converting it to a battery-powered bluetooth speaker."
+  },
+  {
+   "image": "https://gross.is/images/tnt/components.jpg"
+  },
+  {
+   "video": "https://gross.is/images/tnt/completed.mp4"
+  },
+  {
+   "para": "The 8-track player\u2019s components were removed and replaced with an ESP32 dev kit, 1.3 inch LCD, 3W 4ohm full-range speaker, and bank of Li-ion batteries."
+  },
+  {
+   "image": "https://gross.is/images/tnt/esp32-proto-board.jpg"
+  },
+  {
+   "para": "The 1.3\" LCD replaced the track counter in the center front window, and displays the current play status, as well as the artist and song (if available)."
+  },
+  {
+   "image": "https://gross.is/images/tnt/lcd-module.jpg"
+  },
+  {
+   "video": "https://gross.is/images/tnt/playpause.mp4"
+  },
+  {
+   "para": "Inside, several mounting components were designed and 3D printed to allow the speaker, volume control, a microswitch, and an LED visualizer to be mounted."
+  },
+  {
+   "image": "https://gross.is/images/tnt/facing-left.jpg"
+  },
+  {
+   "para": "Volume can be controlled from the broadcasting device as well as separately, on the TNT itself."
+  },
+  {
+   "image": "https://gross.is/images/tnt/facing-right.jpg"
+  },
+  {
+   "para": "The plunger at the top of the speaker is connected as a play and pause button, sending a notification to the bluetooth-connected device to toggle the media."
+  },
+  {
+   "para": "On the side, a spectrum visualizer was added where the 8-track slot used to be. The matrix display is covered by a 3D printed plate that provides a \u2018blurring\u2019 effect."
+  },
+  {
+   "video": "https://gross.is/images/tnt/spectrum-visualizer.mp4"
+  }
+ ]
+}

@@ -39,3 +39,6 @@ image/boot-*.state.gz
 __pycache__/
 .claude/worktrees/
 .certs/
+
+# page bundles: megabytes of somebody else's photographs, rebuilt by tools/mkpage.py
+pages/*.pvp
