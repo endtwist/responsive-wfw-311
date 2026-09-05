@@ -19,6 +19,48 @@
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <title>Responsive Windows for Workgroups 3.11</title>
+<!-- ---------------------------------------------------------------- how this page is found
+     The page is a canvas, so a crawler that does not run JavaScript sees no words at all. What it
+     does see is this: the description, the card, and the JSON-LD below. The deep links (/solitaire
+     and the rest, see APPS in app.js) are real URLs and are listed in /sitemap.xml; /llms.txt is
+     the same description in the form the model crawlers have settled on. -->
+<link rel="canonical" href="https://responsive-wfw-311.vercel.app/">
+<meta name="description" content="Windows for Workgroups 3.11 running in your browser and rearranged to fit a phone: real windows, stacked in a column, driven by your thumb. No web interface on top of it.">
+<meta name="author" content="Joshua Gross">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Responsive Windows for Workgroups 3.11">
+<meta property="og:title" content="Responsive Windows for Workgroups 3.11">
+<meta property="og:description" content="A 1993 operating system made responsive. Windows 3.11 in your browser, rearranged to fit a phone, with every pixel drawn by Windows itself.">
+<meta property="og:url" content="https://responsive-wfw-311.vercel.app/">
+<meta property="og:image" content="https://responsive-wfw-311.vercel.app/web/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The Windows for Workgroups 3.11 boot screen beside Program Manager laid out in a single phone-width column.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Responsive Windows for Workgroups 3.11">
+<meta name="twitter:description" content="A 1993 operating system made responsive. Windows 3.11 in your browser, rearranged to fit a phone, with every pixel drawn by Windows itself.">
+<meta name="twitter:image" content="https://responsive-wfw-311.vercel.app/web/og.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "Responsive Windows for Workgroups 3.11",
+  "alternateName": "Responsive WfW 3.11",
+  "url": "https://responsive-wfw-311.vercel.app/",
+  "image": "https://responsive-wfw-311.vercel.app/web/og.png",
+  "applicationCategory": "BrowserApplication",
+  "operatingSystem": "Any browser",
+  "browserRequirements": "A modern browser with WebAssembly",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "Joshua Gross", "url": "https://gross.is" },
+  "creator": { "@type": "Person", "name": "Joshua Gross", "url": "https://gross.is" },
+  "description": "Windows for Workgroups 3.11 emulated in the browser and made responsive, so a 1993 operating system can be used with a thumb on a phone. A custom display driver reports the browser window as the screen, so Windows re-lays-out when the window changes shape; the browser cuts the screen into per-window layers and re-stacks them into a single column, scaling each window's contents to fit while its title bar stays finger-sized. Touch gestures, an LCD shader, a network stack and a page reader are all native Windows programs. There is no HTML interface: every pixel on the page is Windows' own.",
+  "keywords": "Windows 3.11, Windows for Workgroups, emulator, v86, responsive design, retrocomputing, WebAssembly, mobile, touch"
+}
+</script>
 <style>
   /* Safe areas (notch, home indicator) as tokens the compositor can read: it keeps guest pixels
      out from under them and paints the insets black, which is nothing, not chrome. */

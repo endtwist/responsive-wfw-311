@@ -4030,3 +4030,24 @@ original boot logo's palette.
 Fixed on the way past: `tools/grpadd.py` rewriting an empty group (a stock StartUp has one null item
 slot) produces a file Program Manager will not start on -- it hangs at the Windows splash. Empty
 groups are now left alone.
+
+### 2026-09-05 — metadata: what a crawler and a model see
+The page is a canvas, so a crawler that does not run JavaScript sees no words at all. It now sees
+the head: a description, `rel=canonical`, Open Graph and Twitter cards pointing at `web/og.png`
+(1200x630, the boot screen beside Program Manager in its phone column, both bezelled on black), and
+a `WebApplication` JSON-LD block whose description is the actual explanation of how the thing works
+rather than a slogan.
+
+`/robots.txt` allows everything except `/image/`, `/parts/` and `/pages/*.pvp`, which are emulator
+state and binary bundles. `/sitemap.xml` lists the root plus one URL per program, generated from
+`APPS` in app.js, one canonical key per command rather than one per alias (38 URLs). `/llms.txt` is
+the same explanation in the plain-text form the model crawlers have settled on.
+
+Still missing, and the larger half: the page carries no body text, so there is nothing for a
+crawler to read beyond the metadata. The plan for that (the same content served as real HTML in the
+document, progressively enhanced by the emulator rather than a crawler-only copy) is still
+unbuilt.
+
+Documented here because it was not written down anywhere: **the path opens a program.**
+`/solitaire`, `/notepad`, `/jezzball` and the rest map through `APPS` in app.js, and `?run=` takes a
+command line directly. `vercel.json` rewrites `/:app([a-z]+)` to the page.

@@ -1,0 +1,40 @@
+# Responsive Windows for Workgroups 3.11
+
+> Windows for Workgroups 3.11, emulated in the browser and made responsive, so a 1993
+> operating system can be used with a thumb on a phone. By Joshua Gross (https://gross.is).
+> Live at https://responsive-wfw-311.vercel.app/
+
+## What it is
+
+An operating system in the shape of a website. Windows 3.11 runs in a WebAssembly emulator, and
+the browser rearranges its screen so that it fits, and works, on a phone. The rule throughout was
+that there is no web interface on top of it: every pixel on the page is Windows' own, drawn by
+Windows, and the parts that had to be invented were built as native Windows programs and drivers
+rather than as HTML.
+
+## How it works
+
+- A custom display driver reports the browser window as the screen. When the window changes shape,
+  the display tells Windows, and Windows re-lays-out. This is the inversion the whole thing rests
+  on: normally the screen is fixed and the OS picks a mode to fit it.
+- The browser cuts Windows' screen into per-window layers and re-stacks them into a single column.
+  Each window's contents shrink to fit a phone while its title bar stays finger-sized. Windows is
+  never told: as far as it is concerned the windows sit side by side on one very wide screen.
+- Touch gestures drive it: tap to click, two fingers to scroll, pinch to magnify, swipe in from the
+  right edge to change window, swipe up from the bottom for a card switcher.
+- A wide browser window turns all of that off and gives you Windows 3.11 at one guest pixel per
+  browser pixel, as it always was.
+- Networking is done by the host over a paravirtual socket, so there is no TCP stack inside the
+  guest, and a custom Winsock 1.1 makes it available to any period Windows program at over 1 MB/s.
+- An optional shader makes the screen look like the passive-matrix LCD panel of a 1992 laptop,
+  and it is switched on and off from a Windows control panel inside the guest.
+
+## URLs
+
+The path opens a program. https://responsive-wfw-311.vercel.app/solitaire opens Solitaire,
+/notepad opens Notepad, /jezzball opens JezzBall, and so on; ?run= takes a command line directly.
+The full list is in /sitemap.xml.
+
+## Not worth crawling
+
+/image/, /parts/ and /pages/*.pvp are emulator state and binary page bundles.

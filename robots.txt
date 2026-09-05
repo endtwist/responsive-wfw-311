@@ -1,0 +1,15 @@
+# Responsive Windows for Workgroups 3.11
+# Everything here is welcome to be read, by search engines and by model crawlers alike.
+# The page itself is a canvas, so what is worth reading is the head metadata, /llms.txt
+# and the deep links in /sitemap.xml.
+
+User-agent: *
+Allow: /
+
+# The disk image, its parts and the boot snapshot are hundreds of megabytes of emulator
+# state with nothing to index in them.
+Disallow: /image/
+Disallow: /parts/
+Disallow: /pages/*.pvp
+
+Sitemap: https://responsive-wfw-311.vercel.app/sitemap.xml
