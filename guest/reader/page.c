@@ -1517,7 +1517,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 #endif
     if (!prev) {
         wc.style = 0; wc.lpfnWndProc = WndProc; wc.cbClsExtra = 0; wc.cbWndExtra = 0;
-        wc.hInstance = inst; wc.hIcon = LoadIcon(inst, "1");
+        wc.hInstance = inst; wc.hIcon = LoadIcon(inst, MAKEINTRESOURCE(1));
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszMenuName = NULL; wc.lpszClassName = szClass;

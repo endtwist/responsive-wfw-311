@@ -192,6 +192,8 @@ function setPhoneSim(on, aspect) {
   try { localStorage.setItem("pvPhoneSim", JSON.stringify(phoneSim)); } catch (e) {}
   readSafeInsets();
   document.documentElement.classList.toggle("phone", narrow());
+  if (!phoneSimOn()) setFinger(null);
+  applyCursorShape();
   needFull = true;
   invalidate();
   requestMode(true);                       /* the guest re-modes to the frame, or back to the desktop */
@@ -810,6 +812,7 @@ emulator.bus.register("pv-debug", line => {
   if (m && pendingDock) { pendingDock.push({ slot: +m[1], title: m[2] || "Window" }); return; }
   if (/^PVE/.test(line) && pendingLayers) {
     layers = pendingLayers; dock = pendingDock; pendingLayers = pendingDock = null;
+    syncUrl();                         // the address bar names the window in front
     dropSampleCache();                 // the sampled background points belong to the old layout
     invalidate();                      // a new layout: the next composite is a full one
     holdTransients();                  // a popup that is about to be moved is not drawn twice
@@ -855,7 +858,128 @@ const APPS = {
   chips: "C:\\GAMES\\CHIPS.EXE", chipschallenge: "C:\\GAMES\\CHIPS.EXE",
   rodent: "C:\\GAMES\\RODENT.EXE", pipedream: "C:\\GAMES\\PIPE.EXE", pipe: "C:\\GAMES\\PIPE.EXE",
   taipei: "C:\\GAMES\\TP.EXE", blackjack: "C:\\GAMES\\BLAKJAK.EXE",
+  screen: "LCD.EXE", phone: "PHONE.EXE",
 };
+/* The other direction, for keeping the URL on the window in front. PVMON publishes titles, not
+   module names, so the way back from a window to the name in APPS is its caption. Ordered: the
+   first match wins, so "Chip's Challenge" is tested before anything looser. A window with no
+   entry here leaves the URL alone rather than pushing something wrong. */
+const URL_TITLES = [
+  [/^Program Manager/, ""], [/^About$/, "about"], [/^Page$/, ""], [/^Phone$/, "phone"], [/^Screen$/, "screen"],
+  [/^Solitaire/, "solitaire"], [/Hearts/, "hearts"], [/^Minesweeper/, "minesweeper"],
+  [/^Paintbrush/, "paintbrush"], [/^Write\b/, "write"], [/^Notepad\b/, "notepad"],
+  [/^Calculator/, "calc"], [/^Clock/, "clock"], [/^Cardfile/, "cardfile"], [/^Calendar/, "calendar"],
+  [/^Terminal/, "terminal"], [/^Recorder/, "recorder"], [/^File Manager/, "filemanager"],
+  [/^Control Panel/, "controlpanel"], [/^Character Map/, "charmap"], [/^PIF Editor/, "pifedit"],
+  [/^Windows Setup/, "setup"], [/^Sound Recorder/, "soundrecorder"], [/^Media Player/, "mediaplayer"],
+  [/\bHelp\b/, "help"], [/^Chat/, "chat"], [/^Mail/, "mail"], [/^Schedule/, "schedule"],
+  [/^SkiFree/, "skifree"], [/^JezzBall/, "jezzball"], [/^TETRIS/i, "tetris"], [/^TetraVex/, "tetravex"],
+  [/^TriPeaks/, "tripeaks"], [/^Tut's Tomb/, "tutstomb"], [/^FreeCell/, "freecell"], [/^Golf/, "golf"],
+  [/Chip's Challenge/i, "chips"], [/^Rodent's Revenge/, "rodent"], [/^Pipe Dream/, "pipedream"],
+  [/^Taipei/, "taipei"], [/^Dr\. Black Jack/, "blackjack"],
+];
+function keyForTitle(t) {
+  for (const [re, key] of URL_TITLES) if (re.test(t || "")) return key;
+  return null;                                   /* not a window we have a name for */
+}
+
+/* ------------------------------------------------------------------- the URL and the window
+ * The address bar names the window in front, and the browser's own back and forward move through
+ * the windows that have been in front. Back does NOT close anything: a back gesture that threw
+ * away a half-finished game of Solitaire, or raised a save box, would be a worse bargain than no
+ * history at all. Going back to the root minimises the front window (Program Manager is behind
+ * it, which is what the root means), and going forward to a program restores it, or starts it if
+ * it is not running.
+ *
+ * Served from a path the rewrite understands, the URL is a path (/solitaire). Opened as a file
+ * (the dev server's /web/index.html), it is ?run= instead, so a reload still works either way. */
+const urlRoot = location.pathname.replace(/[^/]*$/, "");
+const urlAsPath = !/\.html?$/.test(location.pathname);
+function urlFor(key) {
+  if (urlAsPath) return (key ? urlRoot + key : urlRoot) + location.hash;
+  const u = new URL(location.href);
+  if (key) u.searchParams.set("run", key); else u.searchParams.delete("run");
+  return u.pathname + (u.search || "") + u.hash;
+}
+/* The fingertip. In the simulated phone the mouse is standing in for a finger, and a mouse
+   pointer is the wrong shape for that: an arrow points at one pixel, a finger covers a patch of
+   glass about the size of the thing it is trying to hit. So the arrow goes away inside the frame
+   and this is drawn instead -- a soft disc that darkens when the button is down, the way a
+   fingertip flattens against a screen. It is the same size a real one is (about 9 mm), which is
+   also the honest part of the simulation: if the target is too small for this circle, it is too
+   small for a thumb. */
+const FINGER_R = 17;
+let finger = null;                 // { x, y, down } in host pixels, or null when the mouse is away
+let fingerDrawn = null;            // where it was last composited, so a move can invalidate
+function setFinger(f) {
+  const a = finger, b = f;
+  if (!a && !b) return;
+  if (a && b && a.x === b.x && a.y === b.y && a.down === b.down) return;
+  finger = b;
+  needFull = true;                 // the patch it left has to be repainted from the composite
+}
+function drawFinger(g) {
+  const f = finger;
+  fingerDrawn = f;
+  if (!f || !phoneSimOn()) return;
+  const r = FINGER_R * (f.down ? 0.92 : 1);
+  g.save();
+  g.beginPath();
+  g.arc(f.x, f.y, r, 0, 6.2832);
+  g.fillStyle = f.down ? "rgba(0,0,0,0.28)" : "rgba(0,0,0,0.16)";
+  g.fill();
+  g.lineWidth = 1.5;
+  g.strokeStyle = f.down ? "rgba(255,255,255,0.75)" : "rgba(255,255,255,0.5)";
+  g.stroke();
+  g.restore();
+}
+
+function frontApp() {
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const L = layers[i];
+    if (L.kind === "W" || L.kind === "S") return L;
+  }
+  return null;
+}
+let urlKey = null;
+function syncUrl() {
+  if (!desktopReady || !history.pushState) return;
+  const L = frontApp();
+  const key = L ? (L.kind === "S" ? "" : keyForTitle(L.title)) : null;
+  if (key === null || key === urlKey) return;         /* unknown window: leave the URL as it is */
+  const was = urlKey;
+  urlKey = key;
+  const href = urlFor(key);
+  if (href === location.pathname + location.search + location.hash) return;
+  try {
+    /* The first one replaces: arriving at /solitaire and having it open should not leave a back
+       step to the same page. */
+    if (was === null) history.replaceState({ key }, "", href);
+    else history.pushState({ key }, "", href);
+  } catch (e) { /* a file:// page has no history to push */ }
+}
+function windowFor(key) {
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const L = layers[i];
+    if ((L.kind === "W" || L.kind === "I" || L.kind === "X") && keyForTitle(L.title) === key) return L;
+  }
+  for (const d of dock) if (keyForTitle(d.title) === key) return d;
+  return null;
+}
+window.addEventListener("popstate", ev => {
+  const key = ev.state && typeof ev.state.key === "string" ? ev.state.key
+            : (new URLSearchParams(location.search).get("run")
+               || (urlAsPath ? location.pathname.slice(urlRoot.length) : "")).toLowerCase();
+  urlKey = key;                                       /* whatever happens, do not push it back */
+  if (!key) {
+    const L = frontApp();
+    if (L && L.kind === "W" && L.slot >= 0) sendCommand(CMD_MINIMIZE, L.slot);
+    return;
+  }
+  const L = windowFor(key);
+  if (L && L.slot >= 0) { sendCommand(CMD_RESTORE, L.slot); sendCommand(CMD_ACTIVATE, L.slot); }
+  else if (APPS[key]) sendCommandString(CMD_RUN, APPS[key]);
+});
 let launched = false;
 function launchFromUrl() {
   if (launched) return;
@@ -863,7 +987,14 @@ function launchFromUrl() {
   const q = new URLSearchParams(location.search).get("run");
   const seg = location.pathname.split("/").filter(Boolean).pop() || "";
   const key = (q || (/^[a-z]+$/i.test(seg) && !/\./.test(seg) ? seg : "")).toLowerCase();
-  const cmd = APPS[key] || null;
+  let cmd = APPS[key] || null;
+  /* A fragment picks the tab where a program has them: /about#how-to-use opens the second one.
+     ABOUT.EXE takes /what and /how, and anything else leaves it on the first tab. */
+  if (cmd && key === "about") {
+    const frag = location.hash.replace(/^#/, "").toLowerCase();
+    if (/^how/.test(frag)) cmd = "ABOUT.EXE /how";
+    else if (/^what/.test(frag)) cmd = "ABOUT.EXE /what";
+  }
   if (cmd) sendCommandString(CMD_RUN, cmd);
   else if (q) report("url", `?run=${q}: not a name in APPS, ignored`);
 }
@@ -1465,6 +1596,8 @@ function applyCursorShape() {
      a touch screen the first touch hides again. Coming back from the desktop is the only way to
      get here with the guest's cursor hidden, and a mouse would otherwise have no pointer at all
      until it moved. */
+  /* The simulated phone draws its own fingertip, so neither pointer belongs on the glass. */
+  if (phoneSimOn()) { el.style.cursor = "none"; setGuestCursor(false); return; }
   if (narrow()) { el.style.cursor = ""; if (!touchDevice) setGuestCursor(true); return; }
   const own = guestCursorName === "app";                     // the guest must draw this one itself
   const css = own ? "none" : (CURSOR_CSS[guestCursorName] || "default");
@@ -2463,7 +2596,10 @@ function splashProgress() {
 function drawChunkBar(g, x, y, w, h, p) {
   const u = Math.max(1, Math.round(h / 26));            // the frame's line weight, at this size
   const R = (xx, yy, ww, hh, c) => { g.fillStyle = c; g.fillRect(xx, yy, ww, hh); };
-  const BLACK = "#000", WHITE = "#fff", FACE = "#c0c0c0", SHADOW = "#808080", BLUE = "#0000ff";
+  /* Navy, not the pure blue. #0000ff is entry 12 of the 16-colour palette and it glares; the
+     gauge in Windows' own Setup is the dark blue at entry 4, which is also the colour the
+     headings on the page use. */
+  const BLACK = "#000", WHITE = "#fff", FACE = "#c0c0c0", SHADOW = "#808080", BLUE = "#000080";
   R(x, y, w, h, FACE);
   R(x, y, w, u, BLACK); R(x, y, u, h, BLACK);                                   // outer rule
   R(x, y + h - u, w, u, BLACK); R(x + w - u, y, u, h, BLACK);
@@ -2990,6 +3126,7 @@ function presentOnce() {
     lastBgGen = dirtyGen;
     needFull = false;
     composeForGuest(vw, vh);
+    drawFinger(g);
     lcdFrame(true);
     for (const k of layerGen.keys()) if (!placed.some(w => w.key === k)) layerGen.delete(k);
     /* "Has the guest painted?" used to be a per-frame getImageData of two dozen source rows.
@@ -3052,7 +3189,12 @@ function initNet() {
     report("net", `pvsock ${full}`);
     let head, body;
     try {
-      const r = await fetch(`/api/fetch?url=${encodeURIComponent(full)}`);
+      /* This site's own files are fetched directly. /api/fetch exists to do TLS and to get past
+         the other site's CORS policy, and neither applies to something served from here -- it is
+         a pointless round trip in production, and on the dev server, which has no such route, it
+         was a 404 page delivered to the guest as if it were the file it asked for. */
+      const own = full.indexOf(location.origin + "/") === 0;
+      const r = own ? await fetch(full) : await fetch(`/api/fetch?url=${encodeURIComponent(full)}`);
       body = new Uint8Array(await r.arrayBuffer());
       const status = r.headers.get("x-upstream-status") || String(r.status);
       const type = r.headers.get("content-type") || "text/html";
@@ -4628,7 +4770,8 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
     if (ev.button !== 0 && ev.button !== 2) return;
     ev.preventDefault();
     mouseDown = true;
-    if (narrow()) setGuestCursor(true);
+    if (narrow() && !phoneSimOn()) setGuestCursor(true);   /* a finger does not bring an arrow back */
+    fingerAt(ev, true);
     simEdge = null;
     if (phoneSimOn() && ev.button === 0) {
       if (bottomStart(ev)) { simEdge = "bottom"; return; }
@@ -4652,7 +4795,14 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
       finally { hovering = null; hoverTarget = null; }
     })();
   };
+  const fingerAt = (ev, down) => {
+    if (!phoneSimOn()) { setFinger(null); return; }
+    const r = c.getBoundingClientRect();
+    setFinger({ x: ev.clientX - r.left, y: ev.clientY - r.top, down: !!down });
+  };
+  c.addEventListener("mouseleave", () => setFinger(null));
   window.addEventListener("mousemove", ev => {
+    fingerAt(ev, mouseDown);
     if (!mouseDown) { if (ev.target === c) hover(ev); return; }
     if (simEdge === "bottom" && bottomSwipe) { if (bottomMove(ev)) return; simEdge = null; }
     else if (simEdge === "edge" && edgeSwipe) { if (edgeMove(ev)) return; simEdge = null; }
@@ -4661,6 +4811,7 @@ let keySwipe = null, lastKeyTap = 0, aimSwipe = null;
   window.addEventListener("mouseup", ev => {
     if (!mouseDown) return;
     mouseDown = false;
+    fingerAt(ev, false);
     if (simEdge) { simEdge = null; endEdgeGesture(ev); return; }
     up(ev);
   });
