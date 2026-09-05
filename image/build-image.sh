@@ -22,8 +22,8 @@
 #        [games=1|0]  -- install changes/games/ as C:\GAMES with Program Manager items (default 1)
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1; NET=0
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; games=*) GAMES=${a#*=};; net=*) NET=${a#*=};; esac; done
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; games=*) GAMES=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
@@ -59,38 +59,6 @@ if [ "$GAMES" = 1 ] && [ -n "${GAMEDIRS# }" ]; then
     done
   done
   mcopy -o $M $TMP/GAMES.GRP ::/WINDOWS/GAMES.GRP
-fi
-
-# Trumpet Winsock (changes/trumpet, expanded from the distribution image Josh supplied) as
-# C:\TRUMPET, with TRUMPWSK.INI already configured for the line the host answers: internal SLIP on
-# COM2, 10.0.2.15 talking to 10.0.2.2, which is web/net.js. Nothing dials -- the line is always up
-# (the host raises DCD, DSR and CTS: Trumpet's SLIP driver will not transmit a byte without CTS).
-# WINSOCK.DLL has to be findable by every Winsock program, so C:\TRUMPET goes on the PATH, and
-# TCPMAN gets a Program Manager item in Main next to the other network tools.
-if [ -d changes/trumpet ]; then
-  mmd $M ::/TRUMPET 2>/dev/null || true
-  for f in changes/trumpet/*; do [ -f "$f" ] && mcopy -o $M "$f" ::/TRUMPET/; done
-  # No Program Manager items: a TCP/IP stack is not something anyone launches by hand, and the
-  # diagnostic tools (TCPMAN, Ping, Dig, Hop) are all on the PATH for a DOS box or File Manager.
-  # WIN.INI's load= starts TCPMAN with Windows, and [PVMon] HideApps hides its window altogether
-  # (PVMON v41) -- so networking is live from the moment the desktop is up with nothing to look at.
-  [ "$LOAD" = - ] || LOAD="${LOAD:+$LOAD }C:\\TRUMPET\\TCPMAN.EXE"
-fi
-
-# Microsoft TCP/IP-32 over NDIS 3 on v86's NE2000 (net=1). changes/net/windows -> C:\WINDOWS and
-# changes/net/system -> C:\WINDOWS\SYSTEM: the file set is exactly what Windows Setup's own network
-# install copied, taken from WFW's install source on the image (expanded with its own EXPAND.EXE,
-# which handles the KWAJ compression tools/msexpand.py does not) and from TCP32B. PROTOCOL.INI is
-# the file Setup wrote, read back out of that guest; the SYSTEM.INI half is in tools/inied.py.
-if [ "$NET" = 1 ] && [ -d changes/net ]; then
-  for f in changes/net/windows/*; do [ -f "$f" ] && mcopy -o $M "$f" ::/WINDOWS/; done
-  for f in changes/net/system/*;  do [ -f "$f" ] && mcopy -o $M "$f" ::/WINDOWS/SYSTEM/; done
-  mcopy -o $M changes/net/config/PROTOCOL.INI ::/WINDOWS/PROTOCOL.INI
-  # IFSHLP.SYS is what the redirector needs and Setup adds it here; the rest of CONFIG.SYS is the
-  # base image's.
-  mcopy -n $M ::/CONFIG.SYS $TMP/CONFIG.SYS
-  grep -qi IFSHLP $TMP/CONFIG.SYS || printf 'DEVICE=C:\\WINDOWS\\IFSHLP.SYS\r\n' >> $TMP/CONFIG.SYS
-  mcopy -o $M $TMP/CONFIG.SYS ::/CONFIG.SYS
 fi
 
 # The guest's web client (guest/fetch): Windows for Workgroups shipped no HTTP client, so this is
@@ -131,11 +99,7 @@ done
   # (It is not what makes their sound work: the Entertainment Pack games call sndPlaySound with a
   # bare file name and the lookup does not reach C:\GAMES, so changes-local/windows/ stages the
   # .WAVs and .MIDs into C:\WINDOWS as well — SPEC 2026-09-03.)
-  # The real-mode half: PROTMAN, the MAC, NDISHLP. Its output goes to COM1 as well as the screen,
-  # because by the time a boot has failed Windows has painted over the text screen and this is the
-  # only record of what the network driver said (tools/probe.mjs "serial").
-  [ "$NET" = 1 ] && printf 'C:\\WINDOWS\\net start > COM1\r\n'
-  printf 'C:\\WINDOWS\\SMARTDRV.EXE\r\n@ECHO OFF\r\nPROMPT $P$G\r\nPATH C:\\WINDOWS;C:\\DOS;C:\\GAMES;C:\\TRUMPET;\r\nSET TEMP=C:\\TEMP\r\n'
+  printf 'C:\\WINDOWS\\SMARTDRV.EXE\r\n@ECHO OFF\r\nPROMPT $P$G\r\nPATH C:\\WINDOWS;C:\\DOS;C:\\GAMES;\r\nSET TEMP=C:\\TEMP\r\n'
   case $BOOT in
     win)    printf ':WINLOOP\r\nPVDPI\r\nWIN\r\nGOTO WINLOOP\r\n';;
     pvtest) printf 'PVTEST\r\nWIN\r\n';;
@@ -144,13 +108,13 @@ done
 } > $TMP/AUTOEXEC.BAT
 mcopy -o $M $TMP/AUTOEXEC.BAT ::/AUTOEXEC.BAT
 mcopy -n $M ::/WINDOWS/SYSTEM.INI $TMP/SYSTEM.INI
-python3 ../tools/inied.py $TMP/SYSTEM.INI display=$DISPLAY_DRV res=$RES dpi=$DPI ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND} net=$NET
+python3 ../tools/inied.py $TMP/SYSTEM.INI display=$DISPLAY_DRV res=$RES dpi=$DPI ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND}
 mcopy -o $M $TMP/SYSTEM.INI ::/WINDOWS/SYSTEM.INI
 # DPI variants for PVDPI.EXE to choose between at each Windows start (SPEC 2.6).
 # Fonts must match the DPI PVDISP.DRV reports from HOST_DPI or text metrics go wrong.
 for d in 96 120; do
   cp $TMP/SYSTEM.INI $TMP/SYSTEM.$d
-  python3 ../tools/inied.py $TMP/SYSTEM.$d display=$DISPLAY_DRV res=$RES dpi=$d ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND} net=$NET
+  python3 ../tools/inied.py $TMP/SYSTEM.$d display=$DISPLAY_DRV res=$RES dpi=$d ${SYSFONT:+sysfont=$SYSFONT} ${MOUSEDRV:+mousedrv=$MOUSEDRV} ${SOUND:+sound=$SOUND}
   mcopy -o $M $TMP/SYSTEM.$d ::/WINDOWS/SYSTEM.$d
 done
 # WIN.INI: [windows] load= (companion utility), e.g. load=PVMON.EXE; load=- clears it
@@ -175,7 +139,7 @@ H=$SHELLH; [ "$H" = 0 ] && H=760
 python3 ../tools/winini.py $TMP/WIN.INI desktop.IconSpacing=100 desktop.IconTitleWrap=1 \
   windows.MouseSpeed=0 windows.MouseThreshold1=0 windows.MouseThreshold2=0 \
   windows.Beep=no \
-  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 Paintbrush.width=536 Paintbrush.height=300 PVMon.Size.SKI=${W}x${H} PVMon.Size.TETRIS=${W}x470 PVMon.Size.BLAKJAK=576x500 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" "PVMon.HideApps=TCPMAN" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZBALL TETRIS TETRAVEX TRIPEAKS TUTSTOMB FREECELL GOLF CHIPS RODENT PIPE TP BLAKJAK" \
+  PVMon.Live=$LIVE PVMon.FakeScreen=$FAKESCREEN PVMon.HookClamp=$HOOKCLAMP PVMon.ShellWidth=$SHELLW PVMon.ShellHeight=$SHELLH PVMon.Size.WINOA386=${W}x360 PVMon.Size.CLOCK=${W}x${W} PVMon.Size.PBRUSH=640x424 Paintbrush.width=536 Paintbrush.height=300 PVMon.Size.SKI=${W}x${H} PVMon.Size.TETRIS=${W}x470 PVMon.Size.BLAKJAK=576x500 "PVMon.KeyboardApps=WINOA386 TERMINAL WRITE CARDFILE CALENDAR RECORDER NOTEPAD" PVMon.TapOpens=1 PVMon.DefaultSize=${W}x600 "PVMon.KeepSize=SOL MSHEARTS WINMINE CALC CHARMAP SOUNDREC TASKMAN WINVER PIFEDIT PACKAGER PBRUSH JEZZBALL TETRIS TETRAVEX TRIPEAKS TUTSTOMB FREECELL GOLF CHIPS RODENT PIPE TP BLAKJAK" \
   "Windows Help.M_WindowPosition=[640,0,${W},600,0]" "Windows Help.H_WindowPosition=[640,0,${W},400,0]" \
   "windows.spooler=$SPOOLER" \
   "windows.device=$( [ "$PRINTER" = TTY ] && echo "Text Printer,TTY" || echo "PDF Printer,PSCRIPT" ),C:\\PRINT.PRN" \
@@ -231,5 +195,16 @@ echo "built $IMG: display=$DISPLAY_DRV res=$RES dpi=$DPI boot=$BOOT load=$LOAD l
 STAMP=$(date +%Y%m%d-%H%M%S); BASE=${IMG%.img}
 cp -c "$IMG" "$BASE-$STAMP.img" 2>/dev/null || cp "$IMG" "$BASE-$STAMP.img"
 printf '{"image":"%s","state":"%s"}\n' "$BASE-$STAMP.img" "boot-$STAMP.state.gz" > current.json
-ls -t $BASE-*.img 2>/dev/null | tail -n +4 | while read f; do rm -f "$f" "boot-${f#$BASE-}"; rm -f "boot-$(basename "${f#$BASE-}" .img).state.gz"; done
+# Prune every stamped build, not just this base name: an experiment built with out=nettest.img used
+# to escape the pruner entirely, and sixteen of those left 4 GB behind. Parts directories are pruned
+# with them -- tools/split-image.py writes one per deploy (22 MB) and never removed the old ones,
+# which is where 748 MB went.
+ls -t *-[0-9]*-[0-9]*.img 2>/dev/null | tail -n +4 | while read f; do
+  st=${f%.img}; st=${st##*-[a-z]}; st=$(echo "$f" | sed 's/.*-\([0-9]\{8\}-[0-9]\{6\}\)\.img/\1/')
+  rm -f "$f" "boot-$st.state.gz"
+  rm -rf "parts/${f%.img}"
+done
+ls -td parts/*-[0-9]*-[0-9]* 2>/dev/null | tail -n +4 | while read d; do
+  [ -f "${d#parts/}.img" ] || rm -rf "$d"
+done
 echo "current: $BASE-$STAMP.img + boot-$STAMP.state.gz"

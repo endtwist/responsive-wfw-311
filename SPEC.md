@@ -3918,3 +3918,29 @@ includes the host's own fetch from the real internet.
 
 Trumpet and the NE2000 both still work and the host still answers all three, so nothing that worked
 before has been taken away.
+
+### 2026-09-04 — one network path, and 3.5 GB back
+**Three ways of reaching the internet were built and measured; one is kept.** The other two are gone
+from the tree, and this is the note on them.
+
+- **Trumpet Winsock over SLIP on COM2** (`image/changes/trumpet`, `web/net.js`'s `SlipNet`). Worked,
+  registered, and reached **246 KB/s** once its 2 KB receive window was opened to 16 KB and the MTU
+  raised to 1500. Cost: about 122 guest instructions a byte, and TCPMAN resident in every session
+  from `WIN.INI load=`, eating conventional memory the DOS games want.
+- **Microsoft TCP/IP-32 over NDIS 3 on v86's NE2000** (`image/changes/net`, `web/net.js`'s `EthNet`).
+  Also worked -- `PING.EXE` replied, a megabyte of Wikipedia came down it -- at **130 KB/s**, about
+  238 instructions a byte. Going to a faster wire made the guest slower, because the stack on top of
+  it is twice the price. Two findings from that build are worth keeping even though the code is not:
+  `[386Enh] netmisc=` is the line that loads the NDIS wrapper, and omitting it produces a *modal
+  message box drawn at ring 0* that looks exactly like a hang; and `network.drv=wfwnet.drv` wedges
+  Windows during init on this machine, while nothing here needs it.
+- **The PV socket** (`v86/src/vga.js`, `guest/fetch`). **Upwards of 1.6 MB/s**, because the guest has
+  no TCP stack at all: it names a target, sends its request and reads the reply out of a port, and
+  the host does the DNS, the TCP and the TLS. This is the one that is kept.
+
+**Two pruning bugs, 3.5 GB.** `build-image.sh` pruned stamped images by *base name*, so every
+experiment built with `out=nettest.img` or `out=setup.img` escaped it entirely -- sixteen 245 MB
+images survived. And nothing had ever pruned `image/parts/`: `tools/split-image.py` writes a 22 MB
+directory of zstd chunks per deploy and removed none of them, which is where 748 MB across 35
+directories went. The pruner now keeps the last three stamped builds whatever they are called, and
+takes each build's parts directory with it.

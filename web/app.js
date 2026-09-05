@@ -113,7 +113,6 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
  * and crisp instead of shrinking with them. Windows itself sees none of this: as far as it is
  * concerned the windows sit side by side on one wide screen.
  */
-import { SlipNet, EthNet } from "./net.js";
 
 const pageStart = performance.now();
 const SHELL_W = 352;             // width of the shell column on a narrow display (must match build-image shellw=)
@@ -635,7 +634,7 @@ function guestIsReady() {
     const arg = lcdForced === null ? "/report" : lcdForced ? "/on" : "/off";
     setTimeout(() => sendCommandString(CMD_RUN, `LCD.EXE ${arg}`), 1200);
   }
-  if (!slipNet) slipNet = initNet();                 // COM2 becomes a dial-up line
+  if (!slipNet) slipNet = initNet();                 // the PV socket's host half
   if (touchDevice) setTimeout(() => setGuestCursor(false, true), 500);   // an arrow means nothing to a finger
   /* The browser's pointer takes over from here (see applyCursorShape). PVMON resends PVC with
      every PVA, so the shape arrives right behind this. */
@@ -2805,121 +2804,11 @@ function composeForGuest(vw, vh) {
 
    ?net=0 leaves the port silent, which is what a guest with no Winsock installed should see. */
 let slipNet = null, slipBytes = { in: 0, out: 0 }, slipReqs = 0;
-let slipOut = [], slipOff = 0, slipDraining = false;   // the one queue for the line (see send below)
-/* What the owner does with a complete request from the guest, shared by both peers (the SLIP line
-   and the wire). The page cannot fetch arbitrary sites itself -- CORS -- so it goes out through
-   /api/fetch, which is where the TLS happens. */
-async function netRequest(peer, host, port, data, conn) {
-  const text = String.fromCharCode(...data);
-  const line = /^([A-Z]+) (\S+) HTTP\/1\.[01]/.exec(text);
-  slipReqs++;
-  if (!line) { peer.finish(conn); return; }
-  const [, method, target] = line;
-  const url = /^https?:\/\//i.test(target) ? target
-            : `http://${host}${port === 80 ? "" : ":" + port}${target.startsWith("/") ? "" : "/"}${target}`;
-  diag(`net: ${method} ${url}`);
-  report("net", `${method} ${url}`);
-  try {
-    const r = await fetch(`/api/fetch?url=${encodeURIComponent(url)}`, { method: method === "HEAD" ? "HEAD" : "GET" });
-    const body = new Uint8Array(await r.arrayBuffer());
-    const status = r.headers.get("x-upstream-status") || String(r.status);
-    const type = r.headers.get("content-type") || "text/html";
-    /* HTTP/1.0 on purpose: it is what the guest asked for, and a 1994 browser does not understand
-       chunked transfer or a keep-alive it did not request. */
-    const head = `HTTP/1.0 ${status} ${r.ok ? "OK" : "Error"}\r\n` +
-                 `Content-Type: ${type}\r\n` +
-                 `Content-Length: ${body.length}\r\n` +
-                 `Connection: close\r\n\r\n`;
-    const out = new Uint8Array(head.length + body.length);
-    for (let i = 0; i < head.length; i++) out[i] = head.charCodeAt(i) & 0xFF;
-    out.set(body, head.length);
-    peer.deliver(conn, out);
-  } catch (e) {
-    const msg = `HTTP/1.0 502 Gateway\r\nContent-Type: text/plain\r\n\r\n${host}: ${e && e.message}`;
-    peer.deliver(conn, Uint8Array.from(msg, c => c.charCodeAt(0) & 0xFF));
-  }
-  peer.finish(conn);
-}
-
 function initNet() {
   if (params.get("net") === "0") return null;
-  const net = new SlipNet({
-    /* v86's UART takes one byte at a time; a frame is up to about 1500 of them, which is nothing
-       for a loop but would be a poor idea inside the compositor's frame, so it is chunked across
-       tasks and the guest sees it arrive as a modem would deliver it.
-       One queue for the whole line, not one loop per frame: a reply goes out as several segments in
-       the same turn, and a per-frame loop had each of them pushing its own first 256 bytes before
-       any of them pushed its second -- the frames interleaved on the wire and the guest saw
-       nothing but rubbish. Everything under 256 bytes (a DNS answer, a SYN+ACK) still fitted in one
-       pass, which is why the line looked like it worked right up to the first real page. */
-    send: bytes => {
-      slipBytes.out += bytes.length;
-      slipOut.push(bytes);
-      if (!slipDraining) {
-        slipDraining = true;
-        const drain = () => {
-          let n = 0;
-          while (n < 512 && slipOut.length) {
-            const head = slipOut[0];
-            const end = Math.min(head.length, slipOff + 512 - n);
-            for (; slipOff < end; slipOff++, n++) emulator.bus.send("serial1-input", head[slipOff]);
-            if (slipOff >= head.length) { slipOut.shift(); slipOff = 0; }
-          }
-          if (slipOut.length) setTimeout(drain, 0);
-          else slipDraining = false;
-        };
-        drain();
-      }
-    },
-    request: (host, port, data, conn) => netRequest(net, host, port, data, conn),
-    log: m => diag(`net: ${m}`),
-  });
-  emulator.bus.register("serial1-output-byte", byte => { slipBytes.in++; net.fromGuest([byte & 0xFF]); });
-  /* Raise the modem's control lines. There is no modem, but a 1994 stack behaves as though there
-     were one: Trumpet's SLIP driver has hardware handshaking on by default and will not put a byte
-     on the wire until CTS is asserted, so without this the guest reports the line open, says
-     "Trying 10.0.2.2..." and never transmits. DCD and DSR go up with it, because a driver that
-     watches for carrier loss should not see one. Sent after the snapshot has been restored -- a
-     restore brings the saved modem status register back with it. */
-  for (const line of ["carrier-detect", "data-set-ready", "clear-to-send"])
-    emulator.bus.send(`serial1-${line}-input`, true);
-  report("net", "COM2 is a SLIP line to the host");
-
-  /* The same peer on the wire, for an image running Microsoft TCP/IP-32 on v86's NE2000 rather than
-     Trumpet on COM2. Whichever the guest is configured for, the host answers; they share nothing
-     but the request handler.
-     Frames are paced: the card drops silently once its 16 KB receive ring fills, and a TCP window's
-     worth arrives from us in a single turn -- handing them all over at once loses most of them and
-     the retransmission timer then papers over it at a third of the speed. The emulator runs in a
-     worker here, so the ring cannot be inspected the way tools/probe.mjs does; eight frames a turn
-     is the approximation, which is about what the ring holds. */
-  const ethQ = [];
-  let ethDraining = false;
-  const ethSend = frame => {
-    ethQ.push(frame);
-    if (ethDraining) return;
-    ethDraining = true;
-    const drain = () => {
-      for (let i = 0; i < 8 && ethQ.length; i++) emulator.bus.send("net0-receive", ethQ.shift());
-      if (ethQ.length) setTimeout(drain, 0);
-      else ethDraining = false;
-    };
-    drain();
-  };
-  const eth = new EthNet({
-    send: frame => { slipBytes.out += frame.length; ethSend(frame); },
-    request: (host, port, data, conn) => netRequest(eth, host, port, data, conn),
-    log: m => diag(`net: ${m}`),
-  });
-  emulator.bus.register("net0-send", frame => { slipBytes.in += frame.length; eth.fromGuest(frame); });
-
-  /* And the third way in, which is the fast one: the PV socket. The guest writes a URL into adapter
-     memory and reads the reply back out of it, with no TCP stack of its own at all. Both real
-     stacks are CPU-bound in the guest -- 122 instructions a byte for Trumpet over SLIP, 238 for
-     Microsoft TCP/IP-32 over NDIS -- and this replaces all of that with one copy. */
   /* The PV socket's host half, and the fast path. A handle opened on a URL is fetched at once; a
      handle opened on a host:port waits for the guest to send a request and is fetched once that
-     request is complete -- the same blank-line rule the SLIP peer uses. Either way the host does
+     request is complete -- HTTP/1.0's own rule for where a request ends. Either way the host does
      the DNS, the TCP and the TLS, and the reply becomes the handle's read stream, so a program
      that knows about the device and a Winsock program that does not are served by the same code. */
   const pvSocks = [];
@@ -2964,15 +2853,10 @@ function initNet() {
     pvFetch(h, /^https?:\/\//i.test(path) ? path : `http://${host}${path.startsWith("/") ? "" : "/"}${path}`);
   });
   emulator.bus.register("pv-sock-close", d => { pvSocks[d.handle | 0] = null; });
-  report("net", "the NE2000 is a wire to the host");
-  return net;
+  report("net", "the PV socket is the host's network");
+  return { pv: true };
 }
-window.pvNet = () => ({ on: !!slipNet, bytes: slipBytes, requests: slipReqs,
-                        names: slipNet ? [...slipNet.names.keys()] : [] });
-/* Feed the line as if the guest had written it, for a test harness: the emulated UART lives in the
-   worker and there is no way to make it emit bytes from here, so an integration check pushes
-   frames in at this end. pvKeys and pvText exist for the same reason. */
-window.pvNetFeed = bytes => { if (slipNet) { slipBytes.in += bytes.length; slipNet.fromGuest(bytes); } };
+window.pvNet = () => ({ on: !!slipNet, bytes: slipBytes, requests: slipReqs });
 
 /* --------------------------------------------------------------------- clipboard bridge ---
    Windows' clipboard and the phone's, kept in step. Out: PVMON reports CF_TEXT, we write it to

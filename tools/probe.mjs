@@ -53,7 +53,6 @@
  *   getclip[:file]          what the guest has on its clipboard (PVCB off the debug channel)
 ​ *   screen                  the 80x25 text screen out of B8000 (a failed boot's own explanation)
  *   pvsock[:url]            drive the PV socket from the host side and report its throughput
- *   netcard                 the NE2000's io base, the ISA line its PCI interrupt was routed to, its MAC
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -74,7 +73,6 @@ for (let i = 0; i < args.length; i++) {
 }
 
 const { V86 } = await import(path.join(root, "v86/src/browser/starter.js"));
-const { SlipNet, EthNet } = await import(path.join(root, "web/net.js"));
 const { trackGuest } = await import(path.join(root, "web/selftest.js"));
 
 let IMAGE = val("--image"), STATE = val("--state");
@@ -154,7 +152,6 @@ const emulator = new V86({
   wasm_path: path.join(root, "v86/build/v86.wasm"),
   memory_size: 32 * 1024 * 1024,
   vga_memory_size: 8 * 1024 * 1024,
-  uart1: true,                     // COM2: the guest's dial-up line (web/net.js)
   bios: { url: path.join(root, "v86/bios/seabios.bin") },
   vga_bios: { url: path.join(root, "v86/bios/vgabios.bin") },
   hda: { url: IMAGE, async: true, fixed_chunk_size: 256 * 1024, heads: 16, sectors_per_track: 32 },
@@ -252,93 +249,7 @@ if (val("--date")) {
 }
 
 const netLog = [];
-/* What the owner does with a complete request, shared by both peers. --net-live fetches for real;
-   without it the guest gets a stub, which is enough to prove the path. */
-async function netRequest(peer, host, port, data, conn) {
-  const text = String.fromCharCode(...data);
-  netLog.push(`request ${host}:${port} ${text.split("\r\n")[0]}`);
-  let body = `<html><body><h1>${host}</h1></body></html>`;
-  if (flag("--net-live")) {
-    const m = /^([A-Z]+) (\S+)/.exec(text);
-    try {
-      const r = await fetch(`http://${host}${m ? m[2] : "/"}`);
-      body = await r.text();
-    } catch (e) { body = `could not reach ${host}: ${e.message}`; }
-  }
-  const head = `HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`;
-  peer.deliver(conn, Uint8Array.from(head + body, c => c.charCodeAt(0) & 0xFF));
-  peer.finish(conn);
-}
-const netBytes = { in: 0, out: 0, first: 0, last: 0 };   /* what crossed the line, and when */
-const slip = new SlipNet({
-  send: bytes => {
-    netBytes.out += bytes.length;
-    if (!netBytes.first) netBytes.first = performance.now();
-    netBytes.last = performance.now();
-    for (const b of bytes) emulator.bus.send("serial1-input", b);   // one turn, in order
-  },
-  request: (host, port, data, conn) => netRequest(slip, host, port, data, conn),
-  log: m => netLog.push(m),
-});
-/* COM1 as a serial console. DOS can be told to send its output there (AUTOEXEC "> COM1"), which is
-   the only way to read what happened before Windows started: by the time a boot has failed the
-   text screen has been painted over by Windows' own, and a guest that hangs cannot be asked. */
-let serialOut = "";
-emulator.bus.register("serial0-output-byte", byte => { serialOut += String.fromCharCode(byte & 0xFF); });
-
-/* The guest's clipboard, as PVMON puts it on the debug channel (see the getclip step). */
-const clipOut = { lines: null, text: "" };
-emulator.bus.register("pv-debug", line => {
-  if (/^PVCB-BEGIN/.test(line)) clipOut.lines = [];
-  else if (/^PVCB /.test(line)) { if (clipOut.lines) clipOut.lines.push(line.slice(5)); }
-  else if (/^PVCB-END/.test(line) && clipOut.lines)
-    { clipOut.text = Buffer.from(clipOut.lines.join(""), "base64").toString("latin1"); clipOut.lines = null; }
-});
-
-emulator.bus.register("serial1-output-byte", byte => { netBytes.in++; slip.fromGuest([byte & 0xFF]); });
-
-/* The same peer again, on the wire instead of the serial line: whichever the image is configured
-   for, the host answers. An image with Trumpet on COM2 uses the one above; an image with Microsoft
-   TCP/IP-32 on the NE2000 uses this one. They share nothing but the request handler. */
-/* Frames are paced to the card's receive ring. v86's NE2000 drops a frame silently when the ring
-   is full ("Buffer full, dropping packet"), and the ring is 16 KB of card memory -- about eleven
-   full-size frames -- while a TCP window's worth arrives from us in a single turn. Handing them all
-   over at once loses most of them, and the retransmission timer then papers over it at 39 KB/s.
-   So: queue, and only hand the card a frame when its ring has room, which is computed the same way
-   the card computes it. */
-const ethQueue = [];
-let ethDraining = false;
-function ringRoom(bytes) {
-  const n = emulator.v86.cpu.devices.net;
-  if (!n || !n.boundary) return true;                     // not initialised yet: let it through
-  const need = ((bytes + 4 + 255) >> 8) + 1;
-  const avail = n.boundary > n.curpg ? n.boundary - n.curpg
-                                     : n.pstop - n.curpg + n.boundary - n.pstart;
-  return avail > need + 2;                                // a little headroom, so a burst cannot wrap
-}
-function ethSend(frame) {
-  ethQueue.push(frame);
-  if (ethDraining) return;
-  ethDraining = true;
-  const drain = () => {
-    while (ethQueue.length && ringRoom(ethQueue[0].length)) emulator.bus.send("net0-receive", ethQueue.shift());
-    if (ethQueue.length) setTimeout(drain, 1);
-    else ethDraining = false;
-  };
-  drain();
-}
-const eth = new EthNet({
-  send: frame => {
-    netBytes.out += frame.length;
-    if (!netBytes.first) netBytes.first = performance.now();
-    netBytes.last = performance.now();
-    ethSend(frame);
-  },
-  request: (host, port, data, conn) => netRequest(eth, host, port, data, conn),
-  log: m => netLog.push(m),
-});
-/* The PV socket's host half: the guest asks for a URL, we fetch it and hand the whole reply over.
-   No DNS, no TCP, no framing -- the guest's cost is a copy out of adapter memory. */
+const netBytes = { in: 0, out: 0, first: 0, last: 0 };   /* what crossed to the guest, and when */
 /* The PV socket's host half. A handle opened on a URL is fetched at once; a handle opened on a
    host:port waits for the guest to send a request and is fetched when that request is complete --
    the same blank-line rule web/net.js uses on the SLIP line. Either way the host does the DNS, the
@@ -380,28 +291,12 @@ emulator.bus.register("pv-sock-send", d => {
 });
 emulator.bus.register("pv-sock-close", d => { pvSocks[d.handle | 0] = null; });
 
-emulator.bus.register("net0-send", frame => {
-  netBytes.in += frame.length;
-  if (!netBytes.first) netBytes.first = performance.now();
-  eth.fromGuest(frame);
-});
-/* The modem's control lines. A real 14k4 on the end of the cable asserts DCD, DSR and CTS, and
-   Trumpet's SLIP driver -- like every other 1994 stack -- will not transmit a byte until CTS is
-   there: hardware handshaking is on by default. Without these the line is open, the guest says
-   "Trying 10.0.2.2..." and not one byte ever leaves the UART. */
-function raiseModemLines() {
-  for (const line of ["carrier-detect", "data-set-ready", "clear-to-send"])
-    emulator.bus.send(`serial1-${line}-input`, true);
-}
-raiseModemLines();
-
 emulator.bus.send("pv-request-mode", [SCREEN_W, SCREEN_H]);
 const t0 = performance.now();
 if (STATE) {
   const snap = zlib.gunzipSync(fs.readFileSync(STATE));
   await emulator.restore_state(snap.buffer.slice(snap.byteOffset, snap.byteOffset + snap.byteLength));
   emulator.run();
-  raiseModemLines();               // restore_state brought the saved MSR back with it
   await sleep(300);
   emulator.bus.send("pv-command", [6, 0]);
 } else {
@@ -530,24 +425,6 @@ for (const s of steps) {
     const secs = (performance.now() - t0) / 1000;
     console.log(`${ts()} pvsock ${url}: ${total} bytes in ${secs.toFixed(2)}s (${(total / 1024 / Math.max(secs, 0.001)).toFixed(0)} KB/s at the device)`);
     console.log(`${ts()} pvsock first line: ${head.split("\r\n")[0]}`);
-  }
-  else if (op === "netcard") {
-    /* The NE2000 as the guest can see it: where its registers are, and which ISA line the BIOS
-       routed its PCI interrupt to -- that number is what PROTOCOL.INI has to say, and it is
-       assigned at boot rather than fixed. */
-    const n = emulator.v86.cpu.devices.net;
-    if (!n) { console.log(`${ts()} netcard: no ne2k device`); }
-    else {
-      const mac = [...n.mac].map(b => b.toString(16).padStart(2, "0")).join(":");
-      /* The line it actually asserts is not its own config byte: PCI.raise_irq routes the pin
-         through the ISA bridge's PIRQ registers, so work it out the same way the bus does. */
-      const pci = emulator.v86.cpu.devices.pci;
-      const space = pci.device_spaces[n.pci_id];
-      const pin = (space[0x3C >>> 2] >> 8 & 0xFF) - 1;
-      const dev = (n.pci_id >> 3) - 1 & 0xFF;
-      const irq = pci.isa_bridge_space8[0x60 + (pin + dev & 3)];
-      console.log(`${ts()} netcard: io 0x${n.port.toString(16)} isa irq ${irq} (pin ${pin + 1}, line byte ${n.pci_space[0x3C]}) mac ${mac} cr=0x${n.cr.toString(16)} imr=0x${n.imr.toString(16)}`);
-    }
   }
   else if (op === "net") {
     const secs = (netBytes.last - netBytes.first) / 1000;

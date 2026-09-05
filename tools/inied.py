@@ -59,61 +59,9 @@ elif disp == "vga":
     setkey(secs, "boot", "display.drv", "vga.drv"); setkey(secs, "boot", "386grabber", "vga.3gr"); setkey(secs, "386Enh", "display", "*vddvga")
 elif disp == "pvdisp":
     setkey(secs, "boot", "display.drv", "pvdisp.drv"); setkey(secs, "boot", "386grabber", "vgadib.3gr"); setkey(secs, "386Enh", "display", "*vddvga"); setkey(secs, "boot.description", "display.drv", "Responsive paravirtual display (256 colors)")
-# net=1: the NE2000 with Microsoft TCP/IP-32 over NDIS 3. Every key here was read back out of a
-# guest where Windows Setup had done the install itself (image/changes/net/config/SYSTEM.INI),
-# because hand-writing it does not work: the hint that matters is [386Enh] network=, which names
-# WFW's own network core. Without it NDIS.386 loads and never returns, and Windows hangs on its
-# splash screen with nothing printed at all. The TCP/IP VxDs go on the transport= line, not on
-# device= lines of their own. The card is v86's: I/O 0x300, ISA line 10 (tools/probe.mjs netcard).
-if opts.get("net") == "1":
-    ip = opts.get("ip", "10.0.2.15"); mask = opts.get("mask", "255.255.255.0")
-    gw = opts.get("gw", "10.0.2.2"); dns = opts.get("dns", gw); host = opts.get("host", "wfw311")
-    # network.drv is deliberately NOT set to wfwnet.drv. That is WFW's own networking driver -- the
-    # file sharing, the network drives, the Network control panel -- and loading it wedges Windows
-    # during init on this machine: with everything else in place, this one key is both sufficient
-    # and necessary to reproduce the hang. Nothing we want needs it. Winsock reaches the stack
-    # through WSOCK.386/WSTCP.386 (the netmisc line), not through network.drv.
-    setkey(secs, "boot", "network.drv", "")
-    setkey(secs, "boot.description", "network.drv", "Microsoft Windows Network (version 3.11)")
-    setkey(secs, "boot.description", "secondnet.drv", "No Additional Network Installed")
-    setkey(secs, "Network", "winnet", "wfwnet/00025100")
-    setkey(secs, "Network", "multinet", "nonet")
-    setkey(secs, "386Enh", "network", "*vnetbios,*vwc,vnetsup.386,vredir.386,vserver.386")
-    setkey(secs, "386Enh", "netcard", "ne2000.386")
-    setkey(secs, "386Enh", "transport",
-           "nwlink.386,nwnblink.386,netbeui.386,vip.386,vdhcp.386,vtdi.386,vtcp.386,vnbt.386")
-    # netmisc= is the line that loads the NDIS 3 wrapper itself, and leaving it out is what hung
-    # Windows on its splash: every client of NDIS loaded (VIP, VTCP, VNBT, NetBEUI, NWLink) and NDIS
-    # did not, so VIP.386's first dynamic-link call into device 0x0028 raised a VMM fatal error --
-    # which is a *modal message box drawn at ring 0*, invisible to the host and waiting for a
-    # keystroke the probe never sends. Silence, not a hang.
-    setkey(secs, "386Enh", "netmisc", "ndis.386,ndis2sup.386,wsock.386,wstcp.386")
-    setkey(secs, "386Enh", "secondnet.drv", "No Additional Network Installed")
-    setkey(secs, "network drivers", "devdir", "C:\\WINDOWS")
-    setkey(secs, "network drivers", "LoadRMDrivers", "No")
-    setkey(secs, "network drivers", "netcard", "ne2000.dos")
-    setkey(secs, "network drivers", "transport", "ndishlp.sys,*netbeui")
-    # The addresses live in a per-interface section, not in PROTOCOL.INI where one would look.
-    setkey(secs, "ms$ne2clone0", "Binding", "ms$ne2clone")
-    setkey(secs, "ms$ne2clone0", "Description", "NE2000 Compatible")
-    setkey(secs, "ms$ne2clone0", "IPAddress", ip)
-    setkey(secs, "ms$ne2clone0", "IPMask", mask)
-    setkey(secs, "ms$ne2clone0", "DefaultGateway", gw)
-    setkey(secs, "MSTCP", "EnableRouting", "0")
-    setkey(secs, "MSTCP", "Interfaces", "ms$ne2clone0")
-    setkey(secs, "MSTCP", "deadgwdetect", "1")
-    setkey(secs, "MSTCP", "pmtudiscovery", "1")
-    setkey(secs, "DNS", "DNSServers", dns)
-    setkey(secs, "DNS", "HostName", host)
-    setkey(secs, "DNS", "DomainName", "")
-    setkey(secs, "DNS", "DNSDomains", "")
-    setkey(secs, "NBT", "LANABASE", "2")
-    setkey(secs, "NBT", "EnableProxy", "0")
-    setkey(secs, "NBT", "EnableDNS", "0")
-
 out = []
 for name, lines in secs:
     if name: out.append(f"[{name}]")
     out.extend(lines)
 open(path, "wb").write(("\n".join(out)).replace("\n", "\r\n").encode("cp437"))
-print(f"{path}: display={disp} res={res} dpi={dpi}" + (" net=1" if opts.get("net") == "1" else ""))
+print(f"{path}: display={disp} res={res} dpi={dpi}")
