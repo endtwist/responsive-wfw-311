@@ -1,16 +1,19 @@
 # Responsive Windows for Workgroups 3.11
 
-> Windows for Workgroups 3.11, emulated in the browser and made responsive, so a 1993
-> operating system can be used with a thumb on a phone. By Joshua Gross (https://gross.is).
+> An OS-as-website. Windows for Workgroups 3.11, emulated in the browser and rearranged so it
+> can be browsed across desktop, tablet and mobile. By Joshua Gross (https://gross.is).
 > Live at https://responsive-wfw-311.vercel.app/
 
 ## What it is
 
-An operating system in the shape of a website. Windows 3.11 runs in a WebAssembly emulator, and
-the browser rearranges its screen so that it fits, and works, on a phone. The rule throughout was
-that there is no web interface on top of it: every pixel on the page is Windows' own, drawn by
-Windows, and the parts that had to be invented were built as native Windows programs and drivers
-rather than as HTML.
+An operating system in the shape of a website. The question it was built to answer: how close can
+Windows 3.1 get to feeling decently native on a modern mobile device?
+
+Windows 3.11 runs in a WebAssembly emulator, and the browser rearranges its screen so that it fits,
+and works, on a phone. The rule throughout was to keep as much of the work as possible inside the
+guest (Windows) and to put little to no HTML or CSS styling in the host (the browser): every pixel
+on the page is Windows' own, and the parts that had to be invented were built as native Windows
+programs and drivers rather than as web interface.
 
 ## How it works
 
