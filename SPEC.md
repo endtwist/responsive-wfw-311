@@ -3995,6 +3995,9 @@ Josh's Responsive Windows for Workgroups artwork (`web/boot-splash.webp`, 864x11
 from `index.html` so it is decoding while `app.js` is still being parsed) with a Windows 3.1 chunked
 progress bar under it.
 
+The artwork sits on black, not on its own blue: it is a picture on the screen, and the screen is
+off apart from it.
+
 Host-drawn, and it has to be -- there is no guest yet to draw it. It goes on `#pres` like everything
 else, so it sits inside the safe areas and comes up through the LCD shader with `?lcd=1`: the boot
 screen bleeds and glows exactly as the desktop behind it will.

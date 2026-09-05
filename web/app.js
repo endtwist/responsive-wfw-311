@@ -2348,7 +2348,6 @@ function blit(g, src, sx, sy, sw, sh, dx, dy, dw, dh) {
  * The bar is Windows 3.1's: a raised outer frame, a sunken well, and square chunks with a gap
  * between them, filling left to right. Nothing is animated for its own sake -- every chunk stands
  * for bytes that have actually arrived. */
-const SPLASH_BG = "#3ea6c8";                  // the artwork's own field, so the first frame is already blue
 const splash = { img: null, tall: null, on: !(params.get("fresh") || params.get("mkstate") || params.get("nosplash")),
                  p: 0, phase: "starting",
                  /* ?splash=1 keeps it up and runs the bar on a loop: the boot screen is over in
@@ -2417,7 +2416,9 @@ function drawChunkBar(g, x, y, w, h, p) {
 }
 
 function drawBootSplash(g, vw, vh) {
-  g.fillStyle = SPLASH_BG;
+  /* Black around the artwork, not the artwork's own blue: the panel is a picture on the screen,
+     and the screen is off apart from it. */
+  g.fillStyle = "#000";
   g.fillRect(0, 0, vw, vh);
   const img = splashArt(vw, vh);
   if (!img) return;                                     // still decoding: the field alone, not black
