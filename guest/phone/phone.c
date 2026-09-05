@@ -198,8 +198,18 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     }
     h = MARGIN + ROW + GAP + 22 + (ROW - 2) * 2 + GAP + 76 + GAP + ROW + MARGIN
         + GetSystemMetrics(SM_CYCAPTION) + 2 * GetSystemMetrics(SM_CYBORDER);
-    hwnd = CreateWindow(szClass, szTitle, WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                        0, 0, FRAME_W, h, NULL, NULL, inst, NULL);
+    /* Centred on the screen USER reports. On a phone that screen is the frame itself
+       ([PVMon] FakeScreen), so this lands at the top left and PVMON parks the window in a column
+       as it does with everything; on a desktop it is the middle of the browser window, which is
+       where a small fixed dialog belongs. */
+    {
+        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+        int x = (sw - FRAME_W) / 2, y = (sh - h) / 2;
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        hwnd = CreateWindow(szClass, szTitle, WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                            x, y, FRAME_W, h, NULL, NULL, inst, NULL);
+    }
     if (!hwnd) return 0;
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);

@@ -1562,7 +1562,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         if (h < 420) h = 420;
         if (h > 760) h = 760;
         hwnd = CreateWindow(szClass, szTitle, WS_OVERLAPPEDWINDOW,
-                            (sw - w) / 2, (sh - h) / 3, w, h, NULL, NULL, inst, NULL);
+                            (sw - w) / 2, (sh - h) / 2, w, h, NULL, NULL, inst, NULL);
     } else {
         hwnd = CreateWindow(szClass, szTitle, WS_POPUP | WS_CAPTION | WS_SYSMENU,
                             0, 0, 352, 560, NULL, NULL, inst, NULL);
