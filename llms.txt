@@ -2,7 +2,7 @@
 
 > An OS-as-website. Windows for Workgroups 3.11, emulated in the browser and rearranged so it
 > can be browsed across desktop, tablet and mobile. By Joshua Gross (https://gross.is).
-> Live at https://responsive-wfw-311.vercel.app/
+> Live at https://win31.gross.is/
 
 ## What it is
 
@@ -34,7 +34,7 @@ programs and drivers rather than as web interface.
 
 ## URLs
 
-The path opens a program. https://responsive-wfw-311.vercel.app/solitaire opens Solitaire,
+The path opens a program. https://win31.gross.is/solitaire opens Solitaire,
 /notepad opens Notepad, /jezzball opens JezzBall, and so on; ?run= takes a command line directly.
 The full list is in /sitemap.xml.
 

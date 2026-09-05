@@ -88,6 +88,8 @@ if [ -f changes/windows/ABOUT.EXE ] || [ -f changes/windows/LCD.EXE ]; then
   # the only kind of interface this system has.
   [ -f changes/windows/LCD.EXE ] && python3 ../tools/grpadd.py $TMP/MAIN.GRP "Screen" "LCD.EXE" --exe changes/windows/LCD.EXE
   [ -f changes/windows/PHONE.EXE ] && python3 ../tools/grpadd.py $TMP/MAIN.GRP "Phone" "PHONE.EXE" --exe changes/windows/PHONE.EXE
+  # The way out: Program Manager's Exit Windows gesture, pointed at the site this page belongs to.
+  [ -f changes/windows/GROSSIS.EXE ] && python3 ../tools/grpadd.py $TMP/MAIN.GRP "gross.is" "GROSSIS.EXE" --exe changes/windows/GROSSIS.EXE
   mcopy -o $M $TMP/MAIN.GRP ::/WINDOWS/MAIN.GRP
 fi
 

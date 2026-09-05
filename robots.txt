@@ -12,4 +12,4 @@ Disallow: /image/
 Disallow: /parts/
 Disallow: /pages/*.pvp
 
-Sitemap: https://responsive-wfw-311.vercel.app/sitemap.xml
+Sitemap: https://win31.gross.is/sitemap.xml

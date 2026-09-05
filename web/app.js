@@ -120,6 +120,8 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
  */
 
 const pageStart = performance.now();
+/* Where GROSSIS.EXE goes when the visitor says yes to leaving Windows. */
+const SITE_HOME = "https://gross.is";
 const SHELL_W = 352;             // width of the shell column on a narrow display (must match build-image shellw=)
 const SLOT_W = 640;              // width of each application column (must match pvmon.c)
 /* Four, not three: the first-run note takes one and a fixed-layout program wider than a column
@@ -748,6 +750,14 @@ emulator.bus.register("pv-debug", line => {
   /* LCD.EXE reporting its controls: on, brightness, contrast (0..100 each). */
   { const m2 = /^PVLCD (\d+) (\d+) (\d+)/.exec(line);
     if (m2) { lcdSettings(+m2[1], +m2[2], +m2[3]); return; } }
+  /* GROSSIS.EXE: the guest said yes to leaving. Where it goes is decided here rather than named
+     on the wire -- a guest that could give the host an address would be a guest that could send a
+     visitor anywhere, and this one only has a front door. */
+  if (/^PVEXIT/.test(line)) {
+    report("exit", "the guest is leaving for " + SITE_HOME);
+    location.href = SITE_HOME;
+    return;
+  }
   /* PHONE.EXE reporting the simulated phone: on, and which aspect. */
   { const m3 = /^PVPHONE (\d+) (\d+)/.exec(line);
     if (m3) { setPhoneSim(+m3[1], +m3[2]); return; } }
