@@ -285,9 +285,16 @@ static int  g_noteH = 0;             /* the desktop note, measured once it has a
    guest can know what it is being looked at on. The same rule the page uses: the shorter side
    under 600 host pixels is a phone. It decides two things -- whether to say that none of the
    gestures on the other tab apply here, and how big this window should be. */
+#define R_VIEW_W 0x38
+#define R_VIEW_H 0x39
 static int host_wide(void)
 {
-    unsigned hw = rd(0x10), hh = rd(0x11);
+    /* 0x38/0x39 are the browser window. 0x10/0x11 are the guest MODE the host asked for, which in
+       the phone layout is the whole 3200x970 strip of columns -- reading those to decide what kind
+       of device this is said "desktop" on every phone. Zero means nothing has told us (the headless
+       probe, say), and then the note is left off: it is an addition for desktop readers, and the
+       safe answer is not to show it. */
+    unsigned hw = rd(R_VIEW_W), hh = rd(R_VIEW_H);
     if (!hw || !hh) return 0;
     return (hw < hh ? hw : hh) >= 600;
 }

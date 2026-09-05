@@ -3699,6 +3699,12 @@ function requestMode(force) {
   invalidate();
   holdLastFrame();
   emulator.bus.send("pv-request-mode", [w, h]);
+  /* And, separately, the size of the window the visitor is actually looking at. The mode above is
+     the guest's screen, which in the phone layout is the whole strip of columns; a program that
+     wants to know what kind of device this is needs the browser's own viewport. The FULL one, not
+     the safe-area box: with the simulated phone running, the box is the frame, and PHONE.EXE
+     would hide itself just when it is needed to switch the frame off. */
+  emulator.bus.send("pv-host-view", fullViewport());
   setText("zoom", scale === 1 ? "" : `scale ${scale.toFixed(2)}`);
   fitCanvas();
 }

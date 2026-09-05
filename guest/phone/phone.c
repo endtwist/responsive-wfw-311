@@ -41,8 +41,8 @@ static int  g_on = 0, g_aspect = 0;
    a newline ends the line, and the host reads it with the rest of the protocol. */
 #define R_INDEX 0x1CE
 #define R_DATA  0x1CF
-#define R_HOST_W 0x10
-#define R_HOST_H 0x11
+#define R_VIEW_W 0x38
+#define R_VIEW_H 0x39
 #define R_DEBUG  0x16
 
 static unsigned rd(unsigned reg)
@@ -61,11 +61,15 @@ static void dbg(const char *s)
     dbg_ch(10);
 }
 
-/* The same test the host makes (web/app.js narrow()): the shorter side under 600 host pixels is a
-   phone, and there is nothing here for it. */
+/* The same test the host makes (web/app.js narrowReal()): the shorter side of the BROWSER WINDOW
+   under 600 host pixels is a phone, and there is nothing here for it.
+   0x38/0x39, not 0x10/0x11: the latter are the guest mode the host asked for, and in the phone
+   layout that is the whole 3200x970 strip of columns, so this program decided it was on a desktop
+   on every phone and put up its window there. And the full window rather than the live area, or
+   the simulated frame would make this hide itself just when it is needed to switch the frame off. */
 static int host_is_phone(void)
 {
-    unsigned w = rd(R_HOST_W), h = rd(R_HOST_H);
+    unsigned w = rd(R_VIEW_W), h = rd(R_VIEW_H);
     if (!w || !h) return 0;                 /* no report: assume a desktop and show the window */
     return (w < h ? w : h) < 600;
 }

@@ -426,6 +426,12 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.pv_text_mem = new Uint8Array(4 * VGA_BANK_SIZE);
     this.pv_host_xres = 0;
     this.pv_host_yres = 0;
+    /* The browser window itself, in host pixels. NOT the same thing as pv_host_xres/yres, which
+       are the guest MODE the host is asking for -- in the phone layout that mode is the whole
+       3200x970 strip of columns, so a guest that read it to find out what it was being looked at
+       on concluded "desktop" on every phone. A program that wants the device asks for these. */
+    this.pv_view_w = 0;
+    this.pv_view_h = 0;
     this.pv_host_dpi = 96;
     this.pv_status = 0;         // bit0 MODE_REQUEST (W1C), bit1 IRQ_ENABLE
     this.pv_generation = 0;
@@ -439,6 +445,10 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
     this.pv_cursor_y = 0;
     this.pv_debug_line = "";
     bus.register("pv-request-mode", function(data) { this.pv_request_mode(data[0], data[1]); }, this);
+    bus.register("pv-host-view", function(data) {
+        this.pv_view_w = Math.max(0, Math.min(data[0] | 0, 0xFFFF));
+        this.pv_view_h = Math.max(0, Math.min(data[1] | 0, 0xFFFF));
+    }, this);
     /* [w, h]: reserve the composite past the frame buffer, or [0, 0] to keep none. It fits only
        if there is video memory left after the visible screen. */
     bus.register("pv-composite-size", function(data) {
@@ -3059,6 +3069,10 @@ VGAScreen.prototype.svga_register_read = function(n)
             return 0x5056; // 'PV' signature: lets guests detect the extended adapter
         case 0x17:
             return this.pv_generation & 0xFFFF;
+        case 0x38:
+            return this.pv_view_w;      // the browser window, not the mode: see pv_view_w above
+        case 0x39:
+            return this.pv_view_h;
         case 0x18:
             return this.svga_read_bank_offset >>> 16;
         case 0x19:
