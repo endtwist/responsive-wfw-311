@@ -3816,3 +3816,42 @@ frames:
 so the download argument for MS Video 1 is gone. What is left is decoder size -- ~150 lines against
 600-900 -- and Cinepak is 4.2 dB better *after* the guest's palette has had its say (31.4 dB against
 27.2 on Josh's own clip at 172x228).
+
+### 2026-09-04 — Microsoft TCP/IP-32 over NDIS 3 on v86's NE2000: it boots, and the card is live
+`build-image.sh net=1` installs Microsoft TCP/IP-32 3.11b over WFW's NDIS 3 stack on v86's emulated
+NE2000, and the guest boots to the desktop with the card programmed and its interrupts enabled
+(`tools/probe.mjs netcard`: `cr=0x22 imr=0x1b`, where an untouched card reads `cr=0x01 imr=0x00`).
+Microsoft's own PING.EXE runs and transmits -- it times out, because nothing on the host answers
+**ethernet** frames yet; `web/net.js` still speaks SLIP.
+
+**The install is Setup's own work, captured.** Hand-writing the configuration failed repeatedly, so
+Windows Setup was driven through its dialogs once (Networks, Add Adapter "NE2000 Compatible" at IRQ
+10 and I/O 0x300, Add Protocol from `c:\tcp32`, then the addresses) and the four files it wrote were
+read back out of the guest through the clipboard bridge into `image/changes/net/config/`. The file
+set it copied -- 37 files into `C:\WINDOWS`, 26 into `SYSTEM` -- comes from WFW's own install source
+on the image, expanded with the guest's `EXPAND.EXE` because those files are KWAJ-compressed and
+`tools/msexpand.py` only knows SZDD.
+
+**Two things were wrong, and neither announced itself.**
+- **`netmisc=` was missing** from `[386Enh]`, a transcription slip when the captured `SYSTEM.INI` was
+  turned into `inied.py` keys. It is the line that loads the NDIS wrapper itself, so every client of
+  NDIS loaded (VIP, VTCP, VNBT, NetBEUI, NWLink) and NDIS did not. VIP.386's first dynamic-link call
+  into device 0x0028 raised a VMM fatal error -- **a modal message box drawn at ring 0**, invisible
+  to the host, waiting for a keystroke the probe never sends. It presents exactly like a hang:
+  splash screen, silence, and the 240-second timeout. Found by sampling the guest's instruction
+  pointer, decoding the five addresses it was cycling between, and reading the message string out of
+  guest memory.
+- **`network.drv=wfwnet.drv` wedges Windows during init.** With everything else in place, that one
+  key is both sufficient and necessary to reproduce the hang. It is WFW's own networking driver --
+  file sharing, network drives, the Network control panel -- and nothing here needs it: Winsock
+  reaches the stack through WSOCK.386 and WSTCP.386, which the `netmisc=` line loads. So it is left
+  empty.
+
+**And a landmine worth remembering: PVDPI rewrites `SYSTEM.INI` at every boot**, from the
+`SYSTEM.96` / `SYSTEM.120` variants `build-image.sh` writes. Editing `SYSTEM.INI` inside an image by
+hand is therefore a no-op, which is why an afternoon of subtractive bisects all "hung" identically
+and taught nothing. Any experiment on `SYSTEM.INI` has to write all three copies.
+
+**Still to do before this replaces the SLIP line:** `web/net.js` needs an ethernet layer -- frames
+and an ARP responder under the existing IP/ICMP/UDP/TCP code -- and the host has to be wired to
+`net0-send` / `net0-receive` instead of `serial1-*`.

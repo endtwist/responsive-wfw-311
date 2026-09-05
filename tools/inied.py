@@ -68,7 +68,12 @@ elif disp == "pvdisp":
 if opts.get("net") == "1":
     ip = opts.get("ip", "10.0.2.15"); mask = opts.get("mask", "255.255.255.0")
     gw = opts.get("gw", "10.0.2.2"); dns = opts.get("dns", gw); host = opts.get("host", "wfw311")
-    setkey(secs, "boot", "network.drv", "wfwnet.drv")
+    # network.drv is deliberately NOT set to wfwnet.drv. That is WFW's own networking driver -- the
+    # file sharing, the network drives, the Network control panel -- and loading it wedges Windows
+    # during init on this machine: with everything else in place, this one key is both sufficient
+    # and necessary to reproduce the hang. Nothing we want needs it. Winsock reaches the stack
+    # through WSOCK.386/WSTCP.386 (the netmisc line), not through network.drv.
+    setkey(secs, "boot", "network.drv", "")
     setkey(secs, "boot.description", "network.drv", "Microsoft Windows Network (version 3.11)")
     setkey(secs, "boot.description", "secondnet.drv", "No Additional Network Installed")
     setkey(secs, "Network", "winnet", "wfwnet/00025100")
@@ -77,6 +82,12 @@ if opts.get("net") == "1":
     setkey(secs, "386Enh", "netcard", "ne2000.386")
     setkey(secs, "386Enh", "transport",
            "nwlink.386,nwnblink.386,netbeui.386,vip.386,vdhcp.386,vtdi.386,vtcp.386,vnbt.386")
+    # netmisc= is the line that loads the NDIS 3 wrapper itself, and leaving it out is what hung
+    # Windows on its splash: every client of NDIS loaded (VIP, VTCP, VNBT, NetBEUI, NWLink) and NDIS
+    # did not, so VIP.386's first dynamic-link call into device 0x0028 raised a VMM fatal error --
+    # which is a *modal message box drawn at ring 0*, invisible to the host and waiting for a
+    # keystroke the probe never sends. Silence, not a hang.
+    setkey(secs, "386Enh", "netmisc", "ndis.386,ndis2sup.386,wsock.386,wstcp.386")
     setkey(secs, "386Enh", "secondnet.drv", "No Additional Network Installed")
     setkey(secs, "network drivers", "devdir", "C:\\WINDOWS")
     setkey(secs, "network drivers", "LoadRMDrivers", "No")
