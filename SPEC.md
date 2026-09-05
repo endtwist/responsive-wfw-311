@@ -3986,3 +3986,33 @@ with the emulator apparently running -- `running=true`, 120 fps of composites, `
 forever. Headless boots were unaffected because the probe both saves and restores, so its device set
 always agreed with itself. This is the second time in one day that changing the device set has
 invalidated every existing snapshot; the first was adding COM2 for Trumpet.
+
+### 2026-09-05 — a boot screen, because the restore is not instant
+This machine does not boot: it restores a 2 MB snapshot of a desktop that was already up. The
+restore takes a second or three, and until now that was black -- the one part of the illusion that
+said "web page loading" rather than "computer starting". The host now paints a boot screen over it:
+Josh's Responsive Windows for Workgroups artwork (`web/boot-splash.webp`, 864x1152, 70 KB, preloaded
+from `index.html` so it is decoding while `app.js` is still being parsed) with a Windows 3.1 chunked
+progress bar under it.
+
+Host-drawn, and it has to be -- there is no guest yet to draw it. It goes on `#pres` like everything
+else, so it sits inside the safe areas and comes up through the LCD shader with `?lcd=1`: the boot
+screen bleeds and glows exactly as the desktop behind it will.
+
+The bar counts real work, not a timer: 0.10-0.70 is bytes of the shipped snapshot actually read
+(`loadShippedState` streams the body and reports against Content-Length, clamped in case the server
+also applied Content-Encoding), 0.70-0.90 is `restore_state`, and the last tenth creeps towards 0.99
+over 2.5 s while the host waits for PVMON to say the desktop is arranged. Progress never goes
+backwards. At `desktopReady` the bar snaps full and stays up for another 200 ms, so it is seen full
+rather than cut away at ninety-something.
+
+A real cold boot (`?fresh=1`, or a restore that fails) turns it off: that one has a genuine logo of
+its own. `?splash=1` holds it up with the bar looping, for looking at it without waiting for a load;
+`?nosplash=1` turns it off. The chunk geometry is measured off the reference sheet -- a chunk is
+0.39 of the well's height and the gap is 0.3 of a chunk -- and the frame is the period one: black
+rule, raised bevel, sunken well, `#0000ff` chunks, which is the same pure blue as entry 1 of the
+original boot logo's palette.
+
+Fixed on the way past: `tools/grpadd.py` rewriting an empty group (a stock StartUp has one null item
+slot) produces a file Program Manager will not start on -- it hangs at the Windows splash. Empty
+groups are now left alone.

@@ -11,6 +11,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Windows 3.11">
+<!-- The boot screen the host paints over the snapshot restore. Preloaded so it is decoding while
+     app.js is still being parsed: it is the first thing anyone sees. -->
+<link rel="preload" as="image" href="boot-splash.webp">
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
@@ -20,7 +23,9 @@
      out from under them and paints the insets black, which is nothing, not chrome. */
   :root { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
           --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px); }
-  html, body { margin:0; height:100%; background:#000; color:#bbb;
+  /* The boot screen's own blue, not black: the canvas paints over this on its first frame, and
+     the one frame before that should already be the boot screen rather than a flash of nothing. */
+  html, body { margin:0; height:100%; background:#3ea6c8; color:#bbb;
                font:12px/1.4 ui-monospace, monospace; overflow:hidden; overscroll-behavior:none; }
   /* The guest's own canvas is never shown: it is the source the compositor draws slices from. */
   #screen_container { position:absolute; left:-10000px; top:0; }

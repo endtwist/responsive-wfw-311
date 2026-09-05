@@ -252,7 +252,26 @@ async function loadShippedState() {
   try {
     const r = await fetch(SHIPPED_STATE);
     if (!r.ok) return null;
-    let blob = await r.blob();
+    /* Read it in chunks rather than as one blob: this is the long part of the wait, and it is the
+       only part of it the boot screen can honestly measure. Content-Length is the compressed
+       length; if the server also applied Content-Encoding the body arrives already inflated and
+       the ratio would run past 1, hence the clamp. */
+    let blob;
+    const total = +(r.headers.get("content-length") || 0);
+    if (r.body && r.body.getReader) {
+      const reader = r.body.getReader(), parts = [];
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value); got += value.length;
+        if (total) bootAt(0.10 + 0.60 * Math.min(1, got / total), "loading");
+      }
+      blob = new Blob(parts);
+    } else {
+      blob = await r.blob();
+    }
+    bootAt(0.70, "loading");
     if (typeof DecompressionStream === "function" && !/gzip/.test(r.headers.get("content-encoding") || "")) {
       blob = await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).blob();
     }
@@ -397,6 +416,7 @@ setTimeout(() => { if (restored && !desktopReady) bootFail("snapshot restored bu
 emulator.add_listener("emulator-ready", async () => {
  try {
   bootStep("emulator-ready");
+  bootAt(0.10, "loading");
   emulator.bus.send("pv-set-dpi", dpi);
   emulator.bus.send("sb16-dsp-version", [2, 1]);     // Windows 3.x's Sound Blaster driver wants a 2.x DSP
   requestMode(true);
@@ -417,7 +437,7 @@ emulator.add_listener("emulator-ready", async () => {
   if (!(params.get("fresh") || params.get("reset") || params.get("restart") || boot.retry)) {
     try { snap = await withTimeout(loadState(), 3000); } catch (e) { boot.errors.push("loadState: " + (e && e.message)); bootStep("local snapshot skipped: " + (e && e.message)); }
   }
-  if (snap) { boot.path = "local"; boot.localBytes = snap.byteLength; bootStep(`local snapshot ${snap.byteLength}`); }
+  if (snap) { boot.path = "local"; boot.localBytes = snap.byteLength; bootStep(`local snapshot ${snap.byteLength}`); bootAt(0.70, "loading"); }
   if (!snap && !params.get("fresh") && !params.get("mkstate")) {
     snap = await loadShippedState();
     if (snap) { boot.path = "shipped"; boot.shippedBytes = snap.byteLength; }
@@ -427,15 +447,19 @@ emulator.add_listener("emulator-ready", async () => {
   if (params.get("bootfailtest") === "1") throw new Error("bootfailtest: simulated failure before run()");
   if (snap) {
     try {
+      bootAt(0.72, "restoring");
       await emulator.restore_state(snap);
+      bootAt(0.90, "starting");
+      splashCreepFrom = performance.now();
       status("restored");
       restored = true;
       bootStep("restored");
-    } catch (e) { status("restore failed, cold boot"); firstFrameUntil = 0; boot.errors.push("restore: " + (e && e.message)); bootStep("restore failed"); }
+    } catch (e) { status("restore failed, cold boot"); firstFrameUntil = 0; splash.on = false; boot.errors.push("restore: " + (e && e.message)); bootStep("restore failed"); }
   } else {
     status("booting");
     boot.path = "cold";
     firstFrameUntil = 0;                                 // a cold boot shows its own DOS and logo
+    splash.on = false;                                   // ...including the real one, so not this one
   }
   emulator.run();
   bootStep("run");
@@ -2310,6 +2334,91 @@ function blit(g, src, sx, sy, sw, sh, dx, dy, dw, dh) {
   g.drawImage(src, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
+/* ------------------------------------------------------------------------- the boot screen
+ * This machine does not boot: it restores a 2 MB snapshot of a desktop that was already up. But
+ * the restore takes a moment, and a moment of black is the one part of the illusion that says
+ * "web page loading" rather than "computer starting". So the host paints a boot screen over it --
+ * the logo Windows would have shown, and a progress bar of the kind its own installer used.
+ *
+ * Host-drawn, and it has to be: there is no guest yet to draw it. It goes on #pres like everything
+ * else, so it is inside the safe areas, it is pixel-doubled like the desktop, and with ?lcd=1 it
+ * comes up through the same shader -- the boot screen glows and bleeds exactly as the desktop
+ * behind it will. A cold boot (?fresh=1) never shows it: that one has a real logo of its own.
+ *
+ * The bar is Windows 3.1's: a raised outer frame, a sunken well, and square chunks with a gap
+ * between them, filling left to right. Nothing is animated for its own sake -- every chunk stands
+ * for bytes that have actually arrived. */
+const SPLASH_BG = "#3ea6c8";                  // the artwork's own field, so the first frame is already blue
+const splash = { img: null, on: !(params.get("fresh") || params.get("mkstate") || params.get("nosplash")),
+                 p: 0, phase: "starting",
+                 /* ?splash=1 keeps it up and runs the bar on a loop: the boot screen is over in
+                    two seconds on a warm visit, which is no way to look at one you are drawing. */
+                 hold: params.get("splash") === "1", doneAt: 0 };
+{
+  const img = new Image();
+  img.onload = () => { splash.img = img; };
+  img.src = "boot-splash.webp";
+}
+/* Progress only ever goes forward: the phases below overlap in time (a local snapshot arrives
+   while the shipped one is still being fetched) and a bar that went backwards would be worse than
+   no bar at all. */
+function bootAt(p, phase) {
+  if (p > splash.p) splash.p = Math.min(1, p);
+  if (phase) splash.phase = phase;
+}
+/* The last stretch has nothing to measure: the guest is running and the host is waiting for PVMON
+   to say the desktop is arranged. Creep towards 0.99 over the couple of seconds that usually
+   takes, and let desktopReady snap it to full. */
+let splashCreepFrom = 0;
+function splashProgress() {
+  if (splash.hold) return ((performance.now() - pageStart) % 6000) / 6000;
+  if (desktopReady) return 1;
+  if (splash.p >= 0.9 && splashCreepFrom) {
+    const t = Math.min(1, (performance.now() - splashCreepFrom) / 2500);
+    return Math.min(0.99, 0.9 + 0.09 * t);
+  }
+  return splash.p;
+}
+
+function drawChunkBar(g, x, y, w, h, p) {
+  const u = Math.max(1, Math.round(h / 26));            // the frame's line weight, at this size
+  const R = (xx, yy, ww, hh, c) => { g.fillStyle = c; g.fillRect(xx, yy, ww, hh); };
+  const BLACK = "#000", WHITE = "#fff", FACE = "#c0c0c0", SHADOW = "#808080", BLUE = "#0000ff";
+  R(x, y, w, h, FACE);
+  R(x, y, w, u, BLACK); R(x, y, u, h, BLACK);                                   // outer rule
+  R(x, y + h - u, w, u, BLACK); R(x + w - u, y, u, h, BLACK);
+  let i = x + u, j = y + u, iw = w - 2 * u, ih = h - 2 * u;
+  R(i, j, iw, u, WHITE); R(i, j, u, ih, WHITE);                                 // raised
+  R(i, j + ih - u, iw, u, SHADOW); R(i + iw - u, j, u, ih, SHADOW);
+  i += u; j += u; iw -= 2 * u; ih -= 2 * u;
+  R(i, j, iw, u, SHADOW); R(i, j, u, ih, SHADOW);                               // sunken well
+  R(i, j + ih - u, iw, u, WHITE); R(i + iw - u, j, u, ih, WHITE);
+  i += u; j += u; iw -= 2 * u; ih -= 2 * u;
+  R(i, j, iw, ih, FACE);
+  /* Chunks, as wide as they are in the control this is copied from: a little over a third of
+     their height, with a gap of a third of their width. */
+  const cw = Math.max(2, Math.round(ih * 0.39)), gap = Math.max(1, Math.round(cw * 0.3));
+  const n = Math.max(1, Math.floor((iw + gap) / (cw + gap)));
+  const filled = Math.round(p * n);
+  for (let k = 0; k < filled; k++) R(i + k * (cw + gap), j, cw, ih, BLUE);
+}
+
+function drawBootSplash(g, vw, vh) {
+  g.fillStyle = SPLASH_BG;
+  g.fillRect(0, 0, vw, vh);
+  const img = splash.img;
+  const pad = Math.round(Math.min(vw, vh) * 0.05);
+  const barH = Math.max(14, Math.round(Math.min(vh * 0.028, 30)));
+  const gapH = Math.round(barH * 1.4);
+  if (!img) return;                                     // still decoding: the field alone, not black
+  const availW = vw - 2 * pad, availH = vh - 2 * pad - gapH - barH;
+  const sc = Math.min(availW / img.width, availH / img.height);
+  const dw = Math.round(img.width * sc), dh = Math.round(img.height * sc);
+  const top = Math.round((vh - (dh + gapH + barH)) / 2);
+  g.drawImage(img, Math.round((vw - dw) / 2), top, dw, dh);
+  drawChunkBar(g, Math.round((vw - dw) / 2), top + dh + gapH, dw, barH, splashProgress());
+}
+
 /* Instant first paint: the last composited frame of the previous visit (guest pixels, kept in
    IndexedDB next to the snapshot) is shown until the restored guest has painted its desktop, so the
    page never opens on black while the 2 MB snapshot downloads and restores. Never drawn over a
@@ -2663,6 +2772,27 @@ function presentOnce() {
   const g = pres.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.imageSmoothingEnabled = false;
+  /* The boot screen owns the frame until PVMON says the desktop is arranged, and then for a
+     fifth of a second longer -- long enough for the last chunks to land, so the bar is seen full
+     rather than cut away at ninety-something. The timeout is the escape hatch: a guest that never
+     reports in should show whatever it has rather than a bar that never fills. */
+  if (splash.on) {
+    if (desktopReady && !splash.doneAt) splash.doneAt = performance.now();
+    const now = performance.now();
+    const keep = splash.hold ||
+                 (now - pageStart < 25000 && (!splash.doneAt || now - splash.doneAt < 200));
+    if (keep) {
+      g.fillStyle = "#000"; g.fillRect(0, 0, fw, fh);
+      g.translate(safe.l, safe.t);
+      drawBootSplash(g, vw, vh);
+      needFull = true;
+      lcdFrame(true);
+      return;
+    }
+    splash.on = false;
+    needFull = true;                                   /* the whole viewport is the boot screen's */
+    report("splash", `boot screen shown for ${Math.round(now - pageStart)}ms`);
+  }
   const guestUp = src && src.width && (desktopReady || !firstFrame || performance.now() > firstFrameUntil);
   if (!guestUp && firstFrame) {
     g.fillStyle = "#000"; g.fillRect(0, 0, fw, fh);
@@ -2765,6 +2895,7 @@ function presentOnce() {
 }
 requestAnimationFrame(present);
 window.pvPresent = present;
+window.pvSplash = splash;
 window.pvGuestCursor = () => guestCursor;
 
 /* The composite for the guest (?compose=1). The frame buffer stopped being a picture of the
