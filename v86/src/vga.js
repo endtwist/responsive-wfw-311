@@ -12,6 +12,11 @@ import { round_up_to_next_power_of_2, view } from "./lib.js";
 // Always 64k
 const VGA_BANK_SIZE = 64 * 1024;
 
+/* The PV socket's window: 64 KB of adapter memory well above anything the compositor uses (the
+   phone screen is 3200x970 and the composite rows sit under it). */
+const PV_SOCK_WIN = 0x700000;
+const PV_SOCK_SIZE = 0x10000;
+
 const MAX_XRES = 4096;
 const MAX_YRES = 2048;
 const MAX_BPP = 32;
@@ -383,6 +388,12 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
        rubber band, a program that composes thumbnails of its own) expects to find. The host
        composes into it; the guest may read it. Rows past the frame buffer, so Windows never
        paints over it. */
+    /* PV socket: the guest asks the host for a URL and reads the reply out of adapter memory, with
+       no TCP stack of its own. Both real stacks the guest can run are CPU-bound at about 31 MIPS --
+       122 instructions a byte for Trumpet over SLIP, 238 for Microsoft TCP/IP-32 over NDIS -- which
+       caps them at 246 and 130 KB/s. This costs the guest one rep movsw per byte instead. */
+    this.pv_sock = { state: 0, result: 0, arg: 0, buf: null, off: 0, done: false };
+
     this.pv_comp_row = 0;             // first row of the composite, 0 = none
     this.pv_comp_w = 0;
     this.pv_comp_h = 0;
@@ -450,6 +461,24 @@ export function VGAScreen(cpu, bus, screen, vga_memory_size)
         this.pv_cmd = data[0] & 0xFFFF;
     }, this);
     bus.register("pv-set-dpi", function(dpi) { this.pv_host_dpi = dpi | 0; }, this);
+    /* The host's answer to a PV socket open: { bytes, done }. Bytes accumulate here rather than in
+       the window, so the guest's READ is a synchronous copy of whatever it asks for. */
+    bus.register("pv-sock-data", function(d) {
+        const k = this.pv_sock;
+        if(k.state === 0) return;                               // closed while the fetch was running
+        if(d.error) { k.state = 0xFF; k.done = true; return; }
+        const add = d.bytes || new Uint8Array(0);
+        if(add.length)
+        {
+            const keep = k.buf ? k.buf.length - k.off : 0;
+            const n = new Uint8Array(keep + add.length);
+            if(keep) n.set(k.buf.subarray(k.off), 0);
+            n.set(add, keep);
+            k.buf = n; k.off = 0;
+        }
+        if(d.done) k.done = true;
+        k.state = (k.buf && k.off < k.buf.length) ? 2 : (k.done ? 3 : 1);
+    }, this);
 
     // PV: a 32-bit write to 0x1CE is an atomic index+data pair (index in the low word, data in the
     // high word) that leaves the index register alone, so interrupt-time code (MoveCursor) and the
@@ -2685,6 +2714,16 @@ VGAScreen.prototype.port1CF_write = function(value)
         case 0x1A:
             this.pv_cmd = value;          // the guest writes 0 to acknowledge a command
             break;
+        case 0x30:
+            // PV SOCKET CMD: 1 open (ARG = URL length in the window), 2 read (ARG = bytes wanted),
+            // 3 close
+            if(value === 1) this.pv_sock_open(this.pv_sock.arg);
+            else if(value === 2) this.pv_sock_read(this.pv_sock.arg);
+            else if(value === 3) this.pv_sock_close();
+            break;
+        case 0x31:
+            this.pv_sock.arg = value & 0xFFFF;
+            break;
         case 0x1B:
             this.pv_cmd_arg = value;
             break;
@@ -2830,6 +2869,51 @@ VGAScreen.prototype.port1CF_read = function()
     return this.svga_register_read(this.dispi_index);
 };
 
+/* --------------------------------------------------------------- PV socket -----
+ * Three commands and one 64 KB window of adapter memory at PV_SOCK_WIN. The guest writes a URL in,
+ * asks for it, then reads the reply back out in blocks. The host does the DNS, the TCP and the TLS,
+ * which is the whole point: none of it costs the guest anything.
+ */
+VGAScreen.prototype.pv_sock_window = function()
+{
+    const base = PV_SOCK_WIN;
+    if(base + PV_SOCK_SIZE > this.vga_memory_size) return null;   // no room in this adapter
+    return this.svga_memory.subarray(base, base + PV_SOCK_SIZE);
+};
+VGAScreen.prototype.pv_sock_open = function(len)
+{
+    const k = this.pv_sock, win = this.pv_sock_window();
+    if(!win || len <= 0 || len > PV_SOCK_SIZE) { k.result = 1; return; }
+    let url = "";
+    for(let i = 0; i < len; i++) url += String.fromCharCode(win[i]);
+    k.state = 1; k.result = 0; k.buf = null; k.off = 0; k.done = false;
+    this.bus.send("pv-sock-open", url);
+};
+VGAScreen.prototype.pv_sock_read = function(want)
+{
+    const k = this.pv_sock, win = this.pv_sock_window();
+    k.result = 0;
+    if(!win || !k.buf) { if(k.done && k.state !== 0xFF) k.state = 3; return; }
+    const left = k.buf.length - k.off;
+    const n = Math.min(want > 0 ? want : 0, left, PV_SOCK_SIZE);
+    if(n > 0)
+    {
+        win.set(k.buf.subarray(k.off, k.off + n), 0);
+        k.off += n;
+        k.result = n;
+    }
+    if(k.off >= k.buf.length)
+    {
+        k.buf = null; k.off = 0;
+        k.state = k.done ? 3 : 1;
+    }
+};
+VGAScreen.prototype.pv_sock_close = function()
+{
+    this.pv_sock = { state: 0, result: 0, arg: 0, buf: null, off: 0, done: false };
+    this.bus.send("pv-sock-close", 0);
+};
+
 /** Scanline pitch in pixels (VIRT_WIDTH if set, else the visible width). */
 VGAScreen.prototype.svga_pitch_px = function()
 {
@@ -2889,6 +2973,10 @@ VGAScreen.prototype.svga_register_read = function(n)
             return this.dispi_enable_value & 2 ? MAX_BPP : this.svga_bpp;
         case 4:
             return this.dispi_enable_value;
+        case 0x32:
+            return this.pv_sock.result & 0xFFFF;    // bytes placed in the window by the last read
+        case 0x33:
+            return this.pv_sock.state & 0xFFFF;     // 0 idle 1 fetching 2 ready 3 complete 0xFF error
         case 5:
             return this.svga_bank_offset >>> 16;
         case 6:

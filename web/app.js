@@ -2912,6 +2912,34 @@ function initNet() {
     log: m => diag(`net: ${m}`),
   });
   emulator.bus.register("net0-send", frame => { slipBytes.in += frame.length; eth.fromGuest(frame); });
+
+  /* And the third way in, which is the fast one: the PV socket. The guest writes a URL into adapter
+     memory and reads the reply back out of it, with no TCP stack of its own at all. Both real
+     stacks are CPU-bound in the guest -- 122 instructions a byte for Trumpet over SLIP, 238 for
+     Microsoft TCP/IP-32 over NDIS -- and this replaces all of that with one copy. */
+  emulator.bus.register("pv-sock-open", async url => {
+    slipReqs++;
+    const full = /^https?:\/\//i.test(url) ? url : `http://${url}`;
+    diag(`net: pvsock ${full}`);
+    report("net", `pvsock ${full}`);
+    let head, body;
+    try {
+      const r = await fetch(`/api/fetch?url=${encodeURIComponent(full)}`);
+      body = new Uint8Array(await r.arrayBuffer());
+      const status = r.headers.get("x-upstream-status") || String(r.status);
+      const type = r.headers.get("content-type") || "text/html";
+      head = `HTTP/1.0 ${status} ${r.ok ? "OK" : "Error"}\r\nContent-Type: ${type}\r\n` +
+             `Content-Length: ${body.length}\r\nConnection: close\r\n\r\n`;
+    } catch (e) {
+      body = Uint8Array.from(`${url}: ${e && e.message}`, c => c.charCodeAt(0) & 0xFF);
+      head = `HTTP/1.0 502 Gateway\r\nContent-Type: text/plain\r\n\r\n`;
+    }
+    const out = new Uint8Array(head.length + body.length);
+    for (let i = 0; i < head.length; i++) out[i] = head.charCodeAt(i) & 0xFF;
+    out.set(body, head.length);
+    slipBytes.out += out.length;
+    emulator.bus.send("pv-sock-data", { bytes: out, done: true });
+  });
   report("net", "the NE2000 is a wire to the host");
   return net;
 }

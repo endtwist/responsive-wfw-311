@@ -336,6 +336,26 @@ const eth = new EthNet({
   request: (host, port, data, conn) => netRequest(eth, host, port, data, conn),
   log: m => netLog.push(m),
 });
+/* The PV socket's host half: the guest asks for a URL, we fetch it and hand the whole reply over.
+   No DNS, no TCP, no framing -- the guest's cost is a copy out of adapter memory. */
+emulator.bus.register("pv-sock-open", async url => {
+  netLog.push(`pvsock ${url}`);
+  if (!netBytes.first) netBytes.first = performance.now();
+  let body = `<html><body><h1>${url}</h1></body></html>`, status = 200, type = "text/html";
+  if (flag("--net-live")) {
+    try {
+      const r = await fetch(/^https?:\/\//i.test(url) ? url : `http://${url}`);
+      body = await r.text(); status = r.status; type = r.headers.get("content-type") || type;
+    } catch (e) { body = `could not reach ${url}: ${e.message}`; status = 502; }
+  }
+  const head = `HTTP/1.0 ${status} ${status === 200 ? "OK" : "Error"}\r\nContent-Type: ${type}\r\n` +
+               `Content-Length: ${body.length}\r\nConnection: close\r\n\r\n`;
+  const bytes = Uint8Array.from(head + body, c => c.charCodeAt(0) & 0xFF);
+  netBytes.out += bytes.length;
+  netBytes.last = performance.now();
+  emulator.bus.send("pv-sock-data", { bytes, done: true });
+});
+
 emulator.bus.register("net0-send", frame => {
   netBytes.in += frame.length;
   if (!netBytes.first) netBytes.first = performance.now();
@@ -449,6 +469,41 @@ for (const s of steps) {
   else if (op === "screen") { console.log(`${ts()} text screen:\n${textScreen()}`); }
   else if (op === "vgashot") { console.log(`${ts()} vgashot ${vgaShot(arg || "shots/vga.png")}`); }
   else if (op === "serial") { console.log(`${ts()} COM1 said (${serialOut.length} bytes):\n${serialOut.replace(/\r/g, "")}`); }
+  else if (op === "pvsock") {
+    /* Drive the PV socket from the host side: exactly the register sequence the guest performs,
+       so the device and the host service can be checked without waiting on a guest program. */
+    const v = emulator.v86.cpu.devices.vga;
+    const WIN = 0x700000;
+    const url = arg || "http://example.com/";
+    for (let i = 0; i < url.length; i++) v.svga_memory[WIN + i] = url.charCodeAt(i) & 0xFF;
+    const wr = (n, val) => { v.dispi_index = n; v.port1CF_write(val); };
+    wr(0x31, url.length);
+    wr(0x30, 1);
+    const refused = v.svga_register_read(0x32) !== 0;
+    if (refused) console.log(`${ts()} pvsock: refused`);
+    const t0 = performance.now();
+    let total = 0, head = "";
+    for (let spin = 0; spin < 20000 && !refused; spin++) {
+      const st = v.svga_register_read(0x33);
+      if (st === 0xFF) { console.log(`${ts()} pvsock: the host reported an error`); break; }
+      if (st === 3 && total) break;
+      if (st === 2) {
+        wr(0x31, 0xF000);
+        wr(0x30, 2);
+        const n = v.svga_register_read(0x32);
+        if (n) {
+          if (total < 200) for (let i = 0; i < Math.min(n, 200 - total); i++) head += String.fromCharCode(v.svga_memory[WIN + i]);
+          total += n;
+        }
+        continue;
+      }
+      await sleep(2);
+    }
+    wr(0x30, 3);
+    const secs = (performance.now() - t0) / 1000;
+    console.log(`${ts()} pvsock ${url}: ${total} bytes in ${secs.toFixed(2)}s (${(total / 1024 / Math.max(secs, 0.001)).toFixed(0)} KB/s at the device)`);
+    console.log(`${ts()} pvsock first line: ${head.split("\r\n")[0]}`);
+  }
   else if (op === "netcard") {
     /* The NE2000 as the guest can see it: where its registers are, and which ISA line the BIOS
        routed its PCI interrupt to -- that number is what PROTOCOL.INI has to say, and it is
