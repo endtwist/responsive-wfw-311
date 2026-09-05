@@ -52,6 +52,7 @@
  *   dismiss                 Enter/Esc until only the shell is left
  *   getclip[:file]          what the guest has on its clipboard (PVCB off the debug channel)
 ​ *   screen                  the 80x25 text screen out of B8000 (a failed boot's own explanation)
+ *   pvsock[:url]            drive the PV socket from the host side and report its throughput
  *   netcard                 the NE2000's io base, the ISA line its PCI interrupt was routed to, its MAC
  */
 import fs from "node:fs";
@@ -492,15 +493,6 @@ for (const s of steps) {
   else if (op === "screen") { console.log(`${ts()} text screen:\n${textScreen()}`); }
   else if (op === "vgashot") { console.log(`${ts()} vgashot ${vgaShot(arg || "shots/vga.png")}`); }
   else if (op === "serial") { console.log(`${ts()} COM1 said (${serialOut.length} bytes):\n${serialOut.replace(/\r/g, "")}`); }
-  else if (op === "pvwin") {
-    /* The first bytes of the PV socket's window, as text: what the guest wrote there, or what the
-       host staged for it. */
-    const v = emulator.v86.cpu.devices.vga;
-    let t = "";
-    for (let i = 0; i < 96; i++) { const c = v.svga_memory[0x700000 + i]; t += c >= 32 && c < 127 ? String.fromCharCode(c) : "."; }
-    console.log(`${ts()} pvwin: ${t}`);
-    console.log(`${ts()} pvsock state=${v.pv_sock.state} result=${v.pv_sock.result} arg=${v.pv_sock.arg} buffered=${v.pv_sock.buf ? v.pv_sock.buf.length - v.pv_sock.off : 0} done=${v.pv_sock.done}`);
-  }
   else if (op === "pvsock") {
     /* Drive the PV socket exactly as a guest does: the URL a byte at a time into the CHAR register,
        then blocks staged with CMD 2 and drained a word at a time out of the DATA register. */

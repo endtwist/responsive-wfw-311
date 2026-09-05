@@ -16,9 +16,8 @@
  *     0x32 RESULT  OPEN: 0 accepted; READ: bytes actually placed in the window
  *     0x33 STATE   0 idle, 1 fetching, 2 data ready, 3 complete, 0xFF failed
  *
- * and the window itself is bank 0x70 of adapter memory, seen through the A0000 aperture. The
- * aperture's bank is the display driver's own register, so it is saved and put back around every
- * access, and every access is kept short.
+ * and the bytes move through the data register rather than the adapter's A0000 aperture, which a
+ * Windows application cannot reach under the paravirtual display.
  *
  * The rest of the program is unchanged, because none of it was ever about sockets: an overlapped
  * window with an edit control for the address, a multi-line read-only edit for what came back, the
@@ -78,7 +77,7 @@
 #define PVST_ERROR    0xFF
 
 #define PV_BLOCK   0xF000u     /* the most one READ may hand back: the device's own limit */
-#define PV_CHUNK   0x2000u     /* copied out of the aperture this much at a time */
+#define PV_CHUNK   0x2000u     /* drained from the data register this much at a time */
 
 /* The adapter is programmed as an index write then a data access. PVMOUSE.DRV's interrupt handler
    writes the same index register (the cursor position, 1Dh..1Fh), so an interrupt landing between
@@ -112,7 +111,7 @@ static HGLOBAL rawh;
 static char FAR *raw;                /* the first RAW_MAX bytes of the body, for the window */
 static unsigned rawn;
 static HGLOBAL blkh;
-static char FAR *blk;                /* PV_CHUNK bytes, copied out of the aperture and parsed */
+static char FAR *blk;                /* PV_CHUNK bytes, drained from the device and parsed */
 static BOOL  pvOpen;                 /* a request is outstanding and must be closed */
 static BOOL  pvTimer;
 static BOOL  pumping;                /* WM_TIMER is not re-entered */

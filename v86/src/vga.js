@@ -19,9 +19,6 @@ function pv_sock_blank()
     return { state: 0, result: 0, arg: 0, str: "", out: [], buf: null, off: 0, block: 0, done: false };
 }
 
-const PV_SOCK_WIN = 0x700000;
-const PV_SOCK_SIZE = 0x10000;
-
 const MAX_XRES = 4096;
 const MAX_YRES = 2048;
 const MAX_BPP = 32;
@@ -2892,9 +2889,11 @@ VGAScreen.prototype.port1CF_read = function()
 };
 
 /* --------------------------------------------------------------- PV socket -----
- * Three commands and one 64 KB window of adapter memory at PV_SOCK_WIN. The guest writes a URL in,
- * asks for it, then reads the reply back out in blocks. The host does the DNS, the TCP and the TLS,
- * which is the whole point: none of it costs the guest anything.
+ * Eight handles and a register pair. The guest names a target, sends its request and reads the
+ * reply back in blocks; the host does the DNS, the TCP and the TLS, which is the whole point --
+ * none of it costs the guest anything. Everything moves through ports rather than the adapter's
+ * A0000 aperture, because a Windows application cannot reach that window under the paravirtual
+ * display: a selector based there faults on the first write.
  */
 VGAScreen.prototype.pv_sock_cur = function()
 {
