@@ -338,7 +338,12 @@ const eth = new EthNet({
 });
 /* The PV socket's host half: the guest asks for a URL, we fetch it and hand the whole reply over.
    No DNS, no TCP, no framing -- the guest's cost is a copy out of adapter memory. */
-emulator.bus.register("pv-sock-open", async url => {
+/* The PV socket's host half. A handle opened on a URL is fetched at once; a handle opened on a
+   host:port waits for the guest to send a request and is fetched when that request is complete --
+   the same blank-line rule web/net.js uses on the SLIP line. Either way the host does the DNS, the
+   TCP and the TLS, and the reply becomes the handle's read stream. */
+const pvSocks = [];
+async function pvFetch(handle, url) {
   netLog.push(`pvsock ${url}`);
   if (!netBytes.first) netBytes.first = performance.now();
   let body = `<html><body><h1>${url}</h1></body></html>`, status = 200, type = "text/html";
@@ -353,8 +358,26 @@ emulator.bus.register("pv-sock-open", async url => {
   const bytes = Uint8Array.from(head + body, c => c.charCodeAt(0) & 0xFF);
   netBytes.out += bytes.length;
   netBytes.last = performance.now();
-  emulator.bus.send("pv-sock-data", { bytes, done: true });
+  emulator.bus.send("pv-sock-data", { handle, bytes, done: true });
+}
+emulator.bus.register("pv-sock-open", d => {
+  const h = d.handle | 0, target = d.target || "";
+  pvSocks[h] = { target, req: "", sent: false };
+  if (/:\/\//.test(target)) { pvSocks[h].sent = true; pvFetch(h, target); }     // a URL: fetch it now
 });
+emulator.bus.register("pv-sock-send", d => {
+  const h = d.handle | 0, k = pvSocks[h];
+  if (!k || k.sent) return;
+  k.req += String.fromCharCode(...d.bytes);
+  if (!k.req.includes("\r\n\r\n") && !k.req.includes("\n\n")) return;       // not a whole request yet
+  k.sent = true;
+  const m = /^([A-Z]+) (\S+)/.exec(k.req);
+  const hostHdr = /host:\s*(\S+)/i.exec(k.req);
+  const host = (hostHdr && hostHdr[1]) || k.target.split(":")[0];
+  const path = m ? m[2] : "/";
+  pvFetch(h, /^https?:\/\//i.test(path) ? path : `http://${host}${path.startsWith("/") ? "" : "/"}${path}`);
+});
+emulator.bus.register("pv-sock-close", d => { pvSocks[d.handle | 0] = null; });
 
 emulator.bus.register("net0-send", frame => {
   netBytes.in += frame.length;
@@ -485,6 +508,7 @@ for (const s of steps) {
     const url = arg || "http://example.com/";
     const wr = (n, val) => { v.dispi_index = n; v.port1CF_write(val); };
     const rd = n => { v.dispi_index = n; return v.port1CF_read(); };
+    wr(0x36, 0);
     for (let i = 0; i < url.length; i++) wr(0x35, url.charCodeAt(i) & 0xFF);
     wr(0x30, 1);
     const refused = rd(0x32) !== 0;

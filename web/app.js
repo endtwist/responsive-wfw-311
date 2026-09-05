@@ -2917,7 +2917,13 @@ function initNet() {
      memory and reads the reply back out of it, with no TCP stack of its own at all. Both real
      stacks are CPU-bound in the guest -- 122 instructions a byte for Trumpet over SLIP, 238 for
      Microsoft TCP/IP-32 over NDIS -- and this replaces all of that with one copy. */
-  emulator.bus.register("pv-sock-open", async url => {
+  /* The PV socket's host half, and the fast path. A handle opened on a URL is fetched at once; a
+     handle opened on a host:port waits for the guest to send a request and is fetched once that
+     request is complete -- the same blank-line rule the SLIP peer uses. Either way the host does
+     the DNS, the TCP and the TLS, and the reply becomes the handle's read stream, so a program
+     that knows about the device and a Winsock program that does not are served by the same code. */
+  const pvSocks = [];
+  const pvFetch = async (handle, url) => {
     slipReqs++;
     const full = /^https?:\/\//i.test(url) ? url : `http://${url}`;
     diag(`net: pvsock ${full}`);
@@ -2938,8 +2944,26 @@ function initNet() {
     for (let i = 0; i < head.length; i++) out[i] = head.charCodeAt(i) & 0xFF;
     out.set(body, head.length);
     slipBytes.out += out.length;
-    emulator.bus.send("pv-sock-data", { bytes: out, done: true });
+    emulator.bus.send("pv-sock-data", { handle, bytes: out, done: true });
+  };
+  emulator.bus.register("pv-sock-open", d => {
+    const h = d.handle | 0, target = d.target || "";
+    pvSocks[h] = { target, req: "", sent: false };
+    if (/:\/\//.test(target)) { pvSocks[h].sent = true; pvFetch(h, target); }
   });
+  emulator.bus.register("pv-sock-send", d => {
+    const h = d.handle | 0, k = pvSocks[h];
+    if (!k || k.sent) return;
+    k.req += String.fromCharCode(...d.bytes);
+    if (!k.req.includes("\r\n\r\n") && !k.req.includes("\n\n")) return;
+    k.sent = true;
+    const m = /^([A-Z]+) (\S+)/.exec(k.req);
+    const hostHdr = /host:\s*(\S+)/i.exec(k.req);
+    const host = (hostHdr && hostHdr[1]) || k.target.split(":")[0];
+    const path = m ? m[2] : "/";
+    pvFetch(h, /^https?:\/\//i.test(path) ? path : `http://${host}${path.startsWith("/") ? "" : "/"}${path}`);
+  });
+  emulator.bus.register("pv-sock-close", d => { pvSocks[d.handle | 0] = null; });
   report("net", "the NE2000 is a wire to the host");
   return net;
 }
