@@ -279,8 +279,18 @@ static char *tabUrl[NTABS]  = { "/pages/about-what.pvp", "/pages/about-how.pvp" 
 static int  g_tab = 0;
 static HWND hHide, hNote;
 static int  g_wideHost = 0;          /* the host is a desktop: say so, and say why it matters */
-#define NOTE_H  46                   /* the desktop note, when there is one */
-static int  g_noteH = NOTE_H;
+static int  g_noteH = 0;             /* the desktop note, measured once it has a width */
+
+/* The host reports its own viewport in the adapter's registers, which is how a program inside the
+   guest can know what it is being looked at on. The same rule the page uses: the shorter side
+   under 600 host pixels is a phone. It decides two things -- whether to say that none of the
+   gestures on the other tab apply here, and how big this window should be. */
+static int host_wide(void)
+{
+    unsigned hw = rd(0x10), hh = rd(0x11);
+    if (!hw || !hh) return 0;
+    return (hw < hh ? hw : hh) >= 600;
+}
 static char szIniKey[] = "AboutShown";
 #define ID_HIDE 103
 static char szClass[]  = "PVAbout";
@@ -1336,14 +1346,6 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         hMain = hwnd;
 #ifdef SHELL_ABOUT
         hUrl = 0; hGet = 0;
-        /* The host reports its own viewport in the adapter's registers, and the same rule the page
-           uses (the shorter side under 600) says whether this is a desktop. It is worth saying:
-           on a desktop none of the gestures on the other tab apply, and the machine is behaving
-           exactly as it did in 1993. */
-        {
-            unsigned hw = rd(0x10), hh = rd(0x11);
-            g_wideHost = (hw && hh) ? ((hw < hh ? hw : hh) >= 600) : 0;
-        }
         if (g_wideHost)
             hNote = CreateWindow("static",
                 "You are on a desktop, so this is plain Windows 3.11 and the mouse works as it "
@@ -1353,6 +1355,19 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                              0, 0, 10, 10, hwnd, (HMENU)ID_HIDE, inst, NULL);
         SendMessage(hHide, BM_SETCHECK, 1, 0L);
+        if (hNote) {                       /* however many lines it takes at this width */
+            RECT rc;
+            HDC hdc = GetDC(hwnd);
+            HFONT old = (HFONT)SelectObject(hdc, f);
+            char note[200];
+            GetClientRect(hwnd, &rc);
+            rc.left = 0; rc.top = 0; rc.right = rc.right - 2 * MARGIN; rc.bottom = 1;
+            GetWindowText(hNote, note, sizeof(note));
+            DrawText(hdc, note, -1, &rc, DT_LEFT | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+            SelectObject(hdc, old);
+            ReleaseDC(hwnd, hdc);
+            g_noteH = rc.bottom + 10;
+        }
 #else
         hUrl = CreateWindow("edit", "http://",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
@@ -1515,6 +1530,9 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         if (!forced && GetProfileInt(szIni, szIniKey, 0)) return 0;
     }
 #endif
+#ifdef SHELL_ABOUT
+    g_wideHost = host_wide();
+#endif
     if (!prev) {
         wc.style = 0; wc.lpfnWndProc = WndProc; wc.cbClsExtra = 0; wc.cbWndExtra = 0;
         wc.hInstance = inst; wc.hIcon = LoadIcon(inst, MAKEINTRESOURCE(1));
@@ -1530,11 +1548,25 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         if (!RegisterClass(&wc)) return 0;
     }
 #ifdef SHELL_ABOUT
-    /* WS_POPUP | WS_CAPTION | WS_SYSMENU, not a thick frame: PVHOOK's geometry invariant then
-       leaves the window at its natural size instead of reflowing it, which is what ABOUT.EXE has
-       always wanted. */
-    hwnd = CreateWindow(szClass, szTitle, WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                        0, 0, 352, 560, NULL, NULL, inst, NULL);
+    /* On a phone: the column's width, and no thick frame, so PVHOOK's geometry invariant leaves
+       the window at its natural size instead of reflowing it. On a desktop there is room, and no
+       reason to read a note about the machine through a slot 352 pixels wide: an ordinary
+       resizable window, two thirds of the screen, up to a point. The text column inside is capped
+       and centred either way (COL_MAX), so a wider window gives wider margins rather than lines
+       too long to read. */
+    if (g_wideHost) {
+        int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+        int w = sw * 2 / 3, h = sh * 4 / 5;
+        if (w < 480) w = 480;
+        if (w > 720) w = 720;
+        if (h < 420) h = 420;
+        if (h > 760) h = 760;
+        hwnd = CreateWindow(szClass, szTitle, WS_OVERLAPPEDWINDOW,
+                            (sw - w) / 2, (sh - h) / 3, w, h, NULL, NULL, inst, NULL);
+    } else {
+        hwnd = CreateWindow(szClass, szTitle, WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                            0, 0, 352, 560, NULL, NULL, inst, NULL);
+    }
 #else
     hwnd = CreateWindow(szClass, szTitle, WS_OVERLAPPEDWINDOW,
                         CW_USEDEFAULT, CW_USEDEFAULT, 352, 560, NULL, NULL, inst, NULL);

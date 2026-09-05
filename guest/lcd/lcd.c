@@ -203,7 +203,12 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 
     if (!prev) {
         wc.style = 0; wc.lpfnWndProc = WndProc; wc.cbClsExtra = 0; wc.cbWndExtra = 0;
-        wc.hInstance = inst; wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+        wc.hInstance = inst;
+        /* Its own icon, not the stock application one. Program Manager takes the icon straight out
+           of the executable (tools/grpadd.py reads RT_GROUP_ICON), but a minimised window draws
+           the CLASS icon, so a program that does not set one shows a different picture minimised
+           from the one in its group. */
+        wc.hIcon = LoadIcon(inst, MAKEINTRESOURCE(1));
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         /* COLOR_WINDOW, like every other 3.1 dialog and like ABOUT.EXE: the grey dialog body
            belongs to Windows 95. It also matches what the static labels paint behind their own
