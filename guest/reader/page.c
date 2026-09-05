@@ -1135,7 +1135,6 @@ static void drop(HWND hwnd)
 static void present(void)
 {
     const char *err = parse_page();
-    char msg[96];
     if (err) {
         free_page();
         status(err);
@@ -1155,13 +1154,10 @@ static void present(void)
         }
     }
     InvalidateRect(hView, NULL, TRUE);
-#ifdef SHELL_ABOUT
-    status("");                      /* a note about the machine does not report its own block count */
-    (void)msg;
-#else
-    wsprintf(msg, "%d blocks, %luK.", g_nblk, (DWORD)(g_len / 1024L));
-    status(msg);
-#endif
+    /* Nothing. The status line is for what is happening (fetching, how much has arrived) and for
+       what went wrong; a page that loaded has nothing to say about itself, and "22 blocks, 2152K"
+       was a note to myself while the format was being written. */
+    status("");
 }
 
 #define PV_MAX_BLOCKS 32
