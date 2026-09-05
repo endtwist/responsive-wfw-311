@@ -141,6 +141,17 @@ def build_palette(images, frames):
     """One adaptive palette over everything on the page, with the system colours kept so Windows'
     own chrome is not disturbed when it is realised."""
     tiles = list(images) + [f for seq in frames for f in seq[::8]]
+    if not tiles:
+        """A page of nothing but text still needs a palette: Windows' own twenty colours where
+        Windows keeps them, and a neutral ramp through the middle so a styled colour index that
+        is not one of the twenty still lands on something sensible."""
+        cols = list(SYS_LOW) + [(v, v, v) for v in
+                                [round(i * 255 / (PIC_COUNT - 1)) for i in range(PIC_COUNT)]] + list(SYS_HIGH)
+        flat = [c for col in cols for c in col]
+        flat += [0] * (768 - len(flat))
+        p = Image.new("P", (1, 1))
+        p.putpalette(flat)
+        return p, bytes(flat)
     w = max(t.width for t in tiles)
     strip = Image.new("RGB", (w, sum(t.height for t in tiles)))
     y = 0

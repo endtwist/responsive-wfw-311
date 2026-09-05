@@ -1,0 +1,55 @@
+{
+ "blocks": [
+  {
+   "head": "How to use"
+  },
+  {
+   "sub": "Your finger is the mouse."
+  },
+  {
+   "sub": "Pointing"
+  },
+  {
+   "para": "Tap to click, twice to double-click. One tap is enough to open an icon in Program Manager."
+  },
+  {
+   "para": "For a right-click, either tap with two fingers, or press and hold still, then lift."
+  },
+  {
+   "sub": "Scrolling and moving"
+  },
+  {
+   "para": "Two fingers scroll anything. On a page of text or a list, one finger scrolls it too, and a flick keeps going."
+  },
+  {
+   "para": "Pinch to magnify a window’s contents, then move about them with two fingers."
+  },
+  {
+   "para": "Drag a title bar to move a window. Swipe a menu bar sideways if it runs off the screen. A menu or a dialog too big to fit is dragged with one finger, anywhere on it."
+  },
+  {
+   "sub": "Changing windows"
+  },
+  {
+   "para": "Swipe in from the right edge to cycle through the open windows."
+  },
+  {
+   "para": "Swipe up from the bottom edge for the card switcher, then swipe across it to pick one."
+  },
+  {
+   "sub": "The keyboard"
+  },
+  {
+   "para": "Hold a title bar to bring up the keyboard, and hold it again to send it away."
+  },
+  {
+   "para": "Its top row adds the keys a phone has not got: Esc, Tab, arrows, Ctrl, Alt, Del, F1 to F10, Home, End, PgUp, PgDn and Ins."
+  },
+  {
+   "sub": "Games"
+  },
+  {
+   "para": "In Tetris, Chip’s Challenge and the other keyboard games, a swipe is the arrow key it looks like and a double-tap drops. In JezzBall, the direction you swipe is the wall you get."
+  }
+ ]
+}

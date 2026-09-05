@@ -828,7 +828,14 @@ emulator.bus.register("pv-debug", line => {
 });
 
 /* Applications by URL: /solitaire opens Solitaire. The path (or ?run=) names an entry in this
-   table; the command line is handed to the guest the moment the desktop is ready. */
+   table; the command line is handed to the guest the moment the desktop is ready.
+
+   Only a name from this table. ?run= used to accept any command line that looked like one and
+   hand it straight to WinExec, which made every link to this page a link that could start any
+   program on the disk. The guest is a sandbox and the disk is a fresh copy per visit, so the
+   worst case was small, but a URL should only be able to name things that were deliberately put
+   on offer. An arbitrary command is still one line away at the console (window.pvRun), which
+   takes a person at the keyboard rather than a link someone was sent. */
 const APPS = {
   about: "ABOUT.EXE /show", readme: "ABOUT.EXE /show",
   solitaire: "SOL.EXE", sol: "SOL.EXE", hearts: "MSHEARTS.EXE", minesweeper: "WINMINE.EXE",
@@ -856,8 +863,9 @@ function launchFromUrl() {
   const q = new URLSearchParams(location.search).get("run");
   const seg = location.pathname.split("/").filter(Boolean).pop() || "";
   const key = (q || (/^[a-z]+$/i.test(seg) && !/\./.test(seg) ? seg : "")).toLowerCase();
-  const cmd = APPS[key] || (q && /^[A-Z0-9_.\\: -]+$/i.test(q) ? q : null);
+  const cmd = APPS[key] || null;
   if (cmd) sendCommandString(CMD_RUN, cmd);
+  else if (q) report("url", `?run=${q}: not a name in APPS, ignored`);
 }
 window.pvRun = cmd => sendCommandString(CMD_RUN, cmd);      // diagnostics: launch without a reload
 
@@ -3061,7 +3069,13 @@ function initNet() {
     emulator.bus.send("pv-sock-data", { handle, bytes: out, done: true });
   };
   emulator.bus.register("pv-sock-open", d => {
-    const h = d.handle | 0, target = d.target || "";
+    const h = d.handle | 0;
+    /* A target that starts with "/" is this site's own: the guest has no idea what host it is
+       being served from (and must not -- a preview deployment and production are the same disk
+       image), so the host resolves its own origin. Anything else is a URL or a host:port and is
+       treated exactly as before. */
+    let target = d.target || "";
+    if (target.charAt(0) === "/") target = location.origin + target;
     pvSocks[h] = { target, req: "", sent: false };
     if (/:\/\//.test(target)) { pvSocks[h].sent = true; pvFetch(h, target); }
   });

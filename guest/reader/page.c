@@ -267,9 +267,30 @@ static HGLOBAL g_bandh;
 static BYTE FAR *g_band;
 
 /* ------------------------------------------------------------------ window state */
+#ifdef SHELL_ABOUT
+/* ABOUT.EXE is this same reader with a different shell: two tabs instead of an address bar, and
+   two bundles fetched from the site the page is served from. One renderer, two programs -- the
+   note about how to use this machine is a page like any other, and editing its .PVP updates it
+   without rebuilding the disk image. */
+#define TAB_H   26
+#define NTABS    2
+static char *tabName[NTABS] = { "What is this?", "How to use" };
+static char *tabUrl[NTABS]  = { "/pages/about-what.pvp", "/pages/about-how.pvp" };
+static int  g_tab = 0;
+static HWND hHide, hNote;
+static int  g_wideHost = 0;          /* the host is a desktop: say so, and say why it matters */
+#define NOTE_H  46                   /* the desktop note, when there is one */
+static int  g_noteH = NOTE_H;
+static char szIniKey[] = "AboutShown";
+#define ID_HIDE 103
+static char szClass[]  = "PVAbout";
+static char szView[]   = "PVAboutView";
+static char szTitle[]  = "About";
+#else
 static char szClass[]  = "PVPage";
 static char szView[]   = "PVPageView";
 static char szTitle[]  = "Page";
+#endif
 static char szIni[]    = "PVMon";
 
 static HWND hMain, hUrl, hGet, hClose, hStatus, hView;
@@ -1107,7 +1128,7 @@ static void drop(HWND hwnd)
 {
     if (pvTimer) { KillTimer(hwnd, IDT_PUMP); pvTimer = FALSE; }
     pv_close();
-    EnableWindow(hGet, TRUE);
+    if (hGet) EnableWindow(hGet, TRUE);
 }
 
 /* Everything arrived: parse it, lay it out, realise the palette and show the top of the page. */
@@ -1134,8 +1155,13 @@ static void present(void)
         }
     }
     InvalidateRect(hView, NULL, TRUE);
+#ifdef SHELL_ABOUT
+    status("");                      /* a note about the machine does not report its own block count */
+    (void)msg;
+#else
     wsprintf(msg, "%d blocks, %luK.", g_nblk, (DWORD)(g_len / 1024L));
     status(msg);
+#endif
 }
 
 #define PV_MAX_BLOCKS 32
@@ -1171,7 +1197,7 @@ static void pv_pump(HWND hwnd)
     else present();
 }
 
-static void fetch_start(HWND hwnd)
+static void fetch_go(HWND hwnd, const char *want)
 {
     char raw_url[URL_MAX + 8], url[URL_MAX + 8], msg[URL_MAX + 40];
     unsigned len, res, st;
@@ -1180,8 +1206,13 @@ static void fetch_start(HWND hwnd)
     free_page();
     InvalidateRect(hView, NULL, TRUE);
     wr(R_PV_SEL, PV_HANDLE);
-    GetWindowText(hUrl, raw_url, sizeof(raw_url));
-    len = clean_url(raw_url, url);
+    if (want) lstrcpy(raw_url, want);
+    else GetWindowText(hUrl, raw_url, sizeof(raw_url));
+    /* A target that starts with "/" is the site's own, and the host resolves its origin: this
+       machine has no idea what it is being served from, and must not -- the same disk image is a
+       preview deployment and production. */
+    if (raw_url[0] == '/') { lstrcpy(url, raw_url); len = lstrlen(url); }
+    else len = clean_url(raw_url, url);
     if (!len) { status("Type an address."); return; }
     g_len = 0;
     hdrN = 0;
@@ -1210,12 +1241,66 @@ static void fetch_start(HWND hwnd)
     }
     wsprintf(msg, "Fetching %s...", (LPSTR)url);
     status(msg);
-    EnableWindow(hGet, FALSE);
+    if (hGet) EnableWindow(hGet, FALSE);
     if (SetTimer(hwnd, IDT_PUMP, PUMP_MS, NULL)) pvTimer = TRUE;
     else { status("No timer available."); drop(hwnd); }
 }
 
 /* ------------------------------------------------------------------ the frame window */
+#ifdef SHELL_ABOUT
+/* Windows 3.1 has no tab control -- that arrived with the 95 common controls -- so the strip is
+   drawn. Two tabs across the width: the selected one is the window's own colour with its bottom
+   edge open, the other is the face grey, and one rule runs under the strip and stops at the
+   selected tab. It is four FillRects and a few lines, and it behaves the way the reader expects:
+   a click picks a tab, and the tab loads a page. */
+static void tab_rect(HWND hwnd, int i, RECT *out)
+{
+    RECT r;
+    int w;
+    GetClientRect(hwnd, &r);
+    w = r.right / NTABS;
+    out->left = i * w;
+    out->right = (i == NTABS - 1) ? r.right : (i + 1) * w;
+    out->top = g_wideHost ? g_noteH : 0;
+    out->bottom = out->top + TAB_H;
+}
+static void draw_tabs(HWND hwnd, HDC hdc)
+{
+    RECT r, t;
+    HPEN dark = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_WINDOWFRAME));
+    HPEN oldPen = (HPEN)SelectObject(hdc, dark);
+    HFONT oldFont = (HFONT)SelectObject(hdc, (HFONT)GetStockObject(SYSTEM_FONT));
+    int i;
+    GetClientRect(hwnd, &r);
+    SetBkMode(hdc, TRANSPARENT);
+    for (i = 0; i < NTABS; i++) {
+        int on = (i == g_tab);
+        tab_rect(hwnd, i, &t);
+        {   /* the tab body */
+            HBRUSH b = CreateSolidBrush(GetSysColor(on ? COLOR_WINDOW : COLOR_BTNFACE));
+            FillRect(hdc, &t, b);
+            DeleteObject(b);
+        }
+        MoveTo(hdc, t.left, t.bottom - 1); LineTo(hdc, t.left, t.top);      /* left, top, right */
+        LineTo(hdc, t.right - 1, t.top);
+        LineTo(hdc, t.right - 1, t.bottom - 1);
+        if (!on) { MoveTo(hdc, t.left, t.bottom - 1); LineTo(hdc, t.right, t.bottom - 1); }
+        SetTextColor(hdc, GetSysColor(on ? COLOR_WINDOWTEXT : COLOR_BTNTEXT));
+        DrawText(hdc, tabName[i], -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    SelectObject(hdc, oldFont);
+    SelectObject(hdc, oldPen);
+    DeleteObject(dark);
+}
+static void load_tab(HWND hwnd, int i)
+{
+    if (i < 0 || i >= NTABS) return;
+    g_tab = i;
+    InvalidateRect(hwnd, NULL, TRUE);
+    fetch_go(hwnd, tabUrl[i]);
+}
+#endif
+
 static void layout(HWND hwnd)
 {
     RECT r;
@@ -1223,6 +1308,18 @@ static void layout(HWND hwnd)
     GetClientRect(hwnd, &r);
     w = r.right - 2 * MARGIN;
     if (w < 64) w = 64;
+#ifdef SHELL_ABOUT
+    {
+        int bottom = r.bottom - MARGIN - ROW;              /* the row with Close on it */
+        y = (g_wideHost ? g_noteH : 0) + TAB_H;
+        if (hNote) MoveWindow(hNote, MARGIN, 4, w, g_noteH - 8, TRUE);
+        MoveWindow(hStatus, MARGIN, bottom - 18, w, 16, TRUE);
+        MoveWindow(hHide, MARGIN, bottom, w - 74, ROW, TRUE);
+        MoveWindow(hClose, r.right - MARGIN - 64, bottom, 64, ROW, TRUE);
+        MoveWindow(hView, 0, y, r.right, bottom - 18 - y > 0 ? bottom - 18 - y : 1, TRUE);
+        return;
+    }
+#else
     y = MARGIN;
     MoveWindow(hUrl, MARGIN, y, w, ROW, TRUE);            y += ROW + GAP;
     MoveWindow(hGet, MARGIN, y, 64, ROW, TRUE);
@@ -1230,6 +1327,7 @@ static void layout(HWND hwnd)
     y += ROW + GAP;
     MoveWindow(hStatus, MARGIN, y, w, 16, TRUE);          y += 16 + GAP;
     MoveWindow(hView, 0, y, r.right, r.bottom - y > 0 ? r.bottom - y : 1, TRUE);
+#endif
 }
 
 LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1240,11 +1338,32 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         HFONT f = (HFONT)GetStockObject(SYSTEM_FONT);
         HWND c;
         hMain = hwnd;
+#ifdef SHELL_ABOUT
+        hUrl = 0; hGet = 0;
+        /* The host reports its own viewport in the adapter's registers, and the same rule the page
+           uses (the shorter side under 600) says whether this is a desktop. It is worth saying:
+           on a desktop none of the gestures on the other tab apply, and the machine is behaving
+           exactly as it did in 1993. */
+        {
+            unsigned hw = rd(0x10), hh = rd(0x11);
+            g_wideHost = (hw && hh) ? ((hw < hh ? hw : hh) >= 600) : 0;
+        }
+        if (g_wideHost)
+            hNote = CreateWindow("static",
+                "You are on a desktop, so this is plain Windows 3.11 and the mouse works as it "
+                "always did. Open it on a phone to see what it was built for.",
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10, hwnd, (HMENU)-1, inst, NULL);
+        hHide = CreateWindow("button", "&Don't show this again",
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                             0, 0, 10, 10, hwnd, (HMENU)ID_HIDE, inst, NULL);
+        SendMessage(hHide, BM_SETCHECK, 1, 0L);
+#else
         hUrl = CreateWindow("edit", "http://",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
                             0, 0, 10, 10, hwnd, (HMENU)ID_URL, inst, NULL);
         hGet = CreateWindow("button", "&Get", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                             0, 0, 10, 10, hwnd, (HMENU)ID_GET, inst, NULL);
+#endif
         hClose = CreateWindow("button", "&Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                               0, 0, 10, 10, hwnd, (HMENU)ID_CLOSE, inst, NULL);
         hStatus = CreateWindow("static", "Ready.", WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -1254,7 +1373,11 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         hView = CreateWindow(szView, "",
                              WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | WS_TABSTOP,
                              0, 0, 10, 10, hwnd, (HMENU)ID_VIEW, inst, NULL);
+#ifdef SHELL_ABOUT
+        if (!hView || !hClose || !hHide) return -1;      /* no address bar in this shell */
+#else
         if (!hUrl || !hView) return -1;
+#endif
         for (c = GetWindow(hwnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
             if (c != hView) SendMessage(c, WM_SETFONT, (WPARAM)f, 0L);
         style_defaults();
@@ -1281,9 +1404,40 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     case WM_SIZE:
         layout(hwnd);
         return 0;
+#ifdef SHELL_ABOUT
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        draw_tabs(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        POINT pt;
+        RECT t;
+        int i;
+        pt.x = LOWORD(lParam); pt.y = HIWORD(lParam);
+        for (i = 0; i < NTABS; i++) {
+            tab_rect(hwnd, i, &t);
+            if (PtInRect(&t, pt)) { if (i != g_tab) load_tab(hwnd, i); return 0; }
+        }
+        return 0;
+    }
+    case WM_CTLCOLOR:
+        if (HIWORD(lParam) == CTLCOLOR_STATIC || HIWORD(lParam) == CTLCOLOR_BTN) {
+            SetBkColor((HDC)wParam, GetSysColor(COLOR_WINDOW));
+            SetTextColor((HDC)wParam, GetSysColor(COLOR_WINDOWTEXT));
+            return (LRESULT)GetStockObject(WHITE_BRUSH);
+        }
+        break;
+    case WM_SETFOCUS:
+        SetFocus(hView);
+        return 0;
+#else
     case WM_SETFOCUS:
         SetFocus(hUrl);
         return 0;
+#endif
     case WM_TIMER:
         if (wParam == IDT_PUMP) {
             if (!pumping) { pumping = TRUE; pv_pump(hwnd); pumping = FALSE; }
@@ -1320,10 +1474,14 @@ LRESULT CALLBACK __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
         return 0;
     case WM_COMMAND:
-        if (wParam == ID_GET) fetch_start(hwnd);
+        if (wParam == ID_GET) fetch_go(hwnd, NULL);
         else if (wParam == ID_CLOSE) DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+#ifdef SHELL_ABOUT
+        WriteProfileString(szIni, szIniKey,
+                           (hHide && SendMessage(hHide, BM_GETCHECK, 0, 0L)) ? "1" : "0");
+#endif
         drop(hwnd);
         free_page();
         buf_free();
@@ -1343,6 +1501,24 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     HWND hwnd;
     MSG m;
 
+#ifdef SHELL_ABOUT
+    /* First run only, the contract ABOUT.EXE has always had: WIN.INI [windows] run= starts this
+       at every Windows start and it leaves at once when [PVMon] AboutShown is set. Any argument
+       overrides that -- "/show" from the Program Manager item, and "/how" from the host when the
+       URL asked for a particular tab (/about#how-to-use). */
+    {
+        const char *p = cmd;
+        int forced = 0;
+        while (*p == ' ') p++;
+        if (*p == '/' || *p == '-') {
+            char c = p[1] >= 'A' && p[1] <= 'Z' ? (char)(p[1] + 32) : p[1];
+            forced = 1;
+            if (c == 'h') g_tab = 1;                      /* /how */
+            else if (c == 'w') g_tab = 0;                 /* /what */
+        }
+        if (!forced && GetProfileInt(szIni, szIniKey, 0)) return 0;
+    }
+#endif
     if (!prev) {
         wc.style = 0; wc.lpfnWndProc = WndProc; wc.cbClsExtra = 0; wc.cbWndExtra = 0;
         wc.hInstance = inst; wc.hIcon = LoadIcon(inst, "1");
@@ -1357,11 +1533,22 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         wc.lpszClassName = szView;
         if (!RegisterClass(&wc)) return 0;
     }
+#ifdef SHELL_ABOUT
+    /* WS_POPUP | WS_CAPTION | WS_SYSMENU, not a thick frame: PVHOOK's geometry invariant then
+       leaves the window at its natural size instead of reflowing it, which is what ABOUT.EXE has
+       always wanted. */
+    hwnd = CreateWindow(szClass, szTitle, WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                        0, 0, 352, 560, NULL, NULL, inst, NULL);
+#else
     hwnd = CreateWindow(szClass, szTitle, WS_OVERLAPPEDWINDOW,
                         CW_USEDEFAULT, CW_USEDEFAULT, 352, 560, NULL, NULL, inst, NULL);
+#endif
     if (!hwnd) return 0;
     ShowWindow(hwnd, show ? show : SW_SHOW);
     UpdateWindow(hwnd);
+#ifdef SHELL_ABOUT
+    load_tab(hwnd, g_tab);
+#else
     /* An address on the command line is fetched as soon as the window is up, the way FETCH.EXE
        does it: that is what makes this reachable from a Program Manager item and from the host's
        deep links. */
@@ -1369,6 +1556,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         SetWindowText(hUrl, cmd);
         PostMessage(hwnd, WM_COMMAND, ID_GET, 0L);
     }
+#endif
     while (GetMessage(&m, NULL, 0, 0)) {
         if (!IsDialogMessage(hwnd, &m)) { TranslateMessage(&m); DispatchMessage(&m); }
     }

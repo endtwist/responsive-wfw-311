@@ -42,3 +42,4 @@ __pycache__/
 
 # page bundles: megabytes of somebody else's photographs, rebuilt by tools/mkpage.py
 pages/*.pvp
+guest/**/build-about/

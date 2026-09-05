@@ -1,0 +1,106 @@
+{
+ "blocks": [
+  {
+   "head": "Responsive WfW 3.11"
+  },
+  {
+   "sub": "Why does this exist?"
+  },
+  {
+   "para": "To create an OS-as-website."
+  },
+  {
+   "para": "I wanted to see how close I could get Windows 3.1 feeling ‘decently’ native on a modern mobile device, enabling someone to browse this OS across desktop, tablet, and mobile."
+  },
+  {
+   "para": "The rules for this included keeping as much of the work as possible within the guest (Windows) and with little-to-no HTML/CSS styling within the host (browser)."
+  },
+  {
+   "para": "This is the result."
+  },
+  {
+   "para": "This was only possible with agents; I would not have the time, patience, or attention necessary to build this without it. Consider this a form of artwork."
+  },
+  {
+   "rule": ""
+  },
+  {
+   "sub": "What was built: Guest"
+  },
+  {
+   "para": "• PVDISP.DRV: A custom display driver that connects with the emulated graphics card"
+  },
+  {
+   "para": "• PVMOUSE.DRV: A mouse driver to provide absolute pointer positioning, enabling both tap and mouse movement"
+  },
+  {
+   "para": "• PVMON.EXE: A “broker” that publishes window geometry, runs commands, and arranges the shell into a phone column."
+  },
+  {
+   "para": "• PVHOOK.DLL: A library to hook Windows’ window management, enabling us to park popups and dialogs in off-screen tiles so they never paint over their owner"
+  },
+  {
+   "para": "• PVDPI.EXE: A tool to swap SYSTEM.INI/font set for the device’s pixel density at boot"
+  },
+  {
+   "para": "• PVSYS.FON: a system font at 120dpi"
+  },
+  {
+   "para": "• LCD.EXE: A tool to control the WebGL greyscale LCD effect from within the guest"
+  },
+  {
+   "para": "• PHONE.EXE: Puts a phone-shaped frame on a desktop and makes the mouse behave like a finger"
+  },
+  {
+   "para": "• ABOUT.EXE: this"
+  },
+  {
+   "para": "• WINSOCK.DLL: A custom Winsock 1.1 to enable networking at 1MB/s+ through the host"
+  },
+  {
+   "para": "• FETCH.EXE: a fetcher to test retrieval over our socket to the host"
+  },
+  {
+   "sub": "Emulator"
+  },
+  {
+   "para": "A fork of v86 that adds:"
+  },
+  {
+   "para": "• Paravirtual display adapter: An emulated graphics card that tells Windows what shape the browser window is whenever it changes, plus the ability to copy a rectangle of pixels on command, so dragging a window or scrolling doesn’t crawl"
+  },
+  {
+   "para": "• Paravirtual socket device: enable the host to provide DNS/TCP/TLS and keeps the TCP stack out of the guest"
+  },
+  {
+   "sub": "Browser (Host)"
+  },
+  {
+   "para": "• Compositor: Cuts Windows’ screen into per-window layers and re-stacks them for mobile devices, while remaining disabled on desktop. Each window’s contents shrink to fit a phone while its title bar stays finger-sized."
+  },
+  {
+   "para": "• Touch: tap/drag/two-finger scroll/pinch, momentum, edge-swipe window cycling, long-press right-click"
+  },
+  {
+   "para": "• Emulator in a worker: moves the emulator to a worker to avoid blocking the main browser thread"
+  },
+  {
+   "para": "• LCD shader: simulate a late-1980s/early-1990s greyscale LCD panel with crosstalk bleed and backlight inconsistency"
+  },
+  {
+   "para": "• Custom “boot” screen: displays while the OS snapshot loads"
+  },
+  {
+   "para": "• Soft-keyboard accessory bar: enables Ctrl/Alt/Del/F-keys/arrows on mobile devices"
+  },
+  {
+   "para": "• Screen-reader layer: describes the open windows to a screen reader, which otherwise sees nothing but a canvas"
+  },
+  {
+   "sub": "URLs"
+  },
+  {
+   "para": "The path opens a program. /solitaire opens Solitaire, /notepad opens Notepad, /jezzball opens JezzBall, and so on. This note is /about."
+  }
+ ]
+}

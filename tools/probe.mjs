@@ -257,6 +257,7 @@ if (val("--date")) {
   console.log(`clock set to ${when.toISOString().slice(0, 16).replace("T", " ")}`);
 }
 
+const DEV_PORT = process.env.PV_DEV_PORT || 8311;   // where a "/..." target is fetched from
 const netLog = [];
 const netBytes = { in: 0, out: 0, first: 0, last: 0 };   /* what crossed to the guest, and when */
 /* The PV socket's host half. A handle opened on a URL is fetched at once; a handle opened on a
@@ -292,7 +293,11 @@ async function pvFetch(handle, url) {
   emulator.bus.send("pv-sock-data", { handle, bytes, done: true });
 }
 emulator.bus.register("pv-sock-open", d => {
-  const h = d.handle | 0, target = d.target || "";
+  const h = d.handle | 0;
+  /* Same rule as the page: a leading "/" is the site's own origin. Here that is the dev server,
+     which is where the probe's own page bundles are served from. */
+  let target = d.target || "";
+  if (target.charAt(0) === "/") target = `http://127.0.0.1:${DEV_PORT}${target}`;
   pvSocks[h] = { target, req: "", sent: false };
   if (/:\/\//.test(target)) { pvSocks[h].sent = true; pvFetch(h, target); }     // a URL: fetch it now
 });
