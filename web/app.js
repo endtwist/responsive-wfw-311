@@ -167,7 +167,7 @@ function wantDesktop() { return !narrow() && !forcePhone && !phoneSimOn(); }
  * Only on a desktop. On a real phone there is nothing to simulate, and the guard is on the true
  * viewport rather than narrow(), which by then is answering for the frame.
  */
-let phoneAsked = false;
+let phoneAsked = false, aboutAsked = false, launchedFromUrl = false;
 const PHONE_ASPECTS = [[9, 16], [9, 19.5]];
 const phoneSim = { on: params.get("phonesim") === "1", aspect: 0 };
 try {
@@ -725,6 +725,24 @@ function guestIsReady() {
   applyCursorShape();
   if (params.get("mkstate") && !restored) { uploadBootState(); return; }
   launchFromUrl();
+  /* Read Me First, once per visitor. WIN.INI [windows] run=ABOUT.EXE is how Windows would do it,
+     and the snapshot is exactly why that never fires: the machine is restored with Windows already
+     started, so run= ran once, on the build that made the snapshot.
+     Nor can the guest's own [PVMon] AboutShown decide it. That flag is set during the warm pass --
+     the box comes up and is dismissed to get a clean snapshot -- and Windows keeps WIN.INI in
+     memory, which is the memory the snapshot is. Every visitor therefore restores a machine that
+     already believes it has shown the note. So "first visit" is a fact only the host has, and it
+     is kept where the host keeps such things; /show overrides the guest's flag. A deep link is
+     someone who asked for something else, and is left alone. */
+  if (!aboutAsked && !launchedFromUrl) {
+    aboutAsked = true;
+    let seen = false;
+    try { seen = localStorage.getItem("pvAboutSeen") === "1"; } catch (e) {}
+    if (!seen) {
+      try { localStorage.setItem("pvAboutSeen", "1"); } catch (e) {}
+      setTimeout(() => sendCommandString(CMD_RUN, "ABOUT.EXE /show"), 1800);
+    }
+  }
 }
 
 emulator.bus.register("pv-debug", line => {
@@ -1005,7 +1023,7 @@ function launchFromUrl() {
     if (/^how/.test(frag)) cmd = "ABOUT.EXE /how";
     else if (/^what/.test(frag)) cmd = "ABOUT.EXE /what";
   }
-  if (cmd) sendCommandString(CMD_RUN, cmd);
+  if (cmd) { launchedFromUrl = true; sendCommandString(CMD_RUN, cmd); }
   else if (q) report("url", `?run=${q}: not a name in APPS, ignored`);
 }
 window.pvRun = cmd => sendCommandString(CMD_RUN, cmd);      // diagnostics: launch without a reload
