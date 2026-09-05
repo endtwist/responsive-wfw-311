@@ -113,7 +113,7 @@ const MIN_W = 640, MIN_H = 400, MAX_W = 2560, MAX_H = 1600;
  * and crisp instead of shrinking with them. Windows itself sees none of this: as far as it is
  * concerned the windows sit side by side on one wide screen.
  */
-import { SlipNet } from "./net.js";
+import { SlipNet, EthNet } from "./net.js";
 
 const pageStart = performance.now();
 const SHELL_W = 352;             // width of the shell column on a narrow display (must match build-image shellw=)
@@ -2806,6 +2806,41 @@ function composeForGuest(vw, vh) {
    ?net=0 leaves the port silent, which is what a guest with no Winsock installed should see. */
 let slipNet = null, slipBytes = { in: 0, out: 0 }, slipReqs = 0;
 let slipOut = [], slipOff = 0, slipDraining = false;   // the one queue for the line (see send below)
+/* What the owner does with a complete request from the guest, shared by both peers (the SLIP line
+   and the wire). The page cannot fetch arbitrary sites itself -- CORS -- so it goes out through
+   /api/fetch, which is where the TLS happens. */
+async function netRequest(peer, host, port, data, conn) {
+  const text = String.fromCharCode(...data);
+  const line = /^([A-Z]+) (\S+) HTTP\/1\.[01]/.exec(text);
+  slipReqs++;
+  if (!line) { peer.finish(conn); return; }
+  const [, method, target] = line;
+  const url = /^https?:\/\//i.test(target) ? target
+            : `http://${host}${port === 80 ? "" : ":" + port}${target.startsWith("/") ? "" : "/"}${target}`;
+  diag(`net: ${method} ${url}`);
+  report("net", `${method} ${url}`);
+  try {
+    const r = await fetch(`/api/fetch?url=${encodeURIComponent(url)}`, { method: method === "HEAD" ? "HEAD" : "GET" });
+    const body = new Uint8Array(await r.arrayBuffer());
+    const status = r.headers.get("x-upstream-status") || String(r.status);
+    const type = r.headers.get("content-type") || "text/html";
+    /* HTTP/1.0 on purpose: it is what the guest asked for, and a 1994 browser does not understand
+       chunked transfer or a keep-alive it did not request. */
+    const head = `HTTP/1.0 ${status} ${r.ok ? "OK" : "Error"}\r\n` +
+                 `Content-Type: ${type}\r\n` +
+                 `Content-Length: ${body.length}\r\n` +
+                 `Connection: close\r\n\r\n`;
+    const out = new Uint8Array(head.length + body.length);
+    for (let i = 0; i < head.length; i++) out[i] = head.charCodeAt(i) & 0xFF;
+    out.set(body, head.length);
+    peer.deliver(conn, out);
+  } catch (e) {
+    const msg = `HTTP/1.0 502 Gateway\r\nContent-Type: text/plain\r\n\r\n${host}: ${e && e.message}`;
+    peer.deliver(conn, Uint8Array.from(msg, c => c.charCodeAt(0) & 0xFF));
+  }
+  peer.finish(conn);
+}
+
 function initNet() {
   if (params.get("net") === "0") return null;
   const net = new SlipNet({
@@ -2836,37 +2871,7 @@ function initNet() {
         drain();
       }
     },
-    request: async (host, port, data, conn) => {
-      const text = String.fromCharCode(...data);
-      const line = /^([A-Z]+) (\S+) HTTP\/1\.[01]/.exec(text);
-      slipReqs++;
-      if (!line) { net.finish(conn); return; }
-      const [, method, target] = line;
-      const url = /^https?:\/\//i.test(target) ? target
-                : `http://${host}${port === 80 ? "" : ":" + port}${target.startsWith("/") ? "" : "/"}${target}`;
-      diag(`net: ${method} ${url}`);
-      report("net", `${method} ${url}`);
-      try {
-        const r = await fetch(`/api/fetch?url=${encodeURIComponent(url)}`, { method: method === "HEAD" ? "HEAD" : "GET" });
-        const body = new Uint8Array(await r.arrayBuffer());
-        const status = r.headers.get("x-upstream-status") || String(r.status);
-        const type = r.headers.get("content-type") || "text/html";
-        /* HTTP/1.0 on purpose: it is what the guest asked for, and a 1994 browser does not
-           understand chunked transfer or a keep-alive it did not request. */
-        const head = `HTTP/1.0 ${status} ${r.ok ? "OK" : "Error"}\r\n` +
-                     `Content-Type: ${type}\r\n` +
-                     `Content-Length: ${body.length}\r\n` +
-                     `Connection: close\r\n\r\n`;
-        const out = new Uint8Array(head.length + body.length);
-        for (let i = 0; i < head.length; i++) out[i] = head.charCodeAt(i) & 0xFF;
-        out.set(body, head.length);
-        net.deliver(conn, out);
-      } catch (e) {
-        const msg = `HTTP/1.0 502 Gateway\r\nContent-Type: text/plain\r\n\r\n${host}: ${e && e.message}`;
-        net.deliver(conn, Uint8Array.from(msg, c => c.charCodeAt(0) & 0xFF));
-      }
-      net.finish(conn);
-    },
+    request: (host, port, data, conn) => netRequest(net, host, port, data, conn),
     log: m => diag(`net: ${m}`),
   });
   emulator.bus.register("serial1-output-byte", byte => { slipBytes.in++; net.fromGuest([byte & 0xFF]); });
@@ -2879,6 +2884,35 @@ function initNet() {
   for (const line of ["carrier-detect", "data-set-ready", "clear-to-send"])
     emulator.bus.send(`serial1-${line}-input`, true);
   report("net", "COM2 is a SLIP line to the host");
+
+  /* The same peer on the wire, for an image running Microsoft TCP/IP-32 on v86's NE2000 rather than
+     Trumpet on COM2. Whichever the guest is configured for, the host answers; they share nothing
+     but the request handler.
+     Frames are paced: the card drops silently once its 16 KB receive ring fills, and a TCP window's
+     worth arrives from us in a single turn -- handing them all over at once loses most of them and
+     the retransmission timer then papers over it at a third of the speed. The emulator runs in a
+     worker here, so the ring cannot be inspected the way tools/probe.mjs does; eight frames a turn
+     is the approximation, which is about what the ring holds. */
+  const ethQ = [];
+  let ethDraining = false;
+  const ethSend = frame => {
+    ethQ.push(frame);
+    if (ethDraining) return;
+    ethDraining = true;
+    const drain = () => {
+      for (let i = 0; i < 8 && ethQ.length; i++) emulator.bus.send("net0-receive", ethQ.shift());
+      if (ethQ.length) setTimeout(drain, 0);
+      else ethDraining = false;
+    };
+    drain();
+  };
+  const eth = new EthNet({
+    send: frame => { slipBytes.out += frame.length; ethSend(frame); },
+    request: (host, port, data, conn) => netRequest(eth, host, port, data, conn),
+    log: m => diag(`net: ${m}`),
+  });
+  emulator.bus.register("net0-send", frame => { slipBytes.in += frame.length; eth.fromGuest(frame); });
+  report("net", "the NE2000 is a wire to the host");
   return net;
 }
 window.pvNet = () => ({ on: !!slipNet, bytes: slipBytes, requests: slipReqs,

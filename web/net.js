@@ -353,4 +353,73 @@ export class SlipNet {
   }
 }
 
+
+/* --------------------------------------------------------------------------------- ethernet ---
+ * The same peer, on a wire instead of a serial line. Microsoft TCP/IP-32 talks to v86's NE2000
+ * through WFW's NDIS stack, and what arrives is whole ethernet frames rather than a byte at a
+ * time -- which is the entire point of going to the trouble: the guest stops spending its CPU on
+ * SLIP unescaping, and the host stops spending a postMessage per byte.
+ *
+ * Everything above IP is unchanged and inherited. This adds two things and nothing else: the
+ * fourteen bytes of ethernet header, and an ARP responder, because a host that will not answer
+ * "who has 10.0.2.2" is a host the guest cannot send its first packet to.
+ */
+const ETH_IP4 = 0x0800, ETH_ARP = 0x0806;
+const BROADCAST = Uint8Array.of(0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
+
+export class EthNet extends SlipNet {
+  constructor(opts = {}) {
+    super(opts);
+    /* Locally administered, so it can never collide with a real card. The guest's own MAC is
+       whatever v86 gave its NE2000; we learn it from the first frame rather than assuming. */
+    this.mac = opts.mac || Uint8Array.of(0x52, 0x54, 0x00, 0x12, 0x34, 0x56);
+    this.guestMac = null;
+  }
+
+  fromGuest(frame) {
+    if (!frame || frame.length < 14) return;
+    const f = frame instanceof Uint8Array ? frame : Uint8Array.from(frame);
+    this.guestMac = f.subarray(6, 12).slice();          // learned, never assumed
+    const type = (f[12] << 8) | f[13];
+    if (type === ETH_ARP) return this.onArp(f.subarray(14));
+    if (type === ETH_IP4) return this.onIp(f.subarray(14));
+  }
+
+  toGuest(packet) { this.sendEth(ETH_IP4, packet); }
+
+  sendEth(type, payload) {
+    /* 60 bytes minimum on the wire, zero padded: a short frame is a runt and a careful driver
+       throws it away. */
+    const n = Math.max(60, 14 + payload.length);
+    const f = new Uint8Array(n);
+    f.set(this.guestMac || BROADCAST, 0);
+    f.set(this.mac, 6);
+    f[12] = (type >> 8) & 255; f[13] = type & 255;
+    f.set(payload, 14);
+    this.sendRaw(f);
+  }
+
+  /* ARP, the half of it a gateway needs: answer requests, learn from anything that arrives.
+     We answer for every address except the guest's own, because on this wire there is nothing
+     else -- names resolve into 10.64/16 and, depending on the mask the guest was given, it may
+     ask for those directly rather than for the gateway. */
+  onArp(a) {
+    if (a.length < 28) return;
+    const oper = (a[6] << 8) | a[7];
+    const spa = (a[14] << 24 | a[15] << 16 | a[16] << 8 | a[17]) >>> 0;
+    const tpa = (a[24] << 24 | a[25] << 16 | a[26] << 8 | a[27]) >>> 0;
+    if (spa && spa !== this.hostIp) this.guestIp = spa;
+    if (oper !== 1 || tpa === spa || tpa === this.guestIp) return;   // a request for someone else
+    const r = new Uint8Array(28);
+    r[0] = 0; r[1] = 1; r[2] = ETH_IP4 >> 8; r[3] = ETH_IP4 & 255;   // ethernet, IPv4
+    r[4] = 6; r[5] = 4; r[6] = 0; r[7] = 2;                          // reply
+    r.set(this.mac, 8);
+    r[14] = (tpa >>> 24) & 255; r[15] = (tpa >>> 16) & 255; r[16] = (tpa >>> 8) & 255; r[17] = tpa & 255;
+    r.set(a.subarray(8, 14), 18);                                    // back to whoever asked
+    r.set(a.subarray(14, 18), 24);
+    this.sendEth(ETH_ARP, r);
+    this.log(`arp: told ${ipStr(spa)} that ${ipStr(tpa)} is us`);
+  }
+}
+
 export const _internals = { checksum, ip4, ipStr };

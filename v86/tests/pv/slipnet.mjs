@@ -5,7 +5,7 @@
  * out of the pool, and a TCP connection carried from handshake to close with a request handed over
  * and a response streamed back. Run: node v86/tests/pv/slipnet.mjs
  */
-import { SlipNet, SlipReader, slipEncode, _internals } from "../../../web/net.js";
+import { SlipNet, EthNet, SlipReader, slipEncode, _internals } from "../../../web/net.js";
 
 let checks = 0, failures = 0;
 function eq(got, want, what) {
@@ -176,6 +176,56 @@ function tcpSeg(sport, dport, seq, ack, flags, payload) {
 /* ---------------------------------------------------------------- an address is an address */
 {
   eq(ipStr(ip4(192, 168, 4, 62)), "192.168.4.62", "addresses print as people write them");
+}
+
+/* ---------------------------------------------------------------- ethernet and ARP */
+{
+  const out = [];
+  const net = new EthNet({ send: f => out.push(Uint8Array.from(f)), log: () => {} });
+  const GUEST_MAC = [0x00, 0x22, 0x15, 0xAA, 0xBB, 0xCC];
+  const ethFrame = (type, payload) => {
+    const f = new Uint8Array(14 + payload.length);
+    f.set([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], 0);
+    f.set(GUEST_MAC, 6);
+    f[12] = type >> 8; f[13] = type & 255;
+    f.set(payload, 14);
+    return f;
+  };
+  /* who has 10.0.2.2? */
+  const arp = new Uint8Array(28);
+  arp[1] = 1; arp[2] = 0x08; arp[5] = 4; arp[4] = 6; arp[7] = 1;      // ethernet/IPv4, request
+  arp.set(GUEST_MAC, 8);
+  arp.set([10, 0, 2, 15], 14);
+  arp.set([10, 0, 2, 2], 24);
+  net.fromGuest(ethFrame(0x0806, arp));
+  eq(out.length, 1, "an ARP request is answered");
+  const r = out[0];
+  eq([...r.subarray(0, 6)], GUEST_MAC, "the reply goes back to the card that asked");
+  eq([r[12], r[13]], [0x08, 0x06], "as ARP");
+  eq(r.length >= 60, true, "padded to the minimum frame size");
+  const a = r.subarray(14);
+  eq([a[6], a[7]], [0, 2], "and it is a reply");
+  eq([...a.subarray(8, 14)], [...net.mac], "carrying our own MAC");
+  eq([...a.subarray(14, 18)], [10, 0, 2, 2], "for the address that was asked about");
+  eq([...a.subarray(24, 28)], [10, 0, 2, 15], "addressed back to the asker");
+
+  /* a request for the guest's own address is not ours to answer */
+  const own = Uint8Array.from(arp); own.set([10, 0, 2, 15], 24);
+  const before = out.length;
+  net.fromGuest(ethFrame(0x0806, own));
+  eq(out.length, before, "a request for the guest's own address is left alone");
+
+  /* and a ping, carried in a frame this time */
+  const echo = new Uint8Array(12);
+  echo[0] = 8; echo[4] = 0x12; echo[5] = 0x34; echo[8] = 0xAB;
+  const ck = checksum(echo, 0, echo.length);
+  echo[2] = (ck >> 8) & 255; echo[3] = ck & 255;
+  net.fromGuest(ethFrame(0x0800, ipPacket(1, GUEST, ip4(10, 0, 2, 2), echo)));
+  eq(out.length, before + 1, "a ping inside a frame is answered");
+  const reply = out[out.length - 1];
+  eq([...reply.subarray(0, 6)], GUEST_MAC, "the reply is addressed to the guest's card");
+  eq([reply[12], reply[13]], [0x08, 0x00], "as IPv4");
+  eq(body(reply.subarray(14))[0], 0, "and it is an echo reply");
 }
 
 console.log(`${checks - failures}/${checks} checks passed`);

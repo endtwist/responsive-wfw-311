@@ -3855,3 +3855,31 @@ and taught nothing. Any experiment on `SYSTEM.INI` has to write all three copies
 **Still to do before this replaces the SLIP line:** `web/net.js` needs an ethernet layer -- frames
 and an ARP responder under the existing IP/ICMP/UDP/TCP code -- and the host has to be wired to
 `net0-send` / `net0-receive` instead of `serial1-*`.
+
+### 2026-09-04 — the wire works, and it is slower than the serial line
+`web/net.js` grew an ethernet layer: `EthNet` extends `SlipNet`, overriding only the two framing
+methods and adding an ARP responder. Everything from IP upwards is inherited unchanged. 50/50 checks
+in `v86/tests/pv/slipnet.mjs`. Both peers now run at once in the host and in the probe -- an image
+with Trumpet on COM2 uses one, an image with Microsoft TCP/IP-32 on the NE2000 uses the other, and
+they share nothing but the request handler.
+
+**It works.** Microsoft's own PING.EXE over the card: ARP resolved (`arp: told 10.0.2.15 that
+10.0.2.2 is us`), three echoes, three replies. FETCH.EXE pulls a megabyte of Wikipedia through it.
+
+**Frames have to be paced.** v86's NE2000 drops a frame silently when its receive ring fills, and
+the ring is 16 KB -- about eleven full-size frames -- while a TCP window's worth arrives from the
+host in one turn. Handing them all over at once loses most of them, and the retransmission timer
+papers over the loss: **39.2 KB/s**, with 1,136,166 bytes sent for a 1,013,000-byte page. Queueing
+and only handing the card a frame when its ring has room -- computed the same way the card computes
+it -- gives **130.6 KB/s** and 1,013,151 bytes sent, i.e. no retransmission at all. (In the browser
+the emulator is in a worker and the ring cannot be inspected, so a fixed credit of eight frames a
+turn stands in for it.)
+
+**And then the honest result: 130 KB/s against the SLIP line's 246.** The guest is CPU-bound either
+way -- 29.7-32.1 MIPS during the transfer, the same as on SLIP -- so the comparison is instructions
+per byte: about 122 for Trumpet over SLIP, about 238 for Microsoft TCP/IP-32 over NDIS. The
+transport was never the bottleneck once Trumpet's 2 KB window was opened; the stack on top of it is,
+and Microsoft's is twice the price of Trumpet's. Going to ethernet made the guest slower.
+
+So the ethernet path is built, tested and working, and it is not currently the fast one. What it
+would take to beat SLIP is a lighter stack over the card rather than a faster wire under the stack.

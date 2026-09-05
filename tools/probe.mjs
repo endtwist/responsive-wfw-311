@@ -73,7 +73,7 @@ for (let i = 0; i < args.length; i++) {
 }
 
 const { V86 } = await import(path.join(root, "v86/src/browser/starter.js"));
-const { SlipNet } = await import(path.join(root, "web/net.js"));
+const { SlipNet, EthNet } = await import(path.join(root, "web/net.js"));
 const { trackGuest } = await import(path.join(root, "web/selftest.js"));
 
 let IMAGE = val("--image"), STATE = val("--state");
@@ -251,6 +251,23 @@ if (val("--date")) {
 }
 
 const netLog = [];
+/* What the owner does with a complete request, shared by both peers. --net-live fetches for real;
+   without it the guest gets a stub, which is enough to prove the path. */
+async function netRequest(peer, host, port, data, conn) {
+  const text = String.fromCharCode(...data);
+  netLog.push(`request ${host}:${port} ${text.split("\r\n")[0]}`);
+  let body = `<html><body><h1>${host}</h1></body></html>`;
+  if (flag("--net-live")) {
+    const m = /^([A-Z]+) (\S+)/.exec(text);
+    try {
+      const r = await fetch(`http://${host}${m ? m[2] : "/"}`);
+      body = await r.text();
+    } catch (e) { body = `could not reach ${host}: ${e.message}`; }
+  }
+  const head = `HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`;
+  peer.deliver(conn, Uint8Array.from(head + body, c => c.charCodeAt(0) & 0xFF));
+  peer.finish(conn);
+}
 const netBytes = { in: 0, out: 0, first: 0, last: 0 };   /* what crossed the line, and when */
 const slip = new SlipNet({
   send: bytes => {
@@ -259,21 +276,7 @@ const slip = new SlipNet({
     netBytes.last = performance.now();
     for (const b of bytes) emulator.bus.send("serial1-input", b);   // one turn, in order
   },
-  request: async (host, port, data, conn) => {
-    const text = String.fromCharCode(...data);
-    netLog.push(`request ${host}:${port} ${text.split("\r\n")[0]}`);
-    let body = `<html><body><h1>${host}</h1></body></html>`;
-    if (flag("--net-live")) {
-      const m = /^([A-Z]+) (\S+)/.exec(text);
-      try {
-        const r = await fetch(`http://${host}${m ? m[2] : "/"}`);
-        body = await r.text();
-      } catch (e) { body = `could not reach ${host}: ${e.message}`; }
-    }
-    const head = `HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`;
-    slip.deliver(conn, Uint8Array.from(head + body, c => c.charCodeAt(0) & 0xFF));
-    slip.finish(conn);
-  },
+  request: (host, port, data, conn) => netRequest(slip, host, port, data, conn),
   log: m => netLog.push(m),
 });
 /* COM1 as a serial console. DOS can be told to send its output there (AUTOEXEC "> COM1"), which is
@@ -292,6 +295,52 @@ emulator.bus.register("pv-debug", line => {
 });
 
 emulator.bus.register("serial1-output-byte", byte => { netBytes.in++; slip.fromGuest([byte & 0xFF]); });
+
+/* The same peer again, on the wire instead of the serial line: whichever the image is configured
+   for, the host answers. An image with Trumpet on COM2 uses the one above; an image with Microsoft
+   TCP/IP-32 on the NE2000 uses this one. They share nothing but the request handler. */
+/* Frames are paced to the card's receive ring. v86's NE2000 drops a frame silently when the ring
+   is full ("Buffer full, dropping packet"), and the ring is 16 KB of card memory -- about eleven
+   full-size frames -- while a TCP window's worth arrives from us in a single turn. Handing them all
+   over at once loses most of them, and the retransmission timer then papers over it at 39 KB/s.
+   So: queue, and only hand the card a frame when its ring has room, which is computed the same way
+   the card computes it. */
+const ethQueue = [];
+let ethDraining = false;
+function ringRoom(bytes) {
+  const n = emulator.v86.cpu.devices.net;
+  if (!n || !n.boundary) return true;                     // not initialised yet: let it through
+  const need = ((bytes + 4 + 255) >> 8) + 1;
+  const avail = n.boundary > n.curpg ? n.boundary - n.curpg
+                                     : n.pstop - n.curpg + n.boundary - n.pstart;
+  return avail > need + 2;                                // a little headroom, so a burst cannot wrap
+}
+function ethSend(frame) {
+  ethQueue.push(frame);
+  if (ethDraining) return;
+  ethDraining = true;
+  const drain = () => {
+    while (ethQueue.length && ringRoom(ethQueue[0].length)) emulator.bus.send("net0-receive", ethQueue.shift());
+    if (ethQueue.length) setTimeout(drain, 1);
+    else ethDraining = false;
+  };
+  drain();
+}
+const eth = new EthNet({
+  send: frame => {
+    netBytes.out += frame.length;
+    if (!netBytes.first) netBytes.first = performance.now();
+    netBytes.last = performance.now();
+    ethSend(frame);
+  },
+  request: (host, port, data, conn) => netRequest(eth, host, port, data, conn),
+  log: m => netLog.push(m),
+});
+emulator.bus.register("net0-send", frame => {
+  netBytes.in += frame.length;
+  if (!netBytes.first) netBytes.first = performance.now();
+  eth.fromGuest(frame);
+});
 /* The modem's control lines. A real 14k4 on the end of the cable asserts DCD, DSR and CTS, and
    Trumpet's SLIP driver -- like every other 1994 stack -- will not transmit a byte until CTS is
    there: hardware handshaking is on by default. Without these the line is open, the guest says
