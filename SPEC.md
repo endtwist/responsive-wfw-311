@@ -4006,6 +4006,15 @@ over 2.5 s while the host waits for PVMON to say the desktop is arranged. Progre
 backwards. At `desktopReady` the bar snaps full and stays up for another 200 ms, so it is seen full
 rather than cut away at ninety-something.
 
+Two cuts of the artwork ship: the 3:4 panel and a 9:19-ish one drawn for a phone
+(`boot-splash-tall.webp`). Both load, and the one whose proportions are closer to the viewport's is
+the one drawn -- a ratio comparison rather than a breakpoint, so a phone in landscape and a tablet
+in portrait each get whichever fills their shape. The bar is sized off the artwork's own drawn
+width, not off the viewport: scaled to the viewport it collapsed to a hairline on anything wide and
+short, since the artwork is fitted to the height there and the panel is small while the window is
+not. Two passes settle it, the artwork's size depending on the room the bar leaves and the bar's on
+the artwork.
+
 A real cold boot (`?fresh=1`, or a restore that fails) turns it off: that one has a genuine logo of
 its own. `?splash=1` holds it up with the bar looping, for looking at it without waiting for a load;
 `?nosplash=1` turns it off. The chunk geometry starts from the reference sheet -- a chunk is 0.39 of the

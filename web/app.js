@@ -2349,15 +2349,26 @@ function blit(g, src, sx, sy, sw, sh, dx, dy, dw, dh) {
  * between them, filling left to right. Nothing is animated for its own sake -- every chunk stands
  * for bytes that have actually arrived. */
 const SPLASH_BG = "#3ea6c8";                  // the artwork's own field, so the first frame is already blue
-const splash = { img: null, on: !(params.get("fresh") || params.get("mkstate") || params.get("nosplash")),
+const splash = { img: null, tall: null, on: !(params.get("fresh") || params.get("mkstate") || params.get("nosplash")),
                  p: 0, phase: "starting",
                  /* ?splash=1 keeps it up and runs the bar on a loop: the boot screen is over in
                     two seconds on a warm visit, which is no way to look at one you are drawing. */
                  hold: params.get("splash") === "1", doneAt: 0 };
-{
+/* Two cuts of the artwork: the 3:4 panel, and a 9:19-ish one drawn for a phone. Both are loaded,
+   and the one whose proportions are closer to the viewport's is the one that gets drawn -- a ratio
+   comparison rather than a breakpoint, so a tablet in portrait, a phone in landscape and a desktop
+   window each get whichever actually fills their shape. */
+for (const [key, src] of [["img", "boot-splash.webp"], ["tall", "boot-splash-tall.webp"]]) {
   const img = new Image();
-  img.onload = () => { splash.img = img; };
-  img.src = "boot-splash.webp";
+  img.onload = () => { splash[key] = img; };
+  img.src = src;
+}
+function splashArt(vw, vh) {
+  const a = splash.img, b = splash.tall;
+  if (!a) return b || null;
+  if (!b) return a;
+  const fit = im => Math.abs(Math.log((im.height / im.width) / (vh / vw)));
+  return fit(b) < fit(a) ? b : a;
 }
 /* Progress only ever goes forward: the phases below overlap in time (a local snapshot arrives
    while the shipped one is still being fetched) and a bar that went backwards would be worse than
@@ -2408,14 +2419,23 @@ function drawChunkBar(g, x, y, w, h, p) {
 function drawBootSplash(g, vw, vh) {
   g.fillStyle = SPLASH_BG;
   g.fillRect(0, 0, vw, vh);
-  const img = splash.img;
-  const pad = Math.round(Math.min(vw, vh) * 0.05);
-  const barH = Math.max(14, Math.round(Math.min(vh * 0.028, 30)));
-  const gapH = Math.round(barH * 1.4);
+  const img = splashArt(vw, vh);
   if (!img) return;                                     // still decoding: the field alone, not black
-  const availW = vw - 2 * pad, availH = vh - 2 * pad - gapH - barH;
-  const sc = Math.min(availW / img.width, availH / img.height);
-  const dw = Math.round(img.width * sc), dh = Math.round(img.height * sc);
+  const pad = Math.round(Math.min(vw, vh) * 0.05);
+  /* The bar belongs to the panel above it, not to the window. Sized off the viewport it collapsed
+     to a hairline on anything wide and short -- the artwork is fitted to the HEIGHT there, so the
+     panel is small while the viewport is not, and a bar scaled to the viewport had chunks two
+     pixels wide. Sized off the artwork's own drawn width it keeps its weight at every shape.
+     Two passes, because the artwork's size depends on the room the bar leaves and the bar's size
+     depends on the artwork; one round trip is enough to settle it. */
+  let barH = Math.max(14, Math.round(Math.min(vw, vh) * 0.05)), dw = 0, dh = 0;
+  for (let pass = 0; pass < 2; pass++) {
+    const availW = vw - 2 * pad, availH = vh - 2 * pad - Math.round(barH * 1.4) - barH;
+    const sc = Math.min(availW / img.width, availH / img.height);
+    dw = Math.round(img.width * sc); dh = Math.round(img.height * sc);
+    barH = Math.max(14, Math.min(36, Math.round(dw * 0.075)));
+  }
+  const gapH = Math.round(barH * 1.4);
   const top = Math.round((vh - (dh + gapH + barH)) / 2);
   g.drawImage(img, Math.round((vw - dw) / 2), top, dw, dh);
   drawChunkBar(g, Math.round((vw - dw) / 2), top + dh + gapH, dw, barH, splashProgress());
