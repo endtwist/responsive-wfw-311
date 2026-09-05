@@ -19,11 +19,12 @@
 #        [spooler=yes|no] [printer=PSCRIPT|TTY]  -- which of the two installed printers is the default:
 #        "PDF Printer" (PSCRIPT.DRV, HP LaserJet III PostScript, graphics) or "Text Printer" (TTY.DRV,
 #        Generic / Text Only); both print to the file port C:\PRINT.PRN, which PVMON ships to the host.
+#        [warm=1|0]   -- after building, make the boot snapshot current.json names (default 1)
 #        [games=1|0]  -- install changes/games/ as C:\GAMES with Program Manager items (default 1)
 set -euo pipefail
 cd "$(dirname "$0")"
-DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1
-for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; games=*) GAMES=${a#*=};; esac; done
+DISPLAY_DRV=vga; RES=1; DPI=96; BOOT=win; IMG=work.img; LOAD=; LIVE=0; SHELLW=0; SHELLH=0; SYSFONT=; MOUSEDRV=; SOUND=; SPOOLER=yes; PRINTER=PSCRIPT; FAKESCREEN=1; HOOKCLAMP=1; GAMES=1; WARM=1
+for a in "$@"; do case $a in display=*) DISPLAY_DRV=${a#*=};; res=*) RES=${a#*=};; dpi=*) DPI=${a#*=};; boot=*) BOOT=${a#*=};; out=*) IMG=${a#*=};; load=*) LOAD=${a#*=};; live=*) LIVE=${a#*=};; shellw=*) SHELLW=${a#*=};; sysfont=*) SYSFONT=${a#*=};; shellh=*) SHELLH=${a#*=};; mouse=*) MOUSEDRV=${a#*=};; sound=*) SOUND=${a#*=};; spooler=*) SPOOLER=${a#*=};; printer=*) PRINTER=${a#*=};; fakescreen=*) FAKESCREEN=${a#*=};; hookclamp=*) HOOKCLAMP=${a#*=};; games=*) GAMES=${a#*=};; warm=*) WARM=${a#*=};; esac; done
 OFF=16384; M="-i $IMG@@$OFF"
 cp wfw311-base.img $IMG
 shopt -s nullglob
@@ -212,3 +213,19 @@ for d in parts/*-[0-9]*-[0-9]*; do
   [ -f "${d#parts/}.img" ] || rm -rf "$d"
 done
 echo "current: $BASE-$STAMP.img + boot-$STAMP.state.gz"
+
+# The snapshot current.json names has to exist, or the page fetches a 404 and the build is a dud.
+# It used to be a documented manual step and was forgotten three times in one day, each time leaving
+# a broken pair behind, so the build makes it. Warming it by opening and closing the usual programs
+# is what gives a first open its speed: their code is paged in and their windows measured before
+# anyone visits. warm=0 skips it, which is what a boot=dos or otherwise headless variant wants.
+if [ "$WARM" != 0 ] && [ "$BOOT" = win ]; then
+  echo "warming $BASE-$STAMP..."
+  ( cd .. && node tools/probe.mjs --image "image/$BASE-$STAMP.img" --state none \
+      --save "image/boot-$STAMP.state.gz" \
+      run:NOTEPAD.EXE until:'W:Notepad' close run:PBRUSH.EXE until:'W:Paintbrush' close \
+      run:WINFILE.EXE until:'W:File.Manager' close run:SOL.EXE until:'W:Solitaire' close \
+      run:FETCH.EXE until:'W:Fetch' close dismiss wait:800 >/dev/null ) \
+    && echo "warmed: $(cd . && ls -la "boot-$STAMP.state.gz" | awk '{print $5}') bytes" \
+    || echo "WARNING: warming failed -- current.json names a snapshot that does not exist" >&2
+fi

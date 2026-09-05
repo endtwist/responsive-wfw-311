@@ -261,25 +261,29 @@ Finished, newest work last within its number. Numbers are for life.
     within two seconds the old scale-to-fit comes back so nothing is stranded off the edge. The
     saved first frame is only shown to a window the same shape as the one that saved it.
 
-8. ~~**Networking.**~~ Done 2026-09-04 (SPEC). The guest is on the internet, over a dial-up link
-   that does not exist, and every piece of it in the guest is period software:
-   - **The host is the terminal server** (`web/net.js`): SLIP framing, IPv4, ICMP echo, a DNS
-     responder that hands every name an address out of 10.64/16 and remembers whose it is, and
-     enough TCP for a handshake, in-order data with the guest's own window and MSS respected, and a
-     close. 37/37 checks in `v86/tests/pv/slipnet.mjs`, no emulator needed.
+8. ~~**Networking.**~~ Done 2026-09-04 (SPEC). The guest is on the internet at **upwards of
+   1.6 MB/s**, and it has no TCP stack at all.
+   - **The device** (`v86/src/vga.js`): eight handles on the adapter's own index/data pair. The
+     guest names a target, sends its request and reads the reply back a word at a time out of a
+     data register that advances as it is read -- `rep insw` in all but name, one guest instruction
+     per two bytes. The host does the DNS, the TCP and the TLS.
    - **The real internet is a function** (`api/fetch.js`): GET and HEAD only, http/https only,
      private and loopback refused, 4 MB and 15 s limits, a period user agent. The guest asks for
      plain HTTP and gets what the site serves over TLS, knowing nothing about it.
-   - **The stack in the guest is Trumpet Winsock 3.0** (Josh's own copy, registered), on COM2 at
-     38400, `TRUMPWSK.INI` baked into the image so a cold boot comes up configured and registered,
-     and TCPMAN in WIN.INI `load=` so it is resident and iconic from the moment the desktop is up.
-   - **The client is FETCH.EXE** (`guest/fetch`), because Windows for Workgroups shipped no HTTP
-     client: a native Win16 window, an asynchronous socket (`WSAAsyncSelect`), Winsock taken by
-     ordinal out of `WINSOCK.DLL`, and an item in Main. `FETCH.EXE <url>` fetches on open, so a
-     deep link can reach it.
-   - Not yet: UDP beyond DNS, more than one connection at a time (the code allows it, nothing has
-     tested it), retransmission (this link never drops a packet, and a 1994 stack retransmits at us
-     anyway, which the sequence handling tolerates).
+   - **`WINSOCK.DLL` is ours** (`guest/winsock`): Windows Sockets 1.1 over that device, all 47
+     ordinals exported, in `C:\WINDOWS` where it beats anything on the PATH. So any period Winsock
+     program gets this speed unmodified -- proved by `guest/wstest`, which imports by ordinal and
+     reads a complete HTTP response. `guest/fetch` (FETCH.EXE) drives the device directly and keeps
+     handle 7 to itself.
+   - **Why not a real stack:** both were built and measured first. Trumpet Winsock over SLIP managed
+     246 KB/s at about 122 guest instructions a byte; Microsoft TCP/IP-32 over NDIS on an emulated
+     NE2000 managed 130 KB/s at about 238. The guest is CPU-bound at ~31 MIPS either way, and a
+     megabyte a second needs about 30 instructions a byte, which no 1994 stack approaches. Both are
+     removed; SPEC keeps the account.
+   - Not yet: no inbound path, so no `accept`/`listen` and no datagrams; no half-close; and a
+     refused connection surfaces as an error on the first read rather than a failed `connect`. None
+     of that stops a browser, and raw TCP would need a WebSocket relay the page does not have.
+
 
 ## Known, not yet scheduled
 
