@@ -204,7 +204,11 @@ ls -t *-[0-9]*-[0-9]*.img 2>/dev/null | tail -n +4 | while read f; do
   rm -f "$f" "boot-$st.state.gz"
   rm -rf "parts/${f%.img}"
 done
-ls -td parts/*-[0-9]*-[0-9]* 2>/dev/null | tail -n +4 | while read d; do
+# Parts belong to an image: if the image has gone, so have they. Keeping the newest three by date
+# was wrong -- it left 65 MB of chunks for images that no longer existed, and none for the one that
+# did.
+for d in parts/*-[0-9]*-[0-9]*; do
+  [ -d "$d" ] || continue
   [ -f "${d#parts/}.img" ] || rm -rf "$d"
 done
 echo "current: $BASE-$STAMP.img + boot-$STAMP.state.gz"
